@@ -150,16 +150,26 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter className="border-t border-sidebar-border p-2">
-        <div className={cn("flex items-center gap-1", collapsed ? "flex-col" : "flex-row")}>
+        <div className={cn("flex items-center", collapsed ? "flex-col gap-1" : "flex-row justify-between")}>
           {/* User menu */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0">
+              <Button variant="ghost" className={cn("shrink-0", collapsed ? "h-9 w-9 p-0" : "h-auto gap-2 px-2 py-1.5")}>
                 <Avatar className="h-7 w-7">
                   <AvatarFallback className="bg-sidebar-primary text-sidebar-primary-foreground text-xs">
                     {user ? getInitials(user.name) : '?'}
                   </AvatarFallback>
                 </Avatar>
+                {!collapsed && (
+                  <div className="flex flex-col items-start text-left">
+                    <span className="text-sm font-medium text-sidebar-foreground">
+                      {user?.name}
+                    </span>
+                    <span className="text-xs capitalize text-sidebar-foreground/60">
+                      {user?.role}
+                    </span>
+                  </div>
+                )}
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent side="top" align="start" className="w-56">
