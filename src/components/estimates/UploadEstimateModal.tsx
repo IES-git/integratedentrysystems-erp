@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Upload, FileText, X, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -21,6 +22,7 @@ interface UploadedFile {
   status: 'pending' | 'processing' | 'done' | 'error';
   progress: number;
   error?: string;
+  estimateId?: string;
 }
 
 interface UploadEstimateModalProps {
@@ -30,6 +32,7 @@ interface UploadEstimateModalProps {
 }
 
 export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: UploadEstimateModalProps) {
+  const navigate = useNavigate();
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -136,7 +139,7 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
 
     setFiles((prev) =>
       prev.map((f) =>
-        f.id === uploadedFile.id ? { ...f, status: 'done' as const, progress: 100 } : f
+        f.id === uploadedFile.id ? { ...f, status: 'done' as const, progress: 100, estimateId: estimate.id } : f
       )
     );
 
@@ -157,9 +160,12 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
 
     setIsProcessing(true);
 
+    let lastEstimateId: string | undefined;
+
     for (const file of pendingFiles) {
       try {
-        await simulateOCR(file);
+        const estimate = await simulateOCR(file);
+        lastEstimateId = estimate.id;
       } catch {
         setFiles((prev) =>
           prev.map((f) =>
@@ -172,12 +178,15 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
     }
 
     setIsProcessing(false);
-    toast({
-      title: 'Processing complete',
-      description: `${pendingFiles.length} file(s) processed successfully.`,
-    });
     
     onUploadComplete?.();
+
+    // Navigate to wizard with the first processed estimate
+    if (lastEstimateId) {
+      setFiles([]);
+      onOpenChange(false);
+      navigate(`/app/estimates/wizard?id=${lastEstimateId}`);
+    }
   };
 
   const handleClose = () => {

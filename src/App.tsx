@@ -11,6 +11,7 @@ import DashboardPage from "@/pages/DashboardPage";
 import CustomersPage from "@/pages/CustomersPage";
 import EstimatesListPage from "@/pages/EstimatesListPage";
 import EstimateUploadPage from "@/pages/EstimateUploadPage";
+import EstimateWizardPage from "@/pages/EstimateWizardPage";
 import QuotesPage from "@/pages/QuotesPage";
 import OrdersPage from "@/pages/OrdersPage";
 import TemplatesPage from "@/pages/TemplatesPage";
@@ -45,6 +46,7 @@ const App = () => (
                 {/* Estimates */}
                 <Route path="estimates" element={<EstimatesListPage />} />
                 <Route path="estimates/new" element={<EstimateUploadPage />} />
+                <Route path="estimates/wizard" element={<EstimateWizardPage />} />
                 
                 {/* Quotes */}
                 <Route path="quotes" element={<QuotesPage />} />
