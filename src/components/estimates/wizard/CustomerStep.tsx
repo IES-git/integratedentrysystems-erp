@@ -1,9 +1,8 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Search, User, UserX, Building2, CheckCircle2, AlertCircle, Circle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
@@ -18,7 +17,7 @@ export interface ExtractedCustomerData {
   confidence: number;
 }
 
-type SelectionMode = 'ocr' | 'existing' | 'none' | null;
+type SelectionMode = 'ocr' | 'existing' | 'none';
 
 interface CustomerStepProps {
   extractedCustomer: ExtractedCustomerData | null;
@@ -38,24 +37,21 @@ export function CustomerStep({
   onNext,
 }: CustomerStepProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  
-  // Determine current selection mode
-  const getSelectionMode = (): SelectionMode => {
+  const [selectionMode, setSelectionMode] = useState<SelectionMode | null>(() => {
+    // Initialize based on current state
     if (noCustomer) return 'none';
-    if (selectedCustomerId) {
-      // Check if selected customer matches OCR
-      if (extractedCustomer?.name) {
-        const match = customers.find(
-          (c) => c.name.toLowerCase() === extractedCustomer.name?.toLowerCase()
-        );
-        if (match && match.id === selectedCustomerId) return 'ocr';
-      }
-      return 'existing';
-    }
+    if (selectedCustomerId) return 'existing';
     return null;
-  };
-  
-  const selectionMode = getSelectionMode();
+  });
+  const [selectedInList, setSelectedInList] = useState<string | null>(selectedCustomerId);
+
+  // Find OCR matched customer
+  const ocrMatchedCustomer = useMemo(() => {
+    if (!extractedCustomer?.name) return null;
+    return customers.find(
+      (c) => c.name.toLowerCase() === extractedCustomer.name?.toLowerCase()
+    ) || null;
+  }, [extractedCustomer, customers]);
 
   const filteredCustomers = useMemo(() => {
     if (!searchQuery.trim()) return customers;
@@ -68,41 +64,59 @@ export function CustomerStep({
     );
   }, [customers, searchQuery]);
 
-  const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
-  const canProceed = selectedCustomerId || noCustomer;
+  const selectedCustomer = customers.find((c) => c.id === selectedInList);
 
-  const handleSelectOcrCustomer = () => {
-    if (extractedCustomer?.name) {
-      const match = customers.find(
-        (c) => c.name.toLowerCase() === extractedCustomer.name?.toLowerCase()
-      );
-      if (match) {
-        onSelectCustomer(match.id, false);
-      }
+  // Determine if user can proceed
+  const canProceed = useMemo(() => {
+    if (selectionMode === 'none') return true;
+    if (selectionMode === 'ocr' && ocrMatchedCustomer) return true;
+    if (selectionMode === 'existing' && selectedInList) return true;
+    return false;
+  }, [selectionMode, ocrMatchedCustomer, selectedInList]);
+
+  // Update parent when selection changes
+  useEffect(() => {
+    if (selectionMode === 'none') {
+      onSelectCustomer(null, true);
+    } else if (selectionMode === 'ocr' && ocrMatchedCustomer) {
+      onSelectCustomer(ocrMatchedCustomer.id, false);
+    } else if (selectionMode === 'existing' && selectedInList) {
+      onSelectCustomer(selectedInList, false);
+    } else {
+      onSelectCustomer(null, false);
     }
+  }, [selectionMode, selectedInList, ocrMatchedCustomer, onSelectCustomer]);
+
+  const handleSelectOcrOption = () => {
+    if (!extractedCustomer) return;
+    setSelectionMode('ocr');
   };
 
-  const handleSelectExistingCustomer = (customerId: string) => {
-    onSelectCustomer(customerId, false);
+  const handleSelectExistingOption = () => {
+    setSelectionMode('existing');
   };
 
   const handleSelectNoCustomer = () => {
-    onSelectCustomer(null, true);
+    setSelectionMode('none');
+    setSelectedInList(null);
+  };
+
+  const handleSelectCustomerFromList = (customerId: string) => {
+    setSelectedInList(customerId);
+    setSelectionMode('existing');
   };
 
   const SelectionIndicator = ({ selected }: { selected: boolean }) => (
     <div className={cn(
-      'flex h-5 w-5 items-center justify-center rounded-full border-2 transition-colors',
+      'flex h-5 w-5 items-center justify-center rounded-full border-2 transition-colors shrink-0',
       selected ? 'border-primary bg-primary' : 'border-muted-foreground/30'
     )}>
-      {selected && <Check className="h-3 w-3 text-primary-foreground" />}
+      {selected && (
+        <svg className="h-3 w-3 text-primary-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      )}
     </div>
-  );
-
-  const Check = ({ className }: { className?: string }) => (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
   );
 
   return (
@@ -113,10 +127,10 @@ export function CustomerStep({
 
       {/* Option 1: OCR Extracted Customer */}
       <div
-        onClick={extractedCustomer ? handleSelectOcrCustomer : undefined}
+        onClick={extractedCustomer ? handleSelectOcrOption : undefined}
         className={cn(
           'rounded-lg border-2 p-4 transition-all',
-          extractedCustomer ? 'cursor-pointer' : 'opacity-50',
+          extractedCustomer ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed',
           selectionMode === 'ocr' 
             ? 'border-primary bg-primary/5 ring-2 ring-primary/20' 
             : 'border-border hover:border-muted-foreground/50'
@@ -164,11 +178,12 @@ export function CustomerStep({
 
       {/* Option 2: Select Existing Customer */}
       <div
+        onClick={handleSelectExistingOption}
         className={cn(
-          'rounded-lg border-2 p-4 transition-all',
+          'rounded-lg border-2 p-4 transition-all cursor-pointer',
           selectionMode === 'existing' 
             ? 'border-primary bg-primary/5 ring-2 ring-primary/20' 
-            : 'border-border'
+            : 'border-border hover:border-muted-foreground/50'
         )}
       >
         <div className="flex items-start gap-4">
@@ -182,65 +197,74 @@ export function CustomerStep({
               Choose from your customer database.
             </p>
 
-            <div className="pl-6 space-y-3">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Search customers..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-8 h-9"
-                />
+            {selectionMode === 'existing' && (
+              <div className="pl-6 space-y-3" onClick={(e) => e.stopPropagation()}>
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    placeholder="Search customers..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="pl-8 h-9"
+                  />
+                </div>
+
+                <ScrollArea className="h-40 rounded-md border bg-background">
+                  <div className="p-1">
+                    {filteredCustomers.length === 0 ? (
+                      <p className="py-4 text-center text-sm text-muted-foreground">
+                        {searchQuery ? 'No customers match your search' : 'No customers available'}
+                      </p>
+                    ) : (
+                      filteredCustomers.map((customer) => (
+                        <button
+                          key={customer.id}
+                          onClick={() => handleSelectCustomerFromList(customer.id)}
+                          className={cn(
+                            'w-full flex items-center gap-3 rounded px-3 py-2 text-left transition-colors',
+                            selectedInList === customer.id
+                              ? 'bg-primary text-primary-foreground'
+                              : 'hover:bg-muted'
+                          )}
+                        >
+                          <Circle className={cn(
+                            'h-3 w-3 shrink-0',
+                            selectedInList === customer.id
+                              ? 'fill-current'
+                              : 'text-muted-foreground/50'
+                          )} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{customer.name}</p>
+                            <p className={cn(
+                              'truncate text-xs',
+                              selectedInList === customer.id
+                                ? 'text-primary-foreground/70'
+                                : 'text-muted-foreground'
+                            )}>
+                              {customer.primaryContactName}
+                            </p>
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </ScrollArea>
+
+                {selectedCustomer && (
+                  <div className="rounded bg-muted/50 p-2 text-sm">
+                    <span className="text-muted-foreground">Selected:</span>{' '}
+                    <span className="font-medium">{selectedCustomer.name}</span>
+                  </div>
+                )}
+
+                {!selectedInList && (
+                  <p className="text-xs text-warning flex items-center gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    Please select a customer to continue
+                  </p>
+                )}
               </div>
-
-              <ScrollArea className="h-40 rounded-md border bg-background">
-                <div className="p-1">
-                  {filteredCustomers.length === 0 ? (
-                    <p className="py-4 text-center text-sm text-muted-foreground">
-                      {searchQuery ? 'No customers match your search' : 'No customers available'}
-                    </p>
-                  ) : (
-                    filteredCustomers.map((customer) => (
-                      <button
-                        key={customer.id}
-                        onClick={() => handleSelectExistingCustomer(customer.id)}
-                        className={cn(
-                          'w-full flex items-center gap-3 rounded px-3 py-2 text-left transition-colors',
-                          selectedCustomerId === customer.id && selectionMode === 'existing'
-                            ? 'bg-primary text-primary-foreground'
-                            : 'hover:bg-muted'
-                        )}
-                      >
-                        <Circle className={cn(
-                          'h-3 w-3 shrink-0',
-                          selectedCustomerId === customer.id && selectionMode === 'existing'
-                            ? 'fill-current'
-                            : 'text-muted-foreground/50'
-                        )} />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium">{customer.name}</p>
-                          <p className={cn(
-                            'truncate text-xs',
-                            selectedCustomerId === customer.id && selectionMode === 'existing'
-                              ? 'text-primary-foreground/70'
-                              : 'text-muted-foreground'
-                          )}>
-                            {customer.primaryContactName}
-                          </p>
-                        </div>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </ScrollArea>
-
-              {selectedCustomer && selectionMode === 'existing' && (
-                <div className="rounded bg-muted/50 p-2 text-sm">
-                  <span className="text-muted-foreground">Selected:</span>{' '}
-                  <span className="font-medium">{selectedCustomer.name}</span>
-                </div>
-              )}
-            </div>
+            )}
           </div>
         </div>
       </div>
