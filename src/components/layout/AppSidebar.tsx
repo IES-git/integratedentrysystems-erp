@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Users, FileText, FileCheck, Package, FileCode2, Settings, LogOut, ChevronDown, Sun, Moon, Monitor, Menu } from 'lucide-react';
+import { LayoutDashboard, Users, FileText, FileCheck, Package, FileCode2, Settings, LogOut, ChevronDown, Sun, Moon, Monitor, PanelLeftClose, PanelLeft } from 'lucide-react';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarTrigger, useSidebar } from '@/components/ui/sidebar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -60,7 +60,8 @@ export function AppSidebar() {
     setTheme
   } = useTheme();
   const {
-    state
+    state,
+    toggleSidebar
   } = useSidebar();
   const collapsed = state === 'collapsed';
   const isActive = (href: string) => {
@@ -145,6 +146,19 @@ export function AppSidebar() {
 
       <SidebarFooter className="border-t border-sidebar-border p-2">
         <SidebarMenu>
+          {/* Collapse toggle button */}
+          <SidebarMenuItem>
+            <SidebarMenuButton 
+              onClick={toggleSidebar}
+              tooltip={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="justify-start"
+            >
+              {collapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+              {!collapsed && <span>Collapse</span>}
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+
+          {/* User menu */}
           <SidebarMenuItem>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -192,12 +206,4 @@ export function AppSidebar() {
         </SidebarMenu>
       </SidebarFooter>
     </Sidebar>;
-}
-export function AppHeader() {
-  return <header className="flex h-14 items-center gap-4 border-b border-border bg-background px-4 lg:px-6">
-      <SidebarTrigger className="-ml-2">
-        <Menu className="h-5 w-5" />
-        <span className="sr-only">Toggle sidebar</span>
-      </SidebarTrigger>
-    </header>;
 }
