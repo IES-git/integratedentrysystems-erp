@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, forwardRef } from 'react';
 import { FileText, Maximize2, Minimize2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -11,7 +11,8 @@ interface PdfPreviewProps {
   expandable?: boolean;
 }
 
-export function PdfPreview({ pdfUrl, fileName, className, onClose, expandable = true }: PdfPreviewProps) {
+export const PdfPreview = forwardRef<HTMLDivElement, PdfPreviewProps>(
+  function PdfPreview({ pdfUrl, fileName, className, onClose, expandable = true }, ref) {
   const [isExpanded, setIsExpanded] = useState(false);
 
   if (isExpanded) {
@@ -66,4 +67,4 @@ export function PdfPreview({ pdfUrl, fileName, className, onClose, expandable = 
       </div>
     </div>
   );
-}
+});
