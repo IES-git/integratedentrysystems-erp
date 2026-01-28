@@ -146,18 +146,6 @@ export function AppSidebar() {
 
       <SidebarFooter className="border-t border-sidebar-border p-2">
         <SidebarMenu>
-          {/* Collapse toggle button */}
-          <SidebarMenuItem>
-            <SidebarMenuButton 
-              onClick={toggleSidebar}
-              tooltip={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              className="justify-start"
-            >
-              {collapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-              {!collapsed && <span>Collapse</span>}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-
           {/* User menu */}
           <SidebarMenuItem>
             <DropdownMenu>
@@ -202,6 +190,18 @@ export function AppSidebar() {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+          </SidebarMenuItem>
+
+          {/* Collapse toggle button */}
+          <SidebarMenuItem>
+            <SidebarMenuButton 
+              onClick={toggleSidebar}
+              tooltip={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="justify-start"
+            >
+              {collapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+              {!collapsed && <span>Collapse</span>}
+            </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
