@@ -81,12 +81,24 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
     setFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
+  const fileToDataUrl = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
   const simulateOCR = async (uploadedFile: UploadedFile) => {
     setFiles((prev) =>
       prev.map((f) =>
         f.id === uploadedFile.id ? { ...f, status: 'processing' as const, progress: 10 } : f
       )
     );
+
+    // Convert file to base64 data URL for persistent storage
+    const pdfDataUrl = await fileToDataUrl(uploadedFile.file);
 
     for (let progress = 20; progress <= 90; progress += 10) {
       await new Promise((r) => setTimeout(r, 150));
@@ -99,7 +111,7 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
       customerId: null,
       uploadedByUserId: user?.id || '',
       source: 'ceco_pdf',
-      originalPdfUrl: URL.createObjectURL(uploadedFile.file),
+      originalPdfUrl: pdfDataUrl,
       originalPdfName: uploadedFile.file.name,
       ocrStatus: 'done',
       ocrError: null,
