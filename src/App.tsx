@@ -9,6 +9,7 @@ import { AppLayout } from "@/components/layout/AppLayout";
 import LoginPage from "@/pages/LoginPage";
 import DashboardPage from "@/pages/DashboardPage";
 import CustomersPage from "@/pages/CustomersPage";
+import ManufacturersPage from "@/pages/ManufacturersPage";
 import EstimatesListPage from "@/pages/EstimatesListPage";
 import EstimateUploadPage from "@/pages/EstimateUploadPage";
 import EstimateWizardPage from "@/pages/EstimateWizardPage";
@@ -42,6 +43,9 @@ const App = () => (
                 
                 {/* Customers */}
                 <Route path="customers" element={<CustomersPage />} />
+                
+                {/* Manufacturers */}
+                <Route path="manufacturers" element={<ManufacturersPage />} />
                 
                 {/* Estimates */}
                 <Route path="estimates" element={<EstimatesListPage />} />
