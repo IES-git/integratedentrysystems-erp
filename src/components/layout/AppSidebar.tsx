@@ -81,9 +81,9 @@ export function AppSidebar() {
   const isAdmin = user?.role === 'admin' || user?.role === 'hr';
   return <Sidebar collapsible="icon" className="border-r border-sidebar-border">
       <SidebarHeader className="border-b border-sidebar-border p-4">
-        <div className="flex items-center justify-center">
+        <div className="flex items-center justify-start">
           {collapsed ? (
-            <img src={iesLogoIcon} alt="IES" className="h-8 w-8 object-contain" />
+            <img src={iesLogoIcon} alt="IES" className="h-6 w-auto object-contain" />
           ) : (
             <img src={iesLogo} alt="IES Logo" className="h-8 w-auto" />
           )}
