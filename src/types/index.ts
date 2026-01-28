@@ -23,6 +23,19 @@ export interface Customer {
   createdAt: string;
 }
 
+// Manufacturer Types
+export interface Manufacturer {
+  id: string;
+  name: string;
+  primaryContactName: string;
+  email: string;
+  phone: string;
+  address: string;
+  website: string;
+  notes: string;
+  createdAt: string;
+}
+
 // Estimate Types (PDF Intake)
 export type OcrStatus = 'pending' | 'processing' | 'done' | 'error';
 

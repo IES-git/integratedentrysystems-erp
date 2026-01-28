@@ -4,6 +4,7 @@
 import type {
   User,
   Customer,
+  Manufacturer,
   Estimate,
   EstimateItem,
   ItemField,
@@ -23,6 +24,7 @@ const STORAGE_KEYS = {
   users: 'ies_users',
   currentUser: 'ies_current_user',
   customers: 'ies_customers',
+  manufacturers: 'ies_manufacturers',
   estimates: 'ies_estimates',
   estimateItems: 'ies_estimate_items',
   itemFields: 'ies_item_fields',
@@ -137,6 +139,38 @@ export const customerStorage = {
     const filtered = customers.filter(c => c.id !== id);
     if (filtered.length === customers.length) return false;
     setItem(STORAGE_KEYS.customers, filtered);
+    return true;
+  },
+};
+
+// Manufacturer operations
+export const manufacturerStorage = {
+  getAll: (): Manufacturer[] => getItem<Manufacturer>(STORAGE_KEYS.manufacturers),
+  
+  getById: (id: string): Manufacturer | undefined =>
+    getItem<Manufacturer>(STORAGE_KEYS.manufacturers).find(m => m.id === id),
+  
+  create: (manufacturer: Omit<Manufacturer, 'id' | 'createdAt'>): Manufacturer => {
+    const manufacturers = getItem<Manufacturer>(STORAGE_KEYS.manufacturers);
+    const newManufacturer: Manufacturer = { ...manufacturer, id: generateId(), createdAt: now() };
+    setItem(STORAGE_KEYS.manufacturers, [...manufacturers, newManufacturer]);
+    return newManufacturer;
+  },
+  
+  update: (id: string, updates: Partial<Manufacturer>): Manufacturer | undefined => {
+    const manufacturers = getItem<Manufacturer>(STORAGE_KEYS.manufacturers);
+    const index = manufacturers.findIndex(m => m.id === id);
+    if (index === -1) return undefined;
+    manufacturers[index] = { ...manufacturers[index], ...updates };
+    setItem(STORAGE_KEYS.manufacturers, manufacturers);
+    return manufacturers[index];
+  },
+  
+  delete: (id: string): boolean => {
+    const manufacturers = getItem<Manufacturer>(STORAGE_KEYS.manufacturers);
+    const filtered = manufacturers.filter(m => m.id !== id);
+    if (filtered.length === manufacturers.length) return false;
+    setItem(STORAGE_KEYS.manufacturers, filtered);
     return true;
   },
 };

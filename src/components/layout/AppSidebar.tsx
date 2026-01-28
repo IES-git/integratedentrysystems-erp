@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Users, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft } from 'lucide-react';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/sidebar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -22,6 +22,11 @@ const navigation = [
     title: 'Customers',
     href: '/app/customers',
     icon: Users
+  },
+  {
+    title: 'Manufacturers',
+    href: '/app/manufacturers',
+    icon: Factory
   },
   {
     title: 'Estimates',
