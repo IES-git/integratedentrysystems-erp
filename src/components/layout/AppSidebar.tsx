@@ -93,13 +93,13 @@ export function AppSidebar() {
             <img 
               src={isDarkMode ? iesLogoIconAlt : iesLogoIcon} 
               alt="IES" 
-              className="h-6 w-auto object-contain" 
+              className="h-8 w-auto object-contain" 
             />
           ) : (
             <img 
               src={isDarkMode ? iesLogoAlt : iesLogo} 
               alt="IES Logo" 
-              className="h-8 w-auto" 
+              className="h-10 w-auto" 
             />
           )}
         </div>
