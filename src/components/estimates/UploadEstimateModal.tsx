@@ -160,12 +160,12 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
 
     setIsProcessing(true);
 
-    let lastEstimateId: string | undefined;
+    const processedEstimateIds: string[] = [];
 
     for (const file of pendingFiles) {
       try {
         const estimate = await simulateOCR(file);
-        lastEstimateId = estimate.id;
+        processedEstimateIds.push(estimate.id);
       } catch {
         setFiles((prev) =>
           prev.map((f) =>
@@ -181,11 +181,12 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
     
     onUploadComplete?.();
 
-    // Navigate to wizard with the first processed estimate
-    if (lastEstimateId) {
+    // Navigate to wizard with all processed estimate IDs
+    if (processedEstimateIds.length > 0) {
       setFiles([]);
       onOpenChange(false);
-      navigate(`/app/estimates/wizard?id=${lastEstimateId}`);
+      const idsParam = processedEstimateIds.join(',');
+      navigate(`/app/estimates/wizard?ids=${idsParam}`);
     }
   };
 
