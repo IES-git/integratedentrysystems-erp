@@ -9,6 +9,8 @@ import { useTheme } from '@/contexts/ThemeContext';
 import { cn } from '@/lib/utils';
 import iesLogo from '@/assets/ies-logo.png';
 import iesLogoIcon from '@/assets/ies-logo-icon.png';
+import iesLogoAlt from '@/assets/ies-logo-alt.png';
+import iesLogoIconAlt from '@/assets/ies-logo-icon-alt.png';
 
 const navigation = [
   {
@@ -62,6 +64,9 @@ export function AppSidebar() {
   const { state, toggleSidebar } = useSidebar();
   const collapsed = state === 'collapsed';
 
+  // Determine if dark mode is active (for logo selection)
+  const isDarkMode = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+
   const isActive = (href: string) => {
     if (href === '/app') {
       return location.pathname === '/app';
@@ -85,9 +90,17 @@ export function AppSidebar() {
       <SidebarHeader className="border-b border-sidebar-border p-4">
         <div className="flex items-center justify-start">
           {collapsed ? (
-            <img src={iesLogoIcon} alt="IES" className="h-6 w-auto object-contain" />
+            <img 
+              src={isDarkMode ? iesLogoIconAlt : iesLogoIcon} 
+              alt="IES" 
+              className="h-6 w-auto object-contain" 
+            />
           ) : (
-            <img src={iesLogo} alt="IES Logo" className="h-8 w-auto" />
+            <img 
+              src={isDarkMode ? iesLogoAlt : iesLogo} 
+              alt="IES Logo" 
+              className="h-8 w-auto" 
+            />
           )}
         </div>
       </SidebarHeader>
