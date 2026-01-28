@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Search, User, UserX, Building2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Search, User, UserX, Building2, CheckCircle2, AlertCircle, Circle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -17,6 +17,8 @@ export interface ExtractedCustomerData {
   address?: string;
   confidence: number;
 }
+
+type SelectionMode = 'ocr' | 'existing' | 'none' | null;
 
 interface CustomerStepProps {
   extractedCustomer: ExtractedCustomerData | null;
@@ -36,6 +38,24 @@ export function CustomerStep({
   onNext,
 }: CustomerStepProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  
+  // Determine current selection mode
+  const getSelectionMode = (): SelectionMode => {
+    if (noCustomer) return 'none';
+    if (selectedCustomerId) {
+      // Check if selected customer matches OCR
+      if (extractedCustomer?.name) {
+        const match = customers.find(
+          (c) => c.name.toLowerCase() === extractedCustomer.name?.toLowerCase()
+        );
+        if (match && match.id === selectedCustomerId) return 'ocr';
+      }
+      return 'existing';
+    }
+    return null;
+  };
+  
+  const selectionMode = getSelectionMode();
 
   const filteredCustomers = useMemo(() => {
     if (!searchQuery.trim()) return customers;
@@ -52,7 +72,6 @@ export function CustomerStep({
   const canProceed = selectedCustomerId || noCustomer;
 
   const handleSelectOcrCustomer = () => {
-    // Try to match extracted customer with existing customers
     if (extractedCustomer?.name) {
       const match = customers.find(
         (c) => c.name.toLowerCase() === extractedCustomer.name?.toLowerCase()
@@ -63,179 +82,195 @@ export function CustomerStep({
     }
   };
 
+  const handleSelectExistingCustomer = (customerId: string) => {
+    onSelectCustomer(customerId, false);
+  };
+
+  const handleSelectNoCustomer = () => {
+    onSelectCustomer(null, true);
+  };
+
+  const SelectionIndicator = ({ selected }: { selected: boolean }) => (
+    <div className={cn(
+      'flex h-5 w-5 items-center justify-center rounded-full border-2 transition-colors',
+      selected ? 'border-primary bg-primary' : 'border-muted-foreground/30'
+    )}>
+      {selected && <Check className="h-3 w-3 text-primary-foreground" />}
+    </div>
+  );
+
+  const Check = ({ className }: { className?: string }) => (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+
   return (
-    <div className="space-y-6">
-      {/* OCR Extracted Customer */}
-      <Card className={cn(
-        'border-2 transition-colors',
-        extractedCustomer ? 'border-primary/50' : 'border-border'
-      )}>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <User className="h-5 w-5 text-primary" />
-              <CardTitle className="text-base">Extracted from PDF</CardTitle>
-            </div>
-            {extractedCustomer ? (
-              <Badge variant="default" className="bg-success">
-                <CheckCircle2 className="mr-1 h-3 w-3" />
-                Customer Found
-              </Badge>
-            ) : (
-              <Badge variant="secondary">
-                <AlertCircle className="mr-1 h-3 w-3" />
-                No Customer Detected
-              </Badge>
-            )}
-          </div>
-          <CardDescription>
-            {extractedCustomer
-              ? 'We detected customer information from the uploaded PDF. You can accept this or choose a different customer.'
-              : 'No customer information was found in the PDF. Please select a customer or proceed without one.'}
-          </CardDescription>
-        </CardHeader>
-        {extractedCustomer && (
-          <CardContent className="pt-0">
-            <div className="rounded-lg bg-muted/50 p-4 space-y-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-medium">{extractedCustomer.name || 'Unknown'}</p>
-                  {extractedCustomer.contactName && (
-                    <p className="text-sm text-muted-foreground">
-                      Contact: {extractedCustomer.contactName}
-                    </p>
-                  )}
-                  {extractedCustomer.email && (
-                    <p className="text-sm text-muted-foreground">
-                      {extractedCustomer.email}
-                    </p>
-                  )}
-                  {extractedCustomer.phone && (
-                    <p className="text-sm text-muted-foreground">
-                      {extractedCustomer.phone}
-                    </p>
-                  )}
-                </div>
-                <div className="text-right">
-                  <p className="text-xs text-muted-foreground">Confidence</p>
-                  <p className="text-sm font-mono font-medium">
-                    {Math.round(extractedCustomer.confidence * 100)}%
-                  </p>
-                </div>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full mt-2"
-                onClick={handleSelectOcrCustomer}
-              >
-                Use Extracted Customer
-              </Button>
-            </div>
-          </CardContent>
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground mb-6">
+        Choose how to assign a customer to this estimate. Select one of the options below.
+      </p>
+
+      {/* Option 1: OCR Extracted Customer */}
+      <div
+        onClick={extractedCustomer ? handleSelectOcrCustomer : undefined}
+        className={cn(
+          'rounded-lg border-2 p-4 transition-all',
+          extractedCustomer ? 'cursor-pointer' : 'opacity-50',
+          selectionMode === 'ocr' 
+            ? 'border-primary bg-primary/5 ring-2 ring-primary/20' 
+            : 'border-border hover:border-muted-foreground/50'
         )}
-      </Card>
-
-      {/* Customer Selection */}
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <Building2 className="h-5 w-5 text-muted-foreground" />
-            <CardTitle className="text-base">Select Customer</CardTitle>
-          </div>
-          <CardDescription>
-            Choose an existing customer from your database
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="pt-0 space-y-3">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search customers..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8"
-            />
-          </div>
-
-          <ScrollArea className="h-48 rounded-md border">
-            <div className="p-2 space-y-1">
-              {filteredCustomers.length === 0 ? (
-                <p className="py-4 text-center text-sm text-muted-foreground">
-                  {searchQuery ? 'No customers match your search' : 'No customers available'}
-                </p>
+      >
+        <div className="flex items-start gap-4">
+          <SelectionIndicator selected={selectionMode === 'ocr'} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              <User className="h-4 w-4 text-muted-foreground" />
+              <span className="font-medium">Use Extracted Customer</span>
+              {extractedCustomer ? (
+                <Badge variant="outline" className="text-success border-success/30 bg-success/10">
+                  <CheckCircle2 className="mr-1 h-3 w-3" />
+                  Found
+                </Badge>
               ) : (
-                filteredCustomers.map((customer) => (
-                  <button
-                    key={customer.id}
-                    onClick={() => onSelectCustomer(customer.id, false)}
-                    className={cn(
-                      'w-full flex items-center gap-3 rounded-md px-3 py-2 text-left transition-colors',
-                      selectedCustomerId === customer.id
-                        ? 'bg-primary text-primary-foreground'
-                        : 'hover:bg-muted'
-                    )}
-                  >
-                    <Building2 className="h-4 w-4 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{customer.name}</p>
-                      <p className={cn(
-                        'truncate text-xs',
-                        selectedCustomerId === customer.id
-                          ? 'text-primary-foreground/70'
-                          : 'text-muted-foreground'
-                      )}>
-                        {customer.primaryContactName} • {customer.email}
-                      </p>
-                    </div>
-                    {selectedCustomerId === customer.id && (
-                      <CheckCircle2 className="h-4 w-4 shrink-0" />
-                    )}
-                  </button>
-                ))
+                <Badge variant="secondary">
+                  <AlertCircle className="mr-1 h-3 w-3" />
+                  Not Detected
+                </Badge>
               )}
             </div>
-          </ScrollArea>
-
-          {selectedCustomer && (
-            <div className="rounded-lg bg-primary/5 border border-primary/20 p-3">
-              <Label className="text-xs text-muted-foreground">Selected Customer</Label>
-              <p className="font-medium">{selectedCustomer.name}</p>
-              <p className="text-sm text-muted-foreground">
-                {selectedCustomer.primaryContactName} • {selectedCustomer.email}
+            {extractedCustomer ? (
+              <div className="mt-2 pl-6 text-sm">
+                <p className="font-medium text-foreground">{extractedCustomer.name}</p>
+                {extractedCustomer.contactName && (
+                  <p className="text-muted-foreground">{extractedCustomer.contactName}</p>
+                )}
+                {extractedCustomer.email && (
+                  <p className="text-muted-foreground">{extractedCustomer.email}</p>
+                )}
+                <p className="text-xs text-muted-foreground mt-1">
+                  Confidence: {Math.round(extractedCustomer.confidence * 100)}%
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground pl-6">
+                No customer information was detected in the PDF.
               </p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* No Customer Option */}
-      <Card
-        className={cn(
-          'cursor-pointer border-2 transition-colors',
-          noCustomer ? 'border-warning bg-warning/5' : 'border-border hover:border-muted-foreground/50'
-        )}
-        onClick={() => onSelectCustomer(null, true)}
-      >
-        <CardContent className="flex items-center gap-3 p-4">
-          <div className={cn(
-            'flex h-10 w-10 items-center justify-center rounded-full',
-            noCustomer ? 'bg-warning text-warning-foreground' : 'bg-muted'
-          )}>
-            <UserX className="h-5 w-5" />
+            )}
           </div>
+        </div>
+      </div>
+
+      {/* Option 2: Select Existing Customer */}
+      <div
+        className={cn(
+          'rounded-lg border-2 p-4 transition-all',
+          selectionMode === 'existing' 
+            ? 'border-primary bg-primary/5 ring-2 ring-primary/20' 
+            : 'border-border'
+        )}
+      >
+        <div className="flex items-start gap-4">
+          <SelectionIndicator selected={selectionMode === 'existing'} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              <Building2 className="h-4 w-4 text-muted-foreground" />
+              <span className="font-medium">Select Existing Customer</span>
+            </div>
+            <p className="text-sm text-muted-foreground pl-6 mb-3">
+              Choose from your customer database.
+            </p>
+
+            <div className="pl-6 space-y-3">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="Search customers..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-8 h-9"
+                />
+              </div>
+
+              <ScrollArea className="h-40 rounded-md border bg-background">
+                <div className="p-1">
+                  {filteredCustomers.length === 0 ? (
+                    <p className="py-4 text-center text-sm text-muted-foreground">
+                      {searchQuery ? 'No customers match your search' : 'No customers available'}
+                    </p>
+                  ) : (
+                    filteredCustomers.map((customer) => (
+                      <button
+                        key={customer.id}
+                        onClick={() => handleSelectExistingCustomer(customer.id)}
+                        className={cn(
+                          'w-full flex items-center gap-3 rounded px-3 py-2 text-left transition-colors',
+                          selectedCustomerId === customer.id && selectionMode === 'existing'
+                            ? 'bg-primary text-primary-foreground'
+                            : 'hover:bg-muted'
+                        )}
+                      >
+                        <Circle className={cn(
+                          'h-3 w-3 shrink-0',
+                          selectedCustomerId === customer.id && selectionMode === 'existing'
+                            ? 'fill-current'
+                            : 'text-muted-foreground/50'
+                        )} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{customer.name}</p>
+                          <p className={cn(
+                            'truncate text-xs',
+                            selectedCustomerId === customer.id && selectionMode === 'existing'
+                              ? 'text-primary-foreground/70'
+                              : 'text-muted-foreground'
+                          )}>
+                            {customer.primaryContactName}
+                          </p>
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </ScrollArea>
+
+              {selectedCustomer && selectionMode === 'existing' && (
+                <div className="rounded bg-muted/50 p-2 text-sm">
+                  <span className="text-muted-foreground">Selected:</span>{' '}
+                  <span className="font-medium">{selectedCustomer.name}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Option 3: No Customer */}
+      <div
+        onClick={handleSelectNoCustomer}
+        className={cn(
+          'rounded-lg border-2 p-4 cursor-pointer transition-all',
+          selectionMode === 'none' 
+            ? 'border-primary bg-primary/5 ring-2 ring-primary/20' 
+            : 'border-border hover:border-muted-foreground/50'
+        )}
+      >
+        <div className="flex items-start gap-4">
+          <SelectionIndicator selected={selectionMode === 'none'} />
           <div className="flex-1">
-            <p className="font-medium">No Customer</p>
-            <p className="text-sm text-muted-foreground">
+            <div className="flex items-center gap-2 mb-1">
+              <UserX className="h-4 w-4 text-muted-foreground" />
+              <span className="font-medium">No Customer</span>
+            </div>
+            <p className="text-sm text-muted-foreground pl-6">
               Proceed without assigning a customer. You can assign one later.
             </p>
           </div>
-          {noCustomer && <CheckCircle2 className="h-5 w-5 text-warning" />}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {/* Action */}
-      <div className="flex justify-end pt-4 border-t">
+      <div className="flex justify-end pt-6 border-t mt-6">
         <Button onClick={onNext} disabled={!canProceed} size="lg">
           Continue to Line Items
         </Button>
