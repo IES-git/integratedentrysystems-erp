@@ -242,10 +242,7 @@ export default function EstimateWizardPage() {
     if (currentEstimateIndex < estimates.length - 1) {
       setCurrentEstimateIndex((prev) => prev + 1);
       setCurrentStepIndex(0);
-      toast({
-        title: 'Estimate saved',
-        description: `Moving to next file (${currentEstimateIndex + 2} of ${estimates.length})`,
-      });
+      // No toast for intermediate saves - just move to next file
     } else {
       // All done
       toast({
