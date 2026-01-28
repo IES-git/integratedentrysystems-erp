@@ -153,7 +153,8 @@
   }
 
   h3 {
-    @apply text-2xl md:text-3xl font-normal tracking-widest;
+    @apply text-2xl md:text-3xl font-normal;
+    letter-spacing: 0.15em;
   }
 
   /* Mono for codes and technical fields */
