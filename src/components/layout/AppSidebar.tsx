@@ -9,6 +9,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { cn } from '@/lib/utils';
 import iesLogo from '@/assets/ies-logo.png';
+import iesLogoIcon from '@/assets/ies-logo-icon.png';
 const navigation = [{
   title: 'Dashboard',
   href: '/app',
@@ -80,12 +81,12 @@ export function AppSidebar() {
   const isAdmin = user?.role === 'admin' || user?.role === 'hr';
   return <Sidebar collapsible="icon" className="border-r border-sidebar-border">
       <SidebarHeader className="border-b border-sidebar-border p-4">
-        <div className="flex items-center gap-3">
-          <img src={iesLogo} alt="IES Logo" className="h-8 w-auto" />
-          {!collapsed && <div className="flex flex-col">
-              
-              
-            </div>}
+        <div className="flex items-center justify-center">
+          {collapsed ? (
+            <img src={iesLogoIcon} alt="IES" className="h-8 w-8 object-contain" />
+          ) : (
+            <img src={iesLogo} alt="IES Logo" className="h-8 w-auto" />
+          )}
         </div>
       </SidebarHeader>
 
