@@ -139,7 +139,7 @@
   }
 
   /* Typography hierarchy using Bebas Neue for display */
-  h1, h2, h3, .display-font {
+  h1, h2, .display-font {
     font-family: 'Bebas Neue', sans-serif;
     letter-spacing: 0.02em;
   }
@@ -152,9 +152,10 @@
     @apply text-3xl md:text-4xl font-normal tracking-wide;
   }
 
+  /* h3 uses body font for better readability */
   h3 {
-    @apply text-2xl md:text-3xl font-normal;
-    letter-spacing: 0.15em;
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    @apply text-xl md:text-2xl font-semibold tracking-normal;
   }
 
   /* Mono for codes and technical fields */
