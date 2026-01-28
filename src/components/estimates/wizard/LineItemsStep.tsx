@@ -21,6 +21,7 @@ interface LineItemsStepProps {
   onDeleteField: (fieldId: string) => void;
   onBack: () => void;
   onFinish: () => void;
+  finishLabel?: string;
 }
 
 export function LineItemsStep({
@@ -31,6 +32,7 @@ export function LineItemsStep({
   onDeleteField,
   onBack,
   onFinish,
+  finishLabel = 'Save as Draft',
 }: LineItemsStepProps) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(
     new Set(lineItems.map((item) => item.id))
@@ -356,7 +358,7 @@ export function LineItemsStep({
           Back to Customer
         </Button>
         <Button onClick={onFinish} size="lg">
-          Save as Draft
+          {finishLabel}
         </Button>
       </div>
     </div>
