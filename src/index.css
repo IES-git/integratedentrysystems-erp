@@ -12,11 +12,11 @@
 
 @layer base {
   :root {
-    /* Core backgrounds */
-    --background: 210 20% 98%;
+    /* Core backgrounds - white sidebar, light gray content */
+    --background: 220 20% 96%;
     --foreground: 222 47% 11%;
 
-    /* Cards & elevated surfaces */
+    /* Cards & elevated surfaces - pure white */
     --card: 0 0% 100%;
     --card-foreground: 222 47% 11%;
 
@@ -59,14 +59,14 @@
 
     --radius: 0.5rem;
 
-    /* Sidebar tokens - light theme */
-    --sidebar-background: 210 20% 98%;
+    /* Sidebar tokens - pure white like reference */
+    --sidebar-background: 0 0% 100%;
     --sidebar-foreground: 222 47% 11%;
-    --sidebar-primary: 210 85% 35%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 210 15% 92%;
+    --sidebar-primary: 187 72% 38%;
+    --sidebar-primary-foreground: 222 47% 11%;
+    --sidebar-accent: 210 20% 96%;
     --sidebar-accent-foreground: 222 47% 11%;
-    --sidebar-border: 214 20% 88%;
+    --sidebar-border: 214 20% 92%;
     --sidebar-ring: 210 85% 35%;
   }
 
@@ -139,23 +139,21 @@
   }
 
   /* Typography hierarchy using Bebas Neue for display */
-  h1, h2, .display-font {
+  h1, h2, h3, .display-font {
     font-family: 'Bebas Neue', sans-serif;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.08em;
   }
 
   h1 {
-    @apply text-4xl md:text-5xl font-normal tracking-wide;
+    @apply text-4xl md:text-5xl font-normal;
   }
 
   h2 {
-    @apply text-3xl md:text-4xl font-normal tracking-wide;
+    @apply text-3xl md:text-4xl font-normal;
   }
 
-  /* h3 uses body font for better readability */
   h3 {
-    font-family: 'IBM Plex Sans', system-ui, sans-serif;
-    @apply text-xl md:text-2xl font-semibold tracking-normal;
+    @apply text-xl md:text-2xl font-normal;
   }
 
   /* Mono for codes and technical fields */
