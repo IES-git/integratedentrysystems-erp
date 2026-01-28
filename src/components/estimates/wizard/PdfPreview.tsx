@@ -1,4 +1,4 @@
-import { useState, forwardRef } from 'react';
+import { useState } from 'react';
 import { FileText, Maximize2, Minimize2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -11,9 +11,13 @@ interface PdfPreviewProps {
   expandable?: boolean;
 }
 
-export const PdfPreview = forwardRef<HTMLDivElement, PdfPreviewProps>(
-  function PdfPreview({ pdfUrl, fileName, className, onClose, expandable = true }, ref) {
+export function PdfPreview({ pdfUrl, fileName, className, onClose, expandable = true }: PdfPreviewProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+
+  const handleOpenInNewTab = () => {
+    window.open(pdfUrl, '_blank');
+  };
 
   if (isExpanded) {
     return (
@@ -28,11 +32,20 @@ export const PdfPreview = forwardRef<HTMLDivElement, PdfPreviewProps>(
           </Button>
         </div>
         <div className="flex-1 p-4">
-          <iframe
-            src={pdfUrl}
+          <object
+            data={pdfUrl}
+            type="application/pdf"
             className="h-full w-full rounded-lg border"
             title={`PDF Preview: ${fileName}`}
-          />
+          >
+            <div className="flex flex-col items-center justify-center h-full gap-4 text-muted-foreground">
+              <FileText className="h-12 w-12" />
+              <p>Unable to display PDF</p>
+              <Button variant="outline" onClick={handleOpenInNewTab}>
+                Open in New Tab
+              </Button>
+            </div>
+          </object>
         </div>
       </div>
     );
@@ -59,12 +72,32 @@ export const PdfPreview = forwardRef<HTMLDivElement, PdfPreviewProps>(
         </div>
       </div>
       <div className="flex-1 min-h-0 p-2">
-        <iframe
-          src={pdfUrl}
-          className="h-full w-full rounded border"
-          title={`PDF Preview: ${fileName}`}
-        />
+        {loadError ? (
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground py-8">
+            <FileText className="h-10 w-10" />
+            <p className="text-sm">Unable to preview PDF</p>
+            <Button variant="outline" size="sm" onClick={handleOpenInNewTab}>
+              Open in New Tab
+            </Button>
+          </div>
+        ) : (
+          <object
+            data={pdfUrl}
+            type="application/pdf"
+            className="h-full w-full rounded border"
+            title={`PDF Preview: ${fileName}`}
+            onError={() => setLoadError(true)}
+          >
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground py-8">
+              <FileText className="h-10 w-10" />
+              <p className="text-sm">Unable to preview PDF</p>
+              <Button variant="outline" size="sm" onClick={handleOpenInNewTab}>
+                Open in New Tab
+              </Button>
+            </div>
+          </object>
+        )}
       </div>
     </div>
   );
-});
+}
