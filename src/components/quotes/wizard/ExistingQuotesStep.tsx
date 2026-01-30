@@ -70,6 +70,9 @@ export function ExistingQuotesStep({
   if (existingQuotes.length === 0) {
     return (
       <div className="space-y-6">
+        <p className="text-sm text-muted-foreground">
+          No previous quotes have been created from this estimate.
+        </p>
         <div className="flex flex-col items-center justify-center py-8 text-center">
           <FileText className="mb-3 h-10 w-10 text-muted-foreground/50" />
           <p className="text-muted-foreground">
@@ -105,7 +108,7 @@ export function ExistingQuotesStep({
         />
       </div>
 
-      <ScrollArea className="h-64 rounded-md border bg-muted/30">
+      <ScrollArea className="h-72 rounded-md border bg-muted/30">
         <div className="p-2 space-y-2">
           {filteredQuotes.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">

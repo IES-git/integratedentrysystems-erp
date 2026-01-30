@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Search, FileCode2, Sparkles, Wand2, PenTool, CheckCircle2 } from 'lucide-react';
+import { Search, FileCode2, Sparkles, Wand2, PenTool, CheckCircle2, ArrowLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -14,12 +14,12 @@ interface TemplateSelectionStepProps {
   quoteType: 'customer' | 'manufacturer' | 'both';
   selectedTemplateId: string | null;
   onTemplateChange: (id: string | null) => void;
+  onBack: () => void;
   onComplete: () => void;
 }
 
 // Mock AI matching scores - in real implementation this would come from backend
 function getAiMatchScore(template: Template): number {
-  // Simulate AI matching percentage based on template properties
   const hash = template.id.split('').reduce((a, b) => {
     a = (a << 5) - a + b.charCodeAt(0);
     return a & a;
@@ -32,6 +32,7 @@ export function TemplateSelectionStep({
   quoteType,
   selectedTemplateId,
   onTemplateChange,
+  onBack,
   onComplete,
 }: TemplateSelectionStepProps) {
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('templates');
@@ -143,7 +144,7 @@ export function TemplateSelectionStep({
                   />
                 </div>
 
-                <ScrollArea className="h-48 rounded-md border bg-background">
+                <ScrollArea className="h-56 rounded-md border bg-background">
                   <div className="p-1">
                     {filteredTemplates.length === 0 ? (
                       <p className="py-6 text-center text-sm text-muted-foreground">
@@ -277,7 +278,11 @@ export function TemplateSelectionStep({
         </div>
       </div>
 
-      <div className="flex justify-end border-t pt-4">
+      <div className="flex items-center justify-between border-t pt-4">
+        <Button variant="ghost" onClick={onBack}>
+          <ArrowLeft className="mr-2 h-4 w-4" />
+          Back
+        </Button>
         <Button onClick={onComplete} disabled={!canComplete}>
           Create Quote
         </Button>

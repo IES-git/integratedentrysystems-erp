@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Search, User, Building2, CheckCircle2, Users } from 'lucide-react';
+import { Search, User, Building2, CheckCircle2, Users, ArrowLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -17,6 +17,7 @@ interface RecipientStepProps {
   onUseCurrentChange: (value: boolean) => void;
   onCustomerChange: (id: string | null) => void;
   onManufacturerChange: (id: string | null) => void;
+  onBack: () => void;
   onNext: () => void;
 }
 
@@ -30,6 +31,7 @@ export function RecipientStep({
   onUseCurrentChange,
   onCustomerChange,
   onManufacturerChange,
+  onBack,
   onNext,
 }: RecipientStepProps) {
   const [customerSearch, setCustomerSearch] = useState('');
@@ -252,7 +254,11 @@ export function RecipientStep({
         </div>
       </div>
 
-      <div className="flex justify-end border-t pt-4">
+      <div className="flex items-center justify-between border-t pt-4">
+        <Button variant="ghost" onClick={onBack}>
+          <ArrowLeft className="mr-2 h-4 w-4" />
+          Back
+        </Button>
         <Button onClick={onNext} disabled={!canProceed}>
           Continue
         </Button>

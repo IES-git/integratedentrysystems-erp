@@ -1,4 +1,4 @@
-import { User, Factory, Users } from 'lucide-react';
+import { User, Factory, Users, ArrowLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -7,6 +7,7 @@ interface QuoteTypeStepProps {
   hasCustomer: boolean;
   hasManufacturer: boolean;
   onQuoteTypeChange: (type: 'customer' | 'manufacturer' | 'both') => void;
+  onBack: () => void;
   onNext: () => void;
 }
 
@@ -15,6 +16,7 @@ export function QuoteTypeStep({
   hasCustomer,
   hasManufacturer,
   onQuoteTypeChange,
+  onBack,
   onNext,
 }: QuoteTypeStepProps) {
   const SelectionIndicator = ({ selected }: { selected: boolean }) => (
@@ -55,7 +57,7 @@ export function QuoteTypeStep({
     },
     {
       value: 'both' as const,
-      label: 'Both',
+      label: 'Multiple Quotes',
       description: 'Generate quotes for both customer and manufacturer',
       icon: Users,
       disabled: !hasCustomer && !hasManufacturer,
@@ -99,7 +101,11 @@ export function QuoteTypeStep({
         ))}
       </div>
 
-      <div className="flex justify-end border-t pt-4">
+      <div className="flex items-center justify-between border-t pt-4">
+        <Button variant="ghost" onClick={onBack}>
+          <ArrowLeft className="mr-2 h-4 w-4" />
+          Back
+        </Button>
         <Button onClick={onNext}>Continue</Button>
       </div>
     </div>
