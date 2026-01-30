@@ -14,7 +14,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
+  
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ConvertToQuoteWizard } from './ConvertToQuoteWizard';
@@ -173,10 +173,9 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
                           <Factory className="mr-2 h-4 w-4" />
                           Manufacturer Quote
                         </DropdownMenuItem>
-                        <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => setWizardEstimate(estimate)}>
                           <Users className="mr-2 h-4 w-4" />
-                          Both
+                          Multiple Quotes
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
