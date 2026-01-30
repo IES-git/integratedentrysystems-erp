@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { FileText, Eye, MoreHorizontal, CheckCircle2, Clock, AlertCircle, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { FileText, Eye, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -14,11 +14,13 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import type { Estimate, OcrStatus, Customer } from '@/types';
+import { ConvertToQuoteWizard } from './ConvertToQuoteWizard';
+import type { Estimate, Customer } from '@/types';
 
-type SortKey = 'originalPdfName' | 'customerId' | 'ocrStatus' | 'createdAt';
+type SortKey = 'originalPdfName' | 'customerId' | 'createdAt';
 type SortDirection = 'asc' | 'desc';
 
 interface EstimatesTableProps {
@@ -29,6 +31,7 @@ interface EstimatesTableProps {
 export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('createdAt');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [wizardEstimate, setWizardEstimate] = useState<Estimate | null>(null);
 
   const getCustomerName = (customerId: string | null) => {
     if (!customerId) return 'Unassigned';
@@ -56,9 +59,6 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
         case 'customerId':
           comparison = getCustomerName(a.customerId).localeCompare(getCustomerName(b.customerId));
           break;
-        case 'ocrStatus':
-          comparison = a.ocrStatus.localeCompare(b.ocrStatus);
-          break;
         case 'createdAt':
           comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
           break;
@@ -77,34 +77,6 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
       : <ArrowDown className="ml-1 h-3 w-3" />;
   };
 
-  const getStatusIcon = (status: OcrStatus) => {
-    switch (status) {
-      case 'done':
-        return <CheckCircle2 className="h-3 w-3 text-success" />;
-      case 'processing':
-        return <Clock className="h-3 w-3 text-warning animate-pulse" />;
-      case 'pending':
-        return <Clock className="h-3 w-3 text-muted-foreground" />;
-      case 'error':
-        return <AlertCircle className="h-3 w-3 text-destructive" />;
-      default:
-        return null;
-    }
-  };
-
-  const getStatusBadge = (status: OcrStatus) => {
-    const variants: Record<OcrStatus, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-      done: 'outline',
-      processing: 'default',
-      pending: 'secondary',
-      error: 'destructive',
-    };
-    return (
-      <Badge variant={variants[status]} className="h-5 text-xs capitalize">
-        {status}
-      </Badge>
-    );
-  };
 
   if (estimates.length === 0) {
     return (
@@ -116,122 +88,144 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
   }
 
   return (
-    <div className="overflow-x-auto">
-      <Table>
-        <TableHeader>
-          <TableRow className="hover:bg-transparent">
-            <TableHead className="h-8">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('originalPdfName')}
-              >
-                File Name
-                <SortIcon columnKey="originalPdfName" />
-              </Button>
-            </TableHead>
-            <TableHead className="h-8">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('customerId')}
-              >
-                Customer
-                <SortIcon columnKey="customerId" />
-              </Button>
-            </TableHead>
-            <TableHead className="h-8">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('ocrStatus')}
-              >
-                Status
-                <SortIcon columnKey="ocrStatus" />
-              </Button>
-            </TableHead>
-            <TableHead className="hidden h-8 md:table-cell">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('createdAt')}
-              >
-                Uploaded
-                <SortIcon columnKey="createdAt" />
-              </Button>
-            </TableHead>
-            <TableHead className="h-8 w-10"></TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {sortedEstimates.map((estimate) => (
-            <TableRow key={estimate.id} className="h-10">
-              <TableCell className="py-1.5">
-                <div className="flex items-center gap-2">
-                  <FileText className="h-4 w-4 shrink-0 text-primary" />
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{estimate.originalPdfName}</p>
-                    <p className="text-[10px] font-mono text-muted-foreground">
-                      {estimate.id.slice(-8)}
-                    </p>
-                  </div>
-                </div>
-              </TableCell>
-              <TableCell className="py-1.5">
-                <span
-                  className={`text-sm ${
-                    estimate.customerId ? 'text-foreground' : 'text-muted-foreground italic'
-                  }`}
+    <>
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="h-8">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-7 px-2 text-xs font-medium"
+                  onClick={() => handleSort('originalPdfName')}
                 >
-                  {getCustomerName(estimate.customerId)}
-                </span>
-              </TableCell>
-              <TableCell className="py-1.5">
-                <div className="flex items-center gap-1.5">
-                  {getStatusIcon(estimate.ocrStatus)}
-                  {getStatusBadge(estimate.ocrStatus)}
-                </div>
-              </TableCell>
-              <TableCell className="hidden py-1.5 text-sm md:table-cell">
-                {new Date(estimate.createdAt).toLocaleDateString()}
-              </TableCell>
-              <TableCell className="py-1.5">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-7 w-7">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem asChild>
-                      <a href={`/app/estimates/${estimate.id}`}>
-                        <Eye className="mr-2 h-4 w-4" />
-                        View Details
-                      </a>
-                    </DropdownMenuItem>
-                    {estimate.ocrStatus === 'done' && (
+                  File Name
+                  <SortIcon columnKey="originalPdfName" />
+                </Button>
+              </TableHead>
+              <TableHead className="h-8">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-7 px-2 text-xs font-medium"
+                  onClick={() => handleSort('customerId')}
+                >
+                  Customer
+                  <SortIcon columnKey="customerId" />
+                </Button>
+              </TableHead>
+              <TableHead className="h-8">
+                <span className="text-xs font-medium">Convert To</span>
+              </TableHead>
+              <TableHead className="hidden h-8 md:table-cell">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-7 px-2 text-xs font-medium"
+                  onClick={() => handleSort('createdAt')}
+                >
+                  Uploaded
+                  <SortIcon columnKey="createdAt" />
+                </Button>
+              </TableHead>
+              <TableHead className="h-8 w-10"></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sortedEstimates.map((estimate) => (
+              <TableRow key={estimate.id} className="h-10">
+                <TableCell className="py-1.5">
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-4 w-4 shrink-0 text-primary" />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{estimate.originalPdfName}</p>
+                      <p className="text-[10px] font-mono text-muted-foreground">
+                        {estimate.id.slice(-8)}
+                      </p>
+                    </div>
+                  </div>
+                </TableCell>
+                <TableCell className="py-1.5">
+                  <span
+                    className={`text-sm ${
+                      estimate.customerId ? 'text-foreground' : 'text-muted-foreground italic'
+                    }`}
+                  >
+                    {getCustomerName(estimate.customerId)}
+                  </span>
+                </TableCell>
+                <TableCell className="py-1.5">
+                  {estimate.ocrStatus === 'done' ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs">
+                          <FileOutput className="h-3.5 w-3.5" />
+                          Quote
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start">
+                        <DropdownMenuItem onClick={() => setWizardEstimate(estimate)}>
+                          <User className="mr-2 h-4 w-4" />
+                          Customer Quote
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setWizardEstimate(estimate)}>
+                          <Factory className="mr-2 h-4 w-4" />
+                          Manufacturer Quote
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => setWizardEstimate(estimate)}>
+                          <Users className="mr-2 h-4 w-4" />
+                          Both
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : (
+                    <Badge variant="secondary" className="h-6 text-xs">
+                      {estimate.ocrStatus === 'processing' ? 'Processing...' : estimate.ocrStatus}
+                    </Badge>
+                  )}
+                </TableCell>
+                <TableCell className="hidden py-1.5 text-sm md:table-cell">
+                  {new Date(estimate.createdAt).toLocaleDateString()}
+                </TableCell>
+                <TableCell className="py-1.5">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-7 w-7">
+                        <MoreHorizontal className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
                       <DropdownMenuItem asChild>
-                        <a href={`/app/estimates/${estimate.id}/review`}>
-                          Review Fields
+                        <a href={`/app/estimates/${estimate.id}`}>
+                          <Eye className="mr-2 h-4 w-4" />
+                          View Details
                         </a>
                       </DropdownMenuItem>
-                    )}
-                    <DropdownMenuItem asChild>
-                      <a href={`/app/quotes/new?estimateId=${estimate.id}`}>
-                        Create Quote
-                      </a>
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+                      {estimate.ocrStatus === 'done' && (
+                        <DropdownMenuItem asChild>
+                          <a href={`/app/estimates/${estimate.id}/review`}>
+                            Review Fields
+                          </a>
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {wizardEstimate && (
+        <ConvertToQuoteWizard
+          estimate={wizardEstimate}
+          open={!!wizardEstimate}
+          onOpenChange={(open) => !open && setWizardEstimate(null)}
+        />
+      )}
+    </>
   );
 }
