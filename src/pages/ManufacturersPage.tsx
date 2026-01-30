@@ -30,6 +30,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { manufacturerStorage } from '@/lib/storage';
+import { AddressFields, getAddressFromFormData } from '@/components/forms/AddressFields';
 import type { Manufacturer } from '@/types';
 
 export default function ManufacturersPage() {
@@ -52,7 +53,7 @@ export default function ManufacturersPage() {
       primaryContactName: formData.get('primaryContactName') as string,
       email: formData.get('email') as string,
       phone: formData.get('phone') as string,
-      address: formData.get('address') as string,
+      address: getAddressFromFormData(formData, 'address'),
       website: formData.get('website') as string,
       notes: formData.get('notes') as string,
     };
@@ -170,15 +171,11 @@ export default function ManufacturersPage() {
                     defaultValue={editingManufacturer?.website}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="address">Address</Label>
-                  <Textarea
-                    id="address"
-                    name="address"
-                    defaultValue={editingManufacturer?.address}
-                    rows={2}
-                  />
-                </div>
+                <AddressFields
+                  prefix="address"
+                  label="Address"
+                  defaultValue={editingManufacturer?.address}
+                />
                 <div className="space-y-2">
                   <Label htmlFor="notes">Notes</Label>
                   <Textarea
