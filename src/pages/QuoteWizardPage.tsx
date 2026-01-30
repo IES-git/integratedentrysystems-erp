@@ -5,7 +5,6 @@ import { Button } from '@/components/ui/button';
 import { WizardSteps, type WizardStep } from '@/components/estimates/wizard/WizardSteps';
 import { ExistingQuotesStep } from '@/components/quotes/wizard/ExistingQuotesStep';
 import { RecipientStep } from '@/components/quotes/wizard/RecipientStep';
-import { QuoteTypeStep } from '@/components/quotes/wizard/QuoteTypeStep';
 import { TemplateSelectionStep } from '@/components/quotes/wizard/TemplateSelectionStep';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -18,10 +17,9 @@ import {
 import type { Estimate, Quote, Customer, Manufacturer, Template } from '@/types';
 
 const WIZARD_STEPS: WizardStep[] = [
-  { id: 'existing', title: 'Previous Quotes', description: 'Use existing as template' },
+  { id: 'existing', title: 'Previous Quotes', description: 'Use details from a previous quote' },
   { id: 'recipient', title: 'Recipients', description: 'Select customer & manufacturer' },
-  { id: 'type', title: 'Quote Type', description: 'Choose output type' },
-  { id: 'template', title: 'Select from Templates', description: 'Choose format' },
+  { id: 'template', title: 'Templates', description: 'Choose output format' },
 ];
 
 export default function QuoteWizardPage() {
@@ -116,10 +114,6 @@ export default function QuoteWizardPage() {
     setCurrentStepIndex(2);
   }, []);
 
-  const handleQuoteTypeNext = useCallback(() => {
-    setCurrentStepIndex(3);
-  }, []);
-
   const handleComplete = useCallback(() => {
     if (!estimate) return;
 
@@ -197,17 +191,6 @@ export default function QuoteWizardPage() {
           )}
 
           {currentStepIndex === 2 && (
-            <QuoteTypeStep
-              quoteType={quoteType}
-              hasCustomer={!!selectedCustomerId}
-              hasManufacturer={!!selectedManufacturerId}
-              onQuoteTypeChange={setQuoteType}
-              onBack={handleBack}
-              onNext={handleQuoteTypeNext}
-            />
-          )}
-
-          {currentStepIndex === 3 && (
             <TemplateSelectionStep
               templates={templates}
               quoteType={quoteType}
