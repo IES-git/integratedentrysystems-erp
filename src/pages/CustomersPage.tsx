@@ -30,6 +30,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { customerStorage } from '@/lib/storage';
+import { AddressFields, getAddressFromFormData } from '@/components/forms/AddressFields';
 import type { Customer } from '@/types';
 
 export default function CustomersPage() {
@@ -52,8 +53,8 @@ export default function CustomersPage() {
       primaryContactName: formData.get('primaryContactName') as string,
       email: formData.get('email') as string,
       phone: formData.get('phone') as string,
-      billingAddress: formData.get('billingAddress') as string,
-      shippingAddress: formData.get('shippingAddress') as string,
+      billingAddress: getAddressFromFormData(formData, 'billing'),
+      shippingAddress: getAddressFromFormData(formData, 'shipping'),
       notes: formData.get('notes') as string,
     };
 
@@ -160,24 +161,16 @@ export default function CustomersPage() {
                     />
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="billingAddress">Billing Address</Label>
-                  <Textarea
-                    id="billingAddress"
-                    name="billingAddress"
-                    defaultValue={editingCustomer?.billingAddress}
-                    rows={2}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="shippingAddress">Shipping Address</Label>
-                  <Textarea
-                    id="shippingAddress"
-                    name="shippingAddress"
-                    defaultValue={editingCustomer?.shippingAddress}
-                    rows={2}
-                  />
-                </div>
+                <AddressFields
+                  prefix="billing"
+                  label="Billing Address"
+                  defaultValue={editingCustomer?.billingAddress}
+                />
+                <AddressFields
+                  prefix="shipping"
+                  label="Shipping Address"
+                  defaultValue={editingCustomer?.shippingAddress}
+                />
                 <div className="space-y-2">
                   <Label htmlFor="notes">Notes</Label>
                   <Textarea
