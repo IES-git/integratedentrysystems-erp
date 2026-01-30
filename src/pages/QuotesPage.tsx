@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { FileCheck, Search, MoreHorizontal, Plus, Send, CheckCircle, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,12 +20,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { SelectEstimateModal } from '@/components/quotes/SelectEstimateModal';
 import { quoteStorage, customerStorage } from '@/lib/storage';
 import type { Quote, QuoteStatus } from '@/types';
 
 export default function QuotesPage() {
+  const navigate = useNavigate();
   const [quotes] = useState<Quote[]>(quoteStorage.getAll());
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSelectModalOpen, setIsSelectModalOpen] = useState(false);
 
   const customers = customerStorage.getAll();
 
@@ -59,6 +63,10 @@ export default function QuotesPage() {
     }).format(amount);
   };
 
+  const handleSelectEstimate = (estimateId: string) => {
+    navigate(`/app/quotes/new?estimateId=${estimateId}`);
+  };
+
   return (
     <div className="p-6 lg:p-8">
       <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -68,13 +76,17 @@ export default function QuotesPage() {
             Manage customer and manufacturer quotes
           </p>
         </div>
-        <Button asChild>
-          <a href="/app/estimates">
-            <Plus className="mr-2 h-4 w-4" />
-            New Quote
-          </a>
+        <Button onClick={() => setIsSelectModalOpen(true)}>
+          <Plus className="mr-2 h-4 w-4" />
+          New Quote
         </Button>
       </div>
+
+      <SelectEstimateModal
+        open={isSelectModalOpen}
+        onOpenChange={setIsSelectModalOpen}
+        onSelect={handleSelectEstimate}
+      />
 
       <div className="mb-6 grid gap-4 md:grid-cols-4">
         <Card>
