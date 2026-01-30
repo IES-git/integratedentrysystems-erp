@@ -489,4 +489,34 @@ export function initializeDemoData(): void {
       notes: 'Commercial steel doors and frames',
     });
   }
+
+  // Create demo templates if none exist
+  if (templateStorage.getAll().length === 0) {
+    const currentUser = userStorage.getCurrentUser();
+    const userId = currentUser?.id || 'system';
+
+    templateStorage.create({
+      name: 'Standard Customer Quote',
+      audience: 'customer',
+      description: 'Professional customer-facing quote with pricing and specifications',
+      matchingRulesJson: JSON.stringify({ includesPricing: true, includesSpecs: true }),
+      createdByUserId: userId,
+    });
+
+    templateStorage.create({
+      name: 'Detailed Manufacturer RFQ',
+      audience: 'manufacturer',
+      description: 'Comprehensive request for quote with all technical specifications',
+      matchingRulesJson: JSON.stringify({ detailed: true, technical: true }),
+      createdByUserId: userId,
+    });
+
+    templateStorage.create({
+      name: 'Quick Estimate Summary',
+      audience: 'customer',
+      description: 'Simplified quote format for fast turnaround projects',
+      matchingRulesJson: JSON.stringify({ simplified: true }),
+      createdByUserId: userId,
+    });
+  }
 }
