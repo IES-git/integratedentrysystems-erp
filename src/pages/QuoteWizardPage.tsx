@@ -21,7 +21,7 @@ const WIZARD_STEPS: WizardStep[] = [
   { id: 'existing', title: 'Previous Quotes', description: 'Use existing as template' },
   { id: 'recipient', title: 'Recipients', description: 'Select customer & manufacturer' },
   { id: 'type', title: 'Quote Type', description: 'Choose output type' },
-  { id: 'template', title: 'Template', description: 'Select format' },
+  { id: 'template', title: 'Select from Templates', description: 'Choose format' },
 ];
 
 export default function QuoteWizardPage() {

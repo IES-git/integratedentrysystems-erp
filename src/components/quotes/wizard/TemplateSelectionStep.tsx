@@ -35,7 +35,10 @@ export function TemplateSelectionStep({
   onBack,
   onComplete,
 }: TemplateSelectionStepProps) {
-  const [selectionMode, setSelectionMode] = useState<SelectionMode>('templates');
+  // Default to 'ai' if no templates available, otherwise 'templates'
+  const [selectionMode, setSelectionMode] = useState<SelectionMode>(() => 
+    templates.length === 0 ? 'ai' : 'templates'
+  );
   const [searchQuery, setSearchQuery] = useState('');
 
   // Filter templates by audience based on quote type
