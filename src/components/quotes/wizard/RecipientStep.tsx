@@ -89,36 +89,45 @@ export function RecipientStep({
         Select the customer and/or manufacturer for this quote.
       </p>
 
-      {/* Use Current Customer Option */}
-      {currentCustomer && (
-        <div
-          onClick={() => {
+      {/* Use Current Customer Option - or show disabled if no customer */}
+      <div
+        onClick={() => {
+          if (currentCustomer) {
             onUseCurrentChange(true);
             onCustomerChange(currentCustomer.id);
-          }}
-          className={cn(
-            'rounded-lg border-2 p-4 cursor-pointer transition-all',
-            useCurrentRecipients && selectedCustomerId === currentCustomer.id
-              ? 'border-primary bg-primary/5 ring-2 ring-primary/20'
-              : 'border-border hover:border-muted-foreground/50'
-          )}
-        >
-          <div className="flex items-center gap-4">
-            <SelectionIndicator
-              selected={useCurrentRecipients && selectedCustomerId === currentCustomer.id}
-            />
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <User className="h-4 w-4 text-muted-foreground" />
-                <span className="font-medium">Use Estimate Customer</span>
-              </div>
+          }
+        }}
+        className={cn(
+          'rounded-lg border-2 p-4 transition-all',
+          currentCustomer ? 'cursor-pointer' : 'cursor-not-allowed opacity-60',
+          currentCustomer && useCurrentRecipients && selectedCustomerId === currentCustomer.id
+            ? 'border-primary bg-primary/5 ring-2 ring-primary/20'
+            : 'border-border hover:border-muted-foreground/50'
+        )}
+      >
+        <div className="flex items-center gap-4">
+          <SelectionIndicator
+            selected={!!currentCustomer && useCurrentRecipients && selectedCustomerId === currentCustomer.id}
+          />
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <User className="h-4 w-4 text-muted-foreground" />
+              <span className="font-medium">
+                {currentCustomer ? 'Use Estimate Customer' : 'No Estimate Customer Available'}
+              </span>
+            </div>
+            {currentCustomer ? (
               <p className="mt-1 text-sm text-muted-foreground pl-6">
                 {currentCustomer.name} – {currentCustomer.primaryContactName}
               </p>
-            </div>
+            ) : (
+              <p className="mt-1 text-sm text-muted-foreground pl-6 italic">
+                This estimate has no assigned customer
+              </p>
+            )}
           </div>
         </div>
-      )}
+      </div>
 
       {/* Select Different Customer */}
       <div

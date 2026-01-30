@@ -30,6 +30,7 @@ export default function QuoteWizardPage() {
   const { toast } = useToast();
 
   const estimateId = searchParams.get('estimateId');
+  const initialQuoteType = searchParams.get('quoteType') as 'customer' | 'manufacturer' | 'both' | null;
 
   // Data
   const [estimate, setEstimate] = useState<Estimate | null>(null);
@@ -44,7 +45,7 @@ export default function QuoteWizardPage() {
   const [useCurrentRecipients, setUseCurrentRecipients] = useState(true);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [selectedManufacturerId, setSelectedManufacturerId] = useState<string | null>(null);
-  const [quoteType, setQuoteType] = useState<'customer' | 'manufacturer' | 'both'>('customer');
+  const [quoteType, setQuoteType] = useState<'customer' | 'manufacturer' | 'both'>(initialQuoteType || 'customer');
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
 
   const currentCustomer = useMemo(
@@ -82,6 +83,10 @@ export default function QuoteWizardPage() {
 
     setEstimate(est);
     setSelectedCustomerId(est.customerId);
+    // If no customer on estimate, pre-select "Select Different Recipients" mode
+    if (!est.customerId) {
+      setUseCurrentRecipients(false);
+    }
     setCustomers(customerStorage.getAll());
     setManufacturers(manufacturerStorage.getAll());
     setTemplates(templateStorage.getAll());

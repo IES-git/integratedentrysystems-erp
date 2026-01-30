@@ -47,8 +47,8 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
     }
   };
 
-  const handleConvertToQuote = (estimateId: string) => {
-    navigate(`/app/quotes/wizard?estimateId=${estimateId}`);
+  const handleConvertToQuote = (estimateId: string, quoteType: 'customer' | 'manufacturer' | 'both') => {
+    navigate(`/app/quotes/wizard?estimateId=${estimateId}&quoteType=${quoteType}`);
   };
 
   const sortedEstimates = useMemo(() => {
@@ -166,15 +166,15 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start">
-                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id)}>
+                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'customer')}>
                         <User className="mr-2 h-4 w-4" />
                         Customer Quote
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id)}>
+                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'manufacturer')}>
                         <Factory className="mr-2 h-4 w-4" />
                         Manufacturer Quote
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id)}>
+                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'both')}>
                         <Users className="mr-2 h-4 w-4" />
                         Multiple Quotes
                       </DropdownMenuItem>

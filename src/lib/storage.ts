@@ -446,4 +446,47 @@ export function initializeDemoData(): void {
       notes: 'Large commercial projects',
     });
   }
+
+  // Create demo manufacturers if none exist
+  if (manufacturerStorage.getAll().length === 0) {
+    manufacturerStorage.create({
+      name: 'CECO Door Products',
+      primaryContactName: 'Tom Henderson',
+      email: 'thenderson@cecodoor.com',
+      phone: '(800) 232-6773',
+      address: '1601 Blount Rd, Pompano Beach, FL 33069',
+      website: 'https://www.cecodoor.com',
+      notes: 'Primary hollow metal door supplier',
+    });
+
+    manufacturerStorage.create({
+      name: 'Curries Company',
+      primaryContactName: 'Amanda Foster',
+      email: 'afoster@curries.com',
+      phone: '(800) 324-8830',
+      address: '1502 12th St NW, Mason City, IA 50401',
+      website: 'https://www.curries.com',
+      notes: 'Steel doors and frames - quick turnaround',
+    });
+
+    manufacturerStorage.create({
+      name: 'Steelcraft',
+      primaryContactName: 'David Kim',
+      email: 'dkim@steelcraft.com',
+      phone: '(800) 543-4501',
+      address: '9017 Blue Ash Rd, Cincinnati, OH 45242',
+      website: 'https://www.steelcraft.com',
+      notes: 'Premium hollow metal doors',
+    });
+
+    manufacturerStorage.create({
+      name: 'Republic Doors',
+      primaryContactName: 'Jennifer Blake',
+      email: 'jblake@republicdoor.com',
+      phone: '(800) 733-3667',
+      address: '155 Republic Dr, McKenzie, TN 38201',
+      website: 'https://www.republicdoor.com',
+      notes: 'Commercial steel doors and frames',
+    });
+  }
 }
