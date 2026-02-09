@@ -192,11 +192,11 @@ export default function QuoteWizardPage() {
               Back to Estimates
             </Button>
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                <FileOutput className="h-5 w-5 text-primary" />
+              <div className="flex h-8 w-8 sm:h-10 sm:w-10 items-center justify-center rounded-lg bg-primary/10">
+                <FileOutput className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
               </div>
               <div className="flex-1 min-w-0">
-                <h1 className="font-display text-3xl tracking-wide">Create Quote</h1>
+                <h1 className="font-display text-xl sm:text-2xl lg:text-3xl tracking-wide">Create Quote</h1>
                 <p className="text-sm text-muted-foreground truncate">
                   From: {estimate.originalFileName}
                 </p>
