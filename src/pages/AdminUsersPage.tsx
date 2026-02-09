@@ -53,8 +53,13 @@ export default function AdminUsersPage() {
   );
 
   const handleCreateUser = (formData: FormData) => {
+    const fullName = formData.get('name') as string;
+    const parts = fullName.trim().split(/\s+/);
     userStorage.create({
-      name: formData.get('name') as string,
+      name: fullName,
+      firstName: parts[0] || '',
+      lastName: parts.slice(1).join(' ') || '',
+      jobTitle: '',
       email: formData.get('email') as string,
       role: formData.get('role') as UserRole,
       active: true,

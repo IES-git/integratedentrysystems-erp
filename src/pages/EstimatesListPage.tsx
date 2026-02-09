@@ -117,10 +117,10 @@ export default function EstimatesListPage() {
   };
 
   return (
-    <div className="p-6 lg:p-8">
+    <div className="p-4 sm:p-6 lg:p-8">
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="font-display text-4xl tracking-wide">Estimates</h1>
+          <h1 className="font-display text-2xl sm:text-3xl lg:text-4xl tracking-wide">Estimates</h1>
           <p className="mt-1 text-muted-foreground">
             View and manage parsed PDF estimates
           </p>

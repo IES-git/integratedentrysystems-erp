@@ -81,7 +81,7 @@ export default function DashboardPage() {
       case 'sales':
         return (
           <>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               <StatCard
                 title="New Estimates"
                 value={pendingEstimates}
@@ -183,7 +183,7 @@ export default function DashboardPage() {
       case 'ops':
         return (
           <>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               <StatCard
                 title="Active Orders"
                 value={activeOrders}
@@ -253,7 +253,7 @@ export default function DashboardPage() {
       case 'finance':
         return (
           <>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               <StatCard
                 title="Total Revenue"
                 value="$0"
@@ -304,7 +304,7 @@ export default function DashboardPage() {
       case 'hr':
         return (
           <>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               <StatCard
                 title="Total Users"
                 value={4}
@@ -382,9 +382,9 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="p-6 lg:p-8">
+    <div className="p-4 sm:p-6 lg:p-8">
       <div className="mb-8">
-        <h1 className="font-display text-4xl tracking-wide">Dashboard</h1>
+        <h1 className="font-display text-2xl sm:text-3xl lg:text-4xl tracking-wide">Dashboard</h1>
         <p className="mt-1 text-muted-foreground">
           Welcome back, {user?.name}. Here's your overview.
         </p>

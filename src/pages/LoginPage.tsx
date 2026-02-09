@@ -60,12 +60,9 @@ export default function LoginPage() {
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-4 text-center">
           <div className="flex justify-center">
-            <img src={iesLogo} alt="IES Logo" className="h-16 w-auto" />
+            <img src={iesLogo} alt="IES Logo" className="h-20 w-auto" />
           </div>
           <div>
-            <CardTitle className="font-display text-3xl tracking-wide">
-              IES Internal Portal
-            </CardTitle>
             <CardDescription className="mt-2">
               Sign in to access the ERP + CRM system
             </CardDescription>

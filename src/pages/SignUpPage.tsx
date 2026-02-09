@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { ArrowLeft } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -108,14 +109,16 @@ export default function SignUpPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <Card className="w-full max-w-md">
-        <CardHeader className="space-y-4 text-center">
+        <CardHeader className="relative space-y-4 text-center">
+          <Button variant="ghost" size="icon" className="absolute left-4 top-4" asChild>
+            <Link to="/login">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+          </Button>
           <div className="flex justify-center">
-            <img src={iesLogo} alt="IES Logo" className="h-16 w-auto" />
+            <img src={iesLogo} alt="IES Logo" className="h-20 w-auto" />
           </div>
           <div>
-            <CardTitle className="font-display text-3xl tracking-wide">
-              Create Account
-            </CardTitle>
             <CardDescription className="mt-2">
               Sign up to access the IES Internal Portal
             </CardDescription>
