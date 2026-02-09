@@ -50,17 +50,17 @@ export default function OrdersPage() {
   };
 
   return (
-    <div className="p-6 lg:p-8">
+    <div className="p-4 sm:p-6 lg:p-8">
       <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="font-display text-4xl tracking-wide">Orders</h1>
+          <h1 className="font-display text-2xl sm:text-3xl lg:text-4xl tracking-wide">Orders</h1>
           <p className="mt-1 text-muted-foreground">
             Track order lifecycle from approval to delivery
           </p>
         </div>
       </div>
 
-      <div className="mb-6 grid gap-4 md:grid-cols-5">
+      <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-5">
         {(['pending', 'ordered', 'in_production', 'shipped', 'completed'] as OrderStatus[]).map((status) => {
           const config = getStatusConfig(status);
           const count = orders.filter((o) => o.status === status).length;

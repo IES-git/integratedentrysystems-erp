@@ -68,10 +68,10 @@ export default function QuotesPage() {
   };
 
   return (
-    <div className="p-6 lg:p-8">
+    <div className="p-4 sm:p-6 lg:p-8">
       <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="font-display text-4xl tracking-wide">Quotes</h1>
+          <h1 className="font-display text-2xl sm:text-3xl lg:text-4xl tracking-wide">Quotes</h1>
           <p className="mt-1 text-muted-foreground">
             Manage customer and manufacturer quotes
           </p>
@@ -88,7 +88,7 @@ export default function QuotesPage() {
         onSelect={handleSelectEstimate}
       />
 
-      <div className="mb-6 grid gap-4 md:grid-cols-4">
+      <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between">

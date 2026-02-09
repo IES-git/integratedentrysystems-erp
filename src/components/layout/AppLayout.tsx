@@ -1,7 +1,8 @@
 import { Outlet, Navigate } from 'react-router-dom';
-import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar';
+import { SidebarProvider, SidebarInset, SidebarTrigger } from '@/components/ui/sidebar';
 import { AppSidebar } from '@/components/layout/AppSidebar';
 import { useAuth } from '@/contexts/AuthContext';
+import iesLogoIcon from '@/assets/ies-logo-icon.png';
 
 export function AppLayout() {
   const { user, isLoading } = useAuth();
@@ -28,10 +29,15 @@ export function AppLayout() {
   console.log('AppLayout: Rendering app with sidebar');
 
   return (
-    <SidebarProvider>
+      <SidebarProvider>
       <div className="flex h-screen w-full overflow-hidden">
         <AppSidebar />
         <SidebarInset className="flex flex-1 flex-col min-w-0 overflow-hidden">
+          {/* Mobile-only sticky header with sidebar trigger */}
+          <header className="sticky top-0 z-30 flex h-12 items-center gap-3 border-b border-border bg-background px-4 md:hidden">
+            <SidebarTrigger className="-ml-1" />
+            <img src={iesLogoIcon} alt="IES" className="h-6 w-auto" />
+          </header>
           <main className="flex-1 min-h-0 overflow-auto">
             <Outlet />
           </main>
