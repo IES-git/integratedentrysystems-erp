@@ -109,14 +109,12 @@ export default function SignUpPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <Card className="w-full max-w-md">
-        <CardHeader className="space-y-4 text-center">
-          <div className="flex justify-start">
-            <Button variant="ghost" size="icon" asChild>
-              <Link to="/login">
-                <ArrowLeft className="h-4 w-4" />
-              </Link>
-            </Button>
-          </div>
+        <CardHeader className="relative space-y-4 text-center">
+          <Button variant="ghost" size="icon" className="absolute left-4 top-4" asChild>
+            <Link to="/login">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+          </Button>
           <div className="flex justify-center">
             <img src={iesLogo} alt="IES Logo" className="h-20 w-auto" />
           </div>
