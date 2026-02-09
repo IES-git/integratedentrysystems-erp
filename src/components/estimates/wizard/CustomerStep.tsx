@@ -45,11 +45,20 @@ export function CustomerStep({
   });
   const [selectedInList, setSelectedInList] = useState<string | null>(selectedCustomerId);
 
-  // Find OCR matched customer
+  // Find OCR matched customer (exact or fuzzy match)
   const ocrMatchedCustomer = useMemo(() => {
     if (!extractedCustomer?.name) return null;
+    const extractedLower = extractedCustomer.name.toLowerCase().trim();
+    // Try exact match first
+    const exact = customers.find(
+      (c) => c.name.toLowerCase().trim() === extractedLower
+    );
+    if (exact) return exact;
+    // Try partial / includes match
     return customers.find(
-      (c) => c.name.toLowerCase() === extractedCustomer.name?.toLowerCase()
+      (c) =>
+        c.name.toLowerCase().includes(extractedLower) ||
+        extractedLower.includes(c.name.toLowerCase())
     ) || null;
   }, [extractedCustomer, customers]);
 
@@ -69,17 +78,20 @@ export function CustomerStep({
   // Determine if user can proceed
   const canProceed = useMemo(() => {
     if (selectionMode === 'none') return true;
-    if (selectionMode === 'ocr' && ocrMatchedCustomer) return true;
+    // Allow proceeding with OCR option whenever an extracted customer name exists
+    // (whether or not there is a matching DB record)
+    if (selectionMode === 'ocr' && extractedCustomer?.name) return true;
     if (selectionMode === 'existing' && selectedInList) return true;
     return false;
-  }, [selectionMode, ocrMatchedCustomer, selectedInList]);
+  }, [selectionMode, extractedCustomer, selectedInList]);
 
   // Update parent when selection changes
   useEffect(() => {
     if (selectionMode === 'none') {
       onSelectCustomer(null, true);
-    } else if (selectionMode === 'ocr' && ocrMatchedCustomer) {
-      onSelectCustomer(ocrMatchedCustomer.id, false);
+    } else if (selectionMode === 'ocr') {
+      // If there's a DB match, use that customer's ID; otherwise proceed with null
+      onSelectCustomer(ocrMatchedCustomer?.id ?? null, false);
     } else if (selectionMode === 'existing' && selectedInList) {
       onSelectCustomer(selectedInList, false);
     } else {
@@ -163,9 +175,22 @@ export function CustomerStep({
                 {extractedCustomer.email && (
                   <p className="text-muted-foreground">{extractedCustomer.email}</p>
                 )}
-                <p className="text-xs text-muted-foreground mt-1">
-                  Confidence: {Math.round(extractedCustomer.confidence * 100)}%
-                </p>
+                <div className="flex items-center gap-3 mt-1">
+                  <p className="text-xs text-muted-foreground">
+                    Confidence: {Math.round(extractedCustomer.confidence * 100)}%
+                  </p>
+                  {ocrMatchedCustomer ? (
+                    <Badge variant="outline" className="text-xs text-success border-success/30 bg-success/10">
+                      <CheckCircle2 className="mr-1 h-3 w-3" />
+                      Matched to {ocrMatchedCustomer.name}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-xs text-blue-600 border-blue-600/30 bg-blue-600/10">
+                      <AlertCircle className="mr-1 h-3 w-3" />
+                      Will be added to customer database
+                    </Badge>
+                  )}
+                </div>
               </div>
             ) : (
               <p className="text-sm text-muted-foreground pl-6">

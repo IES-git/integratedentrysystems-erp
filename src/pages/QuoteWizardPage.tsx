@@ -7,14 +7,32 @@ import { ExistingQuotesStep } from '@/components/quotes/wizard/ExistingQuotesSte
 import { RecipientStep } from '@/components/quotes/wizard/RecipientStep';
 import { TemplateSelectionStep } from '@/components/quotes/wizard/TemplateSelectionStep';
 import { useToast } from '@/hooks/use-toast';
+import { getEstimate } from '@/lib/estimates-api';
+import { supabase } from '@/lib/supabase';
 import {
-  estimateStorage,
   quoteStorage,
-  customerStorage,
   manufacturerStorage,
   templateStorage,
 } from '@/lib/storage';
 import type { Estimate, Quote, Customer, Manufacturer, Template } from '@/types';
+
+// Map Supabase customers row to our Customer type
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapCustomerRow(row: any): Customer {
+  return {
+    id: row.id,
+    name: row.name,
+    primaryContactName: row.contact_person || '',
+    email: row.email || '',
+    phone: row.phone || '',
+    billingAddress: [row.address, row.city, row.state, row.zip]
+      .filter(Boolean)
+      .join(', '),
+    shippingAddress: '',
+    notes: row.notes || '',
+    createdAt: row.created_at,
+  };
+}
 
 const WIZARD_STEPS: WizardStep[] = [
   { id: 'existing', title: 'Previous Quotes', description: 'Use details from a previous quote' },
@@ -58,37 +76,62 @@ export default function QuoteWizardPage() {
       return;
     }
 
-    const est = estimateStorage.getById(estimateId);
-    if (!est) {
-      toast({
-        title: 'Estimate not found',
-        description: 'The requested estimate could not be found.',
-        variant: 'destructive',
-      });
-      navigate('/app/estimates');
-      return;
-    }
+    const loadData = async () => {
+      try {
+        // Load estimate from Supabase
+        const est = await getEstimate(estimateId);
+        if (!est) {
+          toast({
+            title: 'Estimate not found',
+            description: 'The requested estimate could not be found.',
+            variant: 'destructive',
+          });
+          navigate('/app/estimates');
+          return;
+        }
 
-    if (est.ocrStatus !== 'done') {
-      toast({
-        title: 'Estimate not ready',
-        description: 'This estimate is still being processed.',
-        variant: 'destructive',
-      });
-      navigate('/app/estimates');
-      return;
-    }
+        if (est.ocrStatus !== 'done') {
+          toast({
+            title: 'Estimate not ready',
+            description: 'This estimate is still being processed.',
+            variant: 'destructive',
+          });
+          navigate('/app/estimates');
+          return;
+        }
 
-    setEstimate(est);
-    setSelectedCustomerId(est.customerId);
-    // If no customer on estimate, pre-select "Select Different Recipients" mode
-    if (!est.customerId) {
-      setUseCurrentRecipients(false);
-    }
-    setCustomers(customerStorage.getAll());
-    setManufacturers(manufacturerStorage.getAll());
-    setTemplates(templateStorage.getAll());
-    setExistingQuotes(quoteStorage.getAll().filter((q) => q.estimateId === estimateId));
+        setEstimate(est);
+        setSelectedCustomerId(est.customerId);
+        // If no customer on estimate, pre-select "Select Different Recipients" mode
+        if (!est.customerId) {
+          setUseCurrentRecipients(false);
+        }
+
+        // Load customers from Supabase
+        const { data: customersData } = await supabase
+          .from('customers')
+          .select('*')
+          .order('name');
+        if (customersData) {
+          setCustomers(customersData.map(mapCustomerRow));
+        }
+
+        // Load manufacturers and templates from local storage (not migrated yet)
+        setManufacturers(manufacturerStorage.getAll());
+        setTemplates(templateStorage.getAll());
+        setExistingQuotes(quoteStorage.getAll().filter((q) => q.estimateId === estimateId));
+      } catch (err) {
+        console.error('Error loading data:', err);
+        toast({
+          title: 'Error loading data',
+          description: err instanceof Error ? err.message : 'Failed to load estimate',
+          variant: 'destructive',
+        });
+        navigate('/app/estimates');
+      }
+    };
+
+    loadData();
   }, [estimateId, navigate, toast]);
 
   const handleBack = () => {
@@ -155,7 +198,7 @@ export default function QuoteWizardPage() {
               <div className="flex-1 min-w-0">
                 <h1 className="font-display text-3xl tracking-wide">Create Quote</h1>
                 <p className="text-sm text-muted-foreground truncate">
-                  From: {estimate.originalPdfName}
+                  From: {estimate.originalFileName}
                 </p>
               </div>
             </div>

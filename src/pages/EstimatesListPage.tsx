@@ -1,19 +1,98 @@
-import { useState } from 'react';
-import { FileText, Search, Upload } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { FileText, Search, Upload, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { UploadEstimateModal } from '@/components/estimates/UploadEstimateModal';
 import { EstimatesTable } from '@/components/estimates/EstimatesTable';
-import { estimateStorage, customerStorage } from '@/lib/storage';
-import type { Estimate } from '@/types';
+import { listEstimates } from '@/lib/estimates-api';
+import { supabase } from '@/lib/supabase';
+import type { Estimate, Customer } from '@/types';
+
+// Map Supabase customers row to our Customer type
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapCustomerRow(row: any): Customer {
+  return {
+    id: row.id,
+    name: row.name,
+    primaryContactName: row.contact_person || '',
+    email: row.email || '',
+    phone: row.phone || '',
+    billingAddress: [row.address, row.city, row.state, row.zip]
+      .filter(Boolean)
+      .join(', '),
+    shippingAddress: '',
+    notes: row.notes || '',
+    createdAt: row.created_at,
+  };
+}
 
 export default function EstimatesListPage() {
-  const [estimates, setEstimates] = useState<Estimate[]>(estimateStorage.getAll());
+  const [estimates, setEstimates] = useState<Estimate[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const customers = customerStorage.getAll();
+  const loadEstimates = async () => {
+    try {
+      console.log('EstimatesListPage: Loading data from Supabase...');
+      setIsLoading(true);
+      setError(null);
+
+      // Load estimates from Supabase
+      const loadedEstimates = await listEstimates();
+      console.log('EstimatesListPage: Loaded', loadedEstimates.length, 'estimates');
+
+      // Load customers from Supabase
+      const { data: customersData } = await supabase
+        .from('customers')
+        .select('*')
+        .order('name');
+
+      const loadedCustomers = customersData ? customersData.map(mapCustomerRow) : [];
+      console.log('EstimatesListPage: Loaded', loadedCustomers.length, 'customers');
+
+      setEstimates(loadedEstimates);
+      setCustomers(loadedCustomers);
+      setIsLoading(false);
+    } catch (err) {
+      console.error('EstimatesListPage: Error loading data', err);
+      setError(err instanceof Error ? err.message : 'Failed to load estimates');
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadEstimates();
+  }, []);
+
+  if (isLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+          <p className="text-sm text-muted-foreground">Loading estimates...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-6">
+        <div className="max-w-md rounded-lg border bg-card p-6 shadow-lg">
+          <div className="mb-4 flex items-center gap-2 text-destructive">
+            <AlertCircle className="h-5 w-5" />
+            <h2 className="text-lg font-semibold">Error Loading Estimates</h2>
+          </div>
+          <p className="mb-4 text-sm text-muted-foreground">{error}</p>
+          <Button onClick={() => window.location.reload()}>Reload Page</Button>
+        </div>
+      </div>
+    );
+  }
 
   const getCustomerName = (customerId: string | null) => {
     if (!customerId) return 'Unassigned';
@@ -22,13 +101,19 @@ export default function EstimatesListPage() {
   };
 
   const filteredEstimates = estimates.filter(
-    (estimate) =>
-      estimate.originalPdfName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      getCustomerName(estimate.customerId).toLowerCase().includes(searchQuery.toLowerCase())
+    (estimate) => {
+      const fileName = estimate?.originalFileName || '';
+      const customerName = getCustomerName(estimate?.customerId || null) || '';
+      const query = searchQuery.toLowerCase();
+      
+      return fileName.toLowerCase().includes(query) || 
+             customerName.toLowerCase().includes(query);
+    }
   );
 
   const handleUploadComplete = () => {
-    setEstimates(estimateStorage.getAll());
+    // Reload estimates from Supabase after upload
+    loadEstimates();
   };
 
   return (
@@ -71,7 +156,11 @@ export default function EstimatesListPage() {
               <p className="text-muted-foreground">No estimates match your search</p>
             </div>
           ) : (
-            <EstimatesTable estimates={filteredEstimates} customers={customers} />
+            <EstimatesTable 
+              estimates={filteredEstimates} 
+              customers={customers}
+              onEstimateDeleted={loadEstimates}
+            />
           )}
         </CardContent>
       </Card>

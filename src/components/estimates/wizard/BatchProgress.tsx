@@ -60,7 +60,7 @@ export function BatchProgress({
                   )}
                 </div>
                 <FileText className="h-4 w-4 shrink-0" />
-                <span className="truncate flex-1">{estimate.originalPdfName}</span>
+                <span className="truncate flex-1">{estimate.originalFileName}</span>
                 {isCurrent && (
                   <span className="text-xs bg-primary/20 px-2 py-0.5 rounded">Current</span>
                 )}

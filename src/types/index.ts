@@ -5,6 +5,9 @@ export interface User {
   id: string;
   name: string;
   email: string;
+  firstName: string;
+  lastName: string;
+  jobTitle: string;
   role: UserRole;
   active: boolean;
   createdAt: string;
@@ -43,13 +46,20 @@ export interface Estimate {
   id: string;
   customerId: string | null;
   uploadedByUserId: string;
-  source: 'ceco_pdf';
-  originalPdfUrl: string;
-  originalPdfName: string;
+  source: string;
+  originalFileUrl: string;
+  originalFileName: string;
+  fileType: 'pdf' | 'image';
   ocrStatus: OcrStatus;
   ocrError: string | null;
+  extractedCustomerName?: string | null;
+  extractedCustomerContact?: string | null;
+  extractedCustomerEmail?: string | null;
+  extractedCustomerPhone?: string | null;
+  customerConfidence?: number | null;
   extractedAt: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface EstimateItem {
@@ -58,6 +68,7 @@ export interface EstimateItem {
   itemLabel: string;
   canonicalCode: string;
   quantity: number;
+  sortOrder?: number;
   createdAt: string;
 }
 
@@ -66,11 +77,27 @@ export type FieldValueType = 'string' | 'number' | 'bool' | 'date' | 'code';
 export interface ItemField {
   id: string;
   estimateItemId: string;
+  fieldDefinitionId?: string | null;
   fieldKey: string;
   fieldLabel: string;
   fieldValue: string;
   valueType: FieldValueType;
   sourceConfidence: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Field Definition Types
+export type FieldDefinitionStatus = 'approved' | 'pending_review';
+
+export interface FieldDefinition {
+  id: string;
+  fieldKey: string;
+  fieldLabel: string;
+  valueType: FieldValueType;
+  description: string | null;
+  status: FieldDefinitionStatus;
+  usageCount: number;
   createdAt: string;
   updatedAt: string;
 }

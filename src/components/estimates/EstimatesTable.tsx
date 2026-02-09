@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, Eye, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users } from 'lucide-react';
+import { FileText, Eye, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -15,22 +15,40 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { useToast } from '@/hooks/use-toast';
+import { deleteEstimate } from '@/lib/estimates-api';
 import type { Estimate, Customer } from '@/types';
 
-type SortKey = 'originalPdfName' | 'customerId' | 'createdAt';
+type SortKey = 'originalFileName' | 'customerId' | 'createdAt';
 type SortDirection = 'asc' | 'desc';
 
 interface EstimatesTableProps {
   estimates: Estimate[];
   customers: Customer[];
+  onEstimateDeleted?: () => void;
 }
 
-export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
+export function EstimatesTable({ estimates, customers, onEstimateDeleted }: EstimatesTableProps) {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [sortKey, setSortKey] = useState<SortKey>('createdAt');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [estimateToDelete, setEstimateToDelete] = useState<Estimate | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const getCustomerName = (customerId: string | null) => {
     if (!customerId) return 'Unassigned';
@@ -51,13 +69,46 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
     navigate(`/app/quotes/wizard?estimateId=${estimateId}&quoteType=${quoteType}`);
   };
 
+  const handleEditEstimate = (estimateId: string) => {
+    navigate(`/app/estimates/wizard?id=${estimateId}`);
+  };
+
+  const confirmDelete = (estimate: Estimate) => {
+    setEstimateToDelete(estimate);
+    setDeleteDialogOpen(true);
+  };
+
+  const handleDelete = async () => {
+    if (!estimateToDelete) return;
+
+    setIsDeleting(true);
+    try {
+      await deleteEstimate(estimateToDelete.id);
+      toast({
+        title: 'Estimate deleted',
+        description: `${estimateToDelete.originalFileName} has been deleted.`,
+      });
+      setDeleteDialogOpen(false);
+      setEstimateToDelete(null);
+      onEstimateDeleted?.();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'Failed to delete estimate',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const sortedEstimates = useMemo(() => {
     return [...estimates].sort((a, b) => {
       let comparison = 0;
       
       switch (sortKey) {
-        case 'originalPdfName':
-          comparison = a.originalPdfName.localeCompare(b.originalPdfName);
+        case 'originalFileName':
+          comparison = a.originalFileName.localeCompare(b.originalFileName);
           break;
         case 'customerId':
           comparison = getCustomerName(a.customerId).localeCompare(getCustomerName(b.customerId));
@@ -90,8 +141,9 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
   }
 
   return (
-    <div className="overflow-x-auto">
-      <Table>
+    <>
+      <div className="overflow-x-auto">
+        <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
             <TableHead className="h-8">
@@ -99,10 +151,10 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
                 variant="ghost"
                 size="sm"
                 className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('originalPdfName')}
+                onClick={() => handleSort('originalFileName')}
               >
                 File Name
-                <SortIcon columnKey="originalPdfName" />
+                <SortIcon columnKey="originalFileName" />
               </Button>
             </TableHead>
             <TableHead className="h-8">
@@ -140,7 +192,7 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
                 <div className="flex items-center gap-2">
                   <FileText className="h-4 w-4 shrink-0 text-primary" />
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{estimate.originalPdfName}</p>
+                    <p className="truncate text-sm font-medium">{estimate.originalFileName}</p>
                     <p className="text-[10px] font-mono text-muted-foreground">
                       {estimate.id.slice(-8)}
                     </p>
@@ -197,18 +249,23 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <DropdownMenuItem asChild>
-                      <a href={`/app/estimates/${estimate.id}`}>
-                        <Eye className="mr-2 h-4 w-4" />
-                        View Details
-                      </a>
-                    </DropdownMenuItem>
                     {estimate.ocrStatus === 'done' && (
-                      <DropdownMenuItem asChild>
-                        <a href={`/app/estimates/${estimate.id}/review`}>
-                          Review Fields
-                        </a>
+                      <DropdownMenuItem onClick={() => handleEditEstimate(estimate.id)}>
+                        <Pencil className="mr-2 h-4 w-4" />
+                        Edit/Review
                       </DropdownMenuItem>
+                    )}
+                    {estimate.ocrStatus !== 'processing' && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onClick={() => confirmDelete(estimate)}
+                          className="text-destructive focus:text-destructive"
+                        >
+                          <Trash2 className="mr-2 h-4 w-4" />
+                          Delete
+                        </DropdownMenuItem>
+                      </>
                     )}
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -218,5 +275,32 @@ export function EstimatesTable({ estimates, customers }: EstimatesTableProps) {
         </TableBody>
       </Table>
     </div>
+
+    {/* Delete Confirmation Dialog */}
+    <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete Estimate?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Are you sure you want to delete "{estimateToDelete?.originalFileName}"? This action cannot be undone and will also delete:
+            <ul className="mt-2 list-disc list-inside space-y-1">
+              <li>All line items and fields</li>
+              <li>The original uploaded file</li>
+            </ul>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={handleDelete}
+            disabled={isDeleting}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {isDeleting ? 'Deleting...' : 'Delete'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  </>
   );
 }

@@ -1,29 +1,79 @@
 import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, FileText, X, AlertCircle, CheckCircle2 } from 'lucide-react';
+import {
+  Upload,
+  FileText,
+  Image as ImageIcon,
+  X,
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { estimateStorage, estimateItemStorage, itemFieldStorage } from '@/lib/storage';
+import { uploadEstimateFile, processEstimate } from '@/lib/estimates-api';
 import { cn } from '@/lib/utils';
+
+// Accepted MIME types for estimates (PDF and images)
+const ACCEPTED_TYPES = [
+  'application/pdf',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+];
+const ACCEPT_ATTR = '.pdf,.jpg,.jpeg,.png,.gif';
+
+type FileStatus = 'pending' | 'uploading' | 'processing' | 'done' | 'error';
 
 interface UploadedFile {
   file: File;
+  /** Local tracking ID (not the Supabase estimate ID). */
   id: string;
-  status: 'pending' | 'processing' | 'done' | 'error';
+  status: FileStatus;
+  /** 0-100 progress indicator. */
   progress: number;
   error?: string;
+  /** Supabase estimate UUID, set once the upload phase succeeds. */
+  estimateId?: string;
+  /** Count of items extracted by Gemini. */
+  itemCount?: number;
+  /** Count of new fields discovered by Gemini. */
+  newFieldsDiscovered?: number;
+}
+
+function isAcceptedFile(file: File): boolean {
+  return ACCEPTED_TYPES.includes(file.type);
+}
+
+function fileIcon(file: File) {
+  if (file.type === 'application/pdf') {
+    return <FileText className="h-5 w-5 shrink-0 text-primary" />;
+  }
+  return <ImageIcon className="h-5 w-5 shrink-0 text-primary" />;
 }
 
 export default function EstimateUploadPage() {
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const { user } = useAuth();
   const { toast } = useToast();
   const navigate = useNavigate();
+
+  // -----------------------------------------------------------------------
+  // Drag & drop / file selection
+  // -----------------------------------------------------------------------
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -38,22 +88,26 @@ export default function EstimateUploadPage() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    const droppedFiles = Array.from(e.dataTransfer.files).filter(
-      (f) => f.type === 'application/pdf'
-    );
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(isAcceptedFile);
     addFiles(droppedFiles);
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const selectedFiles = Array.from(e.target.files).filter(
-        (f) => f.type === 'application/pdf'
-      );
+      const selectedFiles = Array.from(e.target.files).filter(isAcceptedFile);
       addFiles(selectedFiles);
     }
   };
 
   const addFiles = (newFiles: File[]) => {
+    if (newFiles.length === 0) {
+      toast({
+        title: 'Unsupported file type',
+        description: 'Only PDF, JPG, PNG, and GIF files are accepted.',
+        variant: 'destructive',
+      });
+      return;
+    }
     const uploadedFiles: UploadedFile[] = newFiles.map((file) => ({
       file,
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -67,86 +121,44 @@ export default function EstimateUploadPage() {
     setFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
-  const simulateOCR = async (uploadedFile: UploadedFile) => {
-    // Update status to processing
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === uploadedFile.id ? { ...f, status: 'processing' as const, progress: 10 } : f
-      )
-    );
+  // -----------------------------------------------------------------------
+  // Helpers to update a single file entry immutably
+  // -----------------------------------------------------------------------
 
-    // Simulate progress
-    for (let progress = 20; progress <= 90; progress += 10) {
-      await new Promise((r) => setTimeout(r, 200));
-      setFiles((prev) =>
-        prev.map((f) => (f.id === uploadedFile.id ? { ...f, progress } : f))
-      );
-    }
+  const updateFile = (id: string, patch: Partial<UploadedFile>) => {
+    setFiles((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+  };
 
-    // Create estimate in storage
-    const estimate = estimateStorage.create({
-      customerId: null,
-      uploadedByUserId: user?.id || '',
-      source: 'ceco_pdf',
-      originalPdfUrl: URL.createObjectURL(uploadedFile.file),
-      originalPdfName: uploadedFile.file.name,
-      ocrStatus: 'done',
-      ocrError: null,
-      extractedAt: new Date().toISOString(),
+  // -----------------------------------------------------------------------
+  // Upload & process a single file via Supabase
+  // -----------------------------------------------------------------------
+
+  const uploadAndProcess = async (entry: UploadedFile): Promise<string | null> => {
+    if (!user) throw new Error('You must be signed in to upload.');
+
+    // Phase 1 – Upload to Supabase Storage + create estimate row
+    updateFile(entry.id, { status: 'uploading', progress: 15 });
+
+    const { estimateId } = await uploadEstimateFile(entry.file, user.id);
+    updateFile(entry.id, { estimateId, progress: 40 });
+
+    // Phase 2 – Invoke the process-estimate Edge Function (Gemini)
+    updateFile(entry.id, { status: 'processing', progress: 55 });
+
+    const result = await processEstimate(estimateId);
+    updateFile(entry.id, {
+      status: 'done',
+      progress: 100,
+      itemCount: result.itemCount,
+      newFieldsDiscovered: result.newFieldsDiscovered,
     });
 
-    // Create sample parsed items (simulating OCR results)
-    const sampleItems = [
-      {
-        itemLabel: 'Frame 1',
-        canonicalCode: '4-0 X 7-0 HM FRAME',
-        quantity: 2,
-      },
-      {
-        itemLabel: 'Door 1',
-        canonicalCode: '3-0 X 7-0 HM DOOR',
-        quantity: 2,
-      },
-    ];
-
-    for (const item of sampleItems) {
-      const estimateItem = estimateItemStorage.create({
-        estimateId: estimate.id,
-        itemLabel: item.itemLabel,
-        canonicalCode: item.canonicalCode,
-        quantity: item.quantity,
-      });
-
-      // Add sample fields
-      const sampleFields = [
-        { fieldKey: 'gauge', fieldLabel: 'Gauge', fieldValue: '16 GA', valueType: 'code' as const },
-        { fieldKey: 'finish', fieldLabel: 'Finish', fieldValue: 'P1 Prime Paint', valueType: 'string' as const },
-        { fieldKey: 'anchor_type', fieldLabel: 'Anchor Type', fieldValue: 'Floor Anchors', valueType: 'string' as const },
-        { fieldKey: 'hinge_prep', fieldLabel: 'Hinge Prep', fieldValue: '4-1/2" x 4-1/2" STD WT', valueType: 'string' as const },
-        { fieldKey: 'strike_prep', fieldLabel: 'Strike Prep', fieldValue: 'ASA Strike', valueType: 'string' as const },
-      ];
-
-      for (const field of sampleFields) {
-        itemFieldStorage.create({
-          estimateItemId: estimateItem.id,
-          fieldKey: field.fieldKey,
-          fieldLabel: field.fieldLabel,
-          fieldValue: field.fieldValue,
-          valueType: field.valueType,
-          sourceConfidence: 0.95,
-        });
-      }
-    }
-
-    // Complete
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === uploadedFile.id ? { ...f, status: 'done' as const, progress: 100 } : f
-      )
-    );
-
-    return estimate;
+    return estimateId;
   };
+
+  // -----------------------------------------------------------------------
+  // Process all pending files
+  // -----------------------------------------------------------------------
 
   const processFiles = async () => {
     const pendingFiles = files.filter((f) => f.status === 'pending');
@@ -154,58 +166,84 @@ export default function EstimateUploadPage() {
     if (pendingFiles.length === 0) {
       toast({
         title: 'No files to process',
-        description: 'Add PDF files to upload',
+        description: 'Add PDF or image files to upload.',
         variant: 'destructive',
       });
       return;
     }
 
+    setIsProcessing(true);
+
     toast({
       title: 'Processing started',
-      description: `Processing ${pendingFiles.length} file(s)...`,
+      description: `Uploading and processing ${pendingFiles.length} file(s)…`,
     });
 
-    for (const file of pendingFiles) {
+    const processedEstimateIds: string[] = [];
+
+    for (const entry of pendingFiles) {
       try {
-        await simulateOCR(file);
-      } catch {
-        setFiles((prev) =>
-          prev.map((f) =>
-            f.id === file.id
-              ? { ...f, status: 'error' as const, error: 'Processing failed' }
-              : f
-          )
-        );
+        const estimateId = await uploadAndProcess(entry);
+        if (estimateId) processedEstimateIds.push(estimateId);
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : 'An unknown error occurred';
+        updateFile(entry.id, { status: 'error', error: message });
       }
     }
 
-    toast({
-      title: 'Processing complete',
-      description: 'All files have been processed. Review the extracted data.',
-    });
+    setIsProcessing(false);
+
+    if (processedEstimateIds.length > 0) {
+      toast({
+        title: 'Processing complete',
+        description: `${processedEstimateIds.length} estimate(s) ready for review.`,
+      });
+
+      // Navigate to wizard with all processed estimate IDs
+      const idsParam = processedEstimateIds.join(',');
+      navigate(`/app/estimates/wizard?ids=${idsParam}`);
+    } else {
+      toast({
+        title: 'Processing failed',
+        description: 'None of the files could be processed. Check errors above.',
+        variant: 'destructive',
+      });
+    }
   };
 
-  const completedCount = files.filter((f) => f.status === 'done').length;
-  const hasCompletedFiles = completedCount > 0;
+  // -----------------------------------------------------------------------
+  // Derived counts
+  // -----------------------------------------------------------------------
+
+  const pendingCount = files.filter((f) => f.status === 'pending').length;
+  const doneCount = files.filter((f) => f.status === 'done').length;
+  const errorCount = files.filter((f) => f.status === 'error').length;
+
+  // -----------------------------------------------------------------------
+  // Render
+  // -----------------------------------------------------------------------
 
   return (
     <div className="p-6 lg:p-8">
       <div className="mb-8">
         <h1 className="font-display text-4xl tracking-wide">Upload Estimate</h1>
         <p className="mt-1 text-muted-foreground">
-          Upload Ceco PDF estimates for OCR processing and field extraction
+          Upload estimate PDFs or images for AI-powered field extraction
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
+        {/* Upload card */}
         <Card>
           <CardHeader>
             <CardTitle>Upload Files</CardTitle>
             <CardDescription>
-              Drag and drop PDF files or click to browse
+              Drag and drop PDF or image files, or click to browse
             </CardDescription>
           </CardHeader>
           <CardContent>
+            {/* Drop zone */}
             <div
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -218,57 +256,87 @@ export default function EstimateUploadPage() {
             >
               <input
                 type="file"
-                accept=".pdf"
+                accept={ACCEPT_ATTR}
                 multiple
                 onChange={handleFileSelect}
                 className="absolute inset-0 cursor-pointer opacity-0"
+                disabled={isProcessing}
               />
               <Upload className="mb-4 h-10 w-10 text-muted-foreground" />
-              <p className="text-sm font-medium">Drop PDF files here</p>
+              <p className="text-sm font-medium">
+                Drop PDF or image files here
+              </p>
               <p className="mt-1 text-xs text-muted-foreground">
-                or click to browse
+                Supports PDF, JPG, PNG, GIF — or click to browse
               </p>
             </div>
 
+            {/* File list */}
             {files.length > 0 && (
               <div className="mt-6 space-y-3">
-                {files.map((file) => (
+                {files.map((entry) => (
                   <div
-                    key={file.id}
+                    key={entry.id}
                     className="flex items-center gap-3 rounded-lg border border-border p-3"
                   >
-                    <FileText className="h-5 w-5 shrink-0 text-primary" />
+                    {fileIcon(entry.file)}
+
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">
-                        {file.file.name}
+                        {entry.file.name}
                       </p>
-                      {file.status === 'processing' && (
-                        <Progress value={file.progress} className="mt-2 h-1" />
+
+                      {(entry.status === 'uploading' ||
+                        entry.status === 'processing') && (
+                        <Progress
+                          value={entry.progress}
+                          className="mt-2 h-1"
+                        />
                       )}
-                      {file.status === 'error' && (
+
+                      {entry.status === 'error' && (
                         <p className="mt-1 text-xs text-destructive">
-                          {file.error}
+                          {entry.error}
+                        </p>
+                      )}
+
+                      {entry.status === 'done' && entry.itemCount !== undefined && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {entry.itemCount} item(s) extracted
+                          {entry.newFieldsDiscovered
+                            ? `, ${entry.newFieldsDiscovered} new field(s) discovered`
+                            : ''}
                         </p>
                       )}
                     </div>
+
                     <div className="flex items-center gap-2">
-                      {file.status === 'pending' && (
+                      {entry.status === 'pending' && (
                         <Badge variant="secondary">Pending</Badge>
                       )}
-                      {file.status === 'processing' && (
-                        <Badge variant="default">Processing</Badge>
+                      {entry.status === 'uploading' && (
+                        <Badge variant="default" className="gap-1">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Uploading
+                        </Badge>
                       )}
-                      {file.status === 'done' && (
+                      {entry.status === 'processing' && (
+                        <Badge variant="default" className="gap-1">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Processing
+                        </Badge>
+                      )}
+                      {entry.status === 'done' && (
                         <CheckCircle2 className="h-5 w-5 text-success" />
                       )}
-                      {file.status === 'error' && (
+                      {entry.status === 'error' && (
                         <AlertCircle className="h-5 w-5 text-destructive" />
                       )}
-                      {file.status === 'pending' && (
+                      {entry.status === 'pending' && !isProcessing && (
                         <Button
                           variant="ghost"
                           size="icon"
-                          onClick={() => removeFile(file.id)}
+                          onClick={() => removeFile(entry.id)}
                         >
                           <X className="h-4 w-4" />
                         </Button>
@@ -279,31 +347,41 @@ export default function EstimateUploadPage() {
               </div>
             )}
 
-            <div className="mt-6 flex gap-3">
+            {/* Action button */}
+            <div className="mt-6">
               <Button
                 onClick={processFiles}
-                disabled={files.filter((f) => f.status === 'pending').length === 0}
-                className="flex-1"
+                disabled={pendingCount === 0 || isProcessing}
+                className="w-full"
               >
-                Process Files
+                {isProcessing ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Processing…
+                  </>
+                ) : (
+                  `Upload & Process ${pendingCount > 0 ? `${pendingCount} File${pendingCount !== 1 ? 's' : ''}` : 'Files'}`
+                )}
               </Button>
-              {hasCompletedFiles && (
-                <Button
-                  variant="outline"
-                  onClick={() => navigate('/app/estimates')}
-                >
-                  View Estimates
-                </Button>
+
+              {/* Summary after processing */}
+              {!isProcessing && (doneCount > 0 || errorCount > 0) && (
+                <p className="mt-3 text-center text-xs text-muted-foreground">
+                  {doneCount > 0 && `${doneCount} succeeded`}
+                  {doneCount > 0 && errorCount > 0 && ' · '}
+                  {errorCount > 0 && `${errorCount} failed`}
+                </p>
               )}
             </div>
           </CardContent>
         </Card>
 
+        {/* How it works card */}
         <Card>
           <CardHeader>
             <CardTitle>How It Works</CardTitle>
             <CardDescription>
-              The OCR extraction process
+              AI-powered estimate extraction process
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -313,9 +391,9 @@ export default function EstimateUploadPage() {
                   1
                 </div>
                 <div>
-                  <p className="font-medium">Upload PDF</p>
+                  <p className="font-medium">Upload PDF or Image</p>
                   <p className="text-sm text-muted-foreground">
-                    Upload Ceco estimate PDFs for processing
+                    Upload estimate files — PDFs, photos, or scans
                   </p>
                 </div>
               </div>
@@ -324,9 +402,10 @@ export default function EstimateUploadPage() {
                   2
                 </div>
                 <div>
-                  <p className="font-medium">OCR Extraction</p>
+                  <p className="font-medium">AI Extraction</p>
                   <p className="text-sm text-muted-foreground">
-                    System parses the PDF and extracts all field/value pairs
+                    Gemini reads the document and extracts line items, fields,
+                    and customer info automatically
                   </p>
                 </div>
               </div>
@@ -337,7 +416,8 @@ export default function EstimateUploadPage() {
                 <div>
                   <p className="font-medium">Review & Edit</p>
                   <p className="text-sm text-muted-foreground">
-                    Verify extracted data and make corrections if needed
+                    Verify the extracted data side-by-side with the original
+                    document and make corrections
                   </p>
                 </div>
               </div>
@@ -348,7 +428,8 @@ export default function EstimateUploadPage() {
                 <div>
                   <p className="font-medium">Generate Quote</p>
                   <p className="text-sm text-muted-foreground">
-                    Create customer and manufacturer quotes from the data
+                    Create customer and manufacturer quotes from the extracted
+                    data
                   </p>
                 </div>
               </div>

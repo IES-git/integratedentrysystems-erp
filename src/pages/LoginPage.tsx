@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,15 +12,16 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const { login, user } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { login, user, isLoading: authLoading } = useAuth();
 
-  // Redirect if already logged in
-  if (user) {
-    navigate('/app', { replace: true });
-    return null;
-  }
+  // Redirect to app if already logged in
+  useEffect(() => {
+    if (!authLoading && user) {
+      navigate('/app', { replace: true });
+    }
+  }, [user, authLoading, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,6 +29,7 @@ export default function LoginPage() {
 
     try {
       const success = await login(email, password);
+
       if (success) {
         toast({
           title: 'Welcome back!',
@@ -37,13 +39,14 @@ export default function LoginPage() {
       } else {
         toast({
           title: 'Login failed',
-          description: 'Invalid email or account is inactive.',
+          description: 'Invalid email or password.',
           variant: 'destructive',
         });
       }
-    } catch {
+    } catch (error: any) {
+      console.error('Login error:', error);
       toast({
-        title: 'Error',
+        title: 'Login failed',
         description: 'An error occurred during login.',
         variant: 'destructive',
       });
@@ -99,15 +102,11 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          <div className="mt-6 rounded-lg border border-border bg-muted/50 p-4">
-            <p className="mb-2 text-sm font-medium text-foreground">Demo Accounts</p>
-            <div className="space-y-1 text-xs text-muted-foreground">
-              <p><strong>Sales:</strong> john@integratedentrysystems.com</p>
-              <p><strong>Ops:</strong> sarah@integratedentrysystems.com</p>
-              <p><strong>Finance:</strong> mike@integratedentrysystems.com</p>
-              <p><strong>Admin:</strong> admin@integratedentrysystems.com</p>
-              <p className="mt-2 italic">Any password will work for demo</p>
-            </div>
+          <div className="mt-6 text-center text-sm text-muted-foreground">
+            Don't have an account?{' '}
+            <Link to="/signup" className="font-medium text-primary underline-offset-4 hover:underline">
+              Sign up
+            </Link>
           </div>
         </CardContent>
       </Card>

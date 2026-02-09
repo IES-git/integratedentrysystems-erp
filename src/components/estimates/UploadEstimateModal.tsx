@@ -1,6 +1,14 @@
 import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, FileText, X, AlertCircle, CheckCircle2 } from 'lucide-react';
+import {
+  Upload,
+  FileText,
+  Image as ImageIcon,
+  X,
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
@@ -13,16 +21,30 @@ import {
 } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { estimateStorage, estimateItemStorage, itemFieldStorage } from '@/lib/storage';
+import { uploadEstimateFile, processEstimate } from '@/lib/estimates-api';
 import { cn } from '@/lib/utils';
+
+// Accepted MIME types for estimates (PDF and images)
+const ACCEPTED_TYPES = [
+  'application/pdf',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+];
+const ACCEPT_ATTR = '.pdf,.jpg,.jpeg,.png,.gif';
+
+type FileStatus = 'pending' | 'uploading' | 'processing' | 'done' | 'error';
 
 interface UploadedFile {
   file: File;
   id: string;
-  status: 'pending' | 'processing' | 'done' | 'error';
+  status: FileStatus;
   progress: number;
   error?: string;
   estimateId?: string;
+  itemCount?: number;
+  newFieldsDiscovered?: number;
 }
 
 interface UploadEstimateModalProps {
@@ -31,13 +53,32 @@ interface UploadEstimateModalProps {
   onUploadComplete?: () => void;
 }
 
-export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: UploadEstimateModalProps) {
+function isAcceptedFile(file: File): boolean {
+  return ACCEPTED_TYPES.includes(file.type);
+}
+
+function fileIcon(file: File) {
+  if (file.type === 'application/pdf') {
+    return <FileText className="h-4 w-4 shrink-0 text-primary" />;
+  }
+  return <ImageIcon className="h-4 w-4 shrink-0 text-primary" />;
+}
+
+export function UploadEstimateModal({
+  open,
+  onOpenChange,
+  onUploadComplete,
+}: UploadEstimateModalProps) {
   const navigate = useNavigate();
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const { user } = useAuth();
   const { toast } = useToast();
+
+  // -----------------------------------------------------------------------
+  // Drag & drop / file selection
+  // -----------------------------------------------------------------------
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -52,22 +93,19 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    const droppedFiles = Array.from(e.dataTransfer.files).filter(
-      (f) => f.type === 'application/pdf'
-    );
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(isAcceptedFile);
     addFiles(droppedFiles);
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      const selectedFiles = Array.from(e.target.files).filter(
-        (f) => f.type === 'application/pdf'
-      );
+      const selectedFiles = Array.from(e.target.files).filter(isAcceptedFile);
       addFiles(selectedFiles);
     }
   };
 
   const addFiles = (newFiles: File[]) => {
+    if (newFiles.length === 0) return;
     const uploadedFiles: UploadedFile[] = newFiles.map((file) => ({
       file,
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -81,82 +119,42 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
     setFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
-  const fileToDataUrl = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
+  // -----------------------------------------------------------------------
+  // Helpers to update a single file entry immutably
+  // -----------------------------------------------------------------------
+
+  const updateFile = (id: string, patch: Partial<UploadedFile>) => {
+    setFiles((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
   };
 
-  const simulateOCR = async (uploadedFile: UploadedFile) => {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === uploadedFile.id ? { ...f, status: 'processing' as const, progress: 10 } : f
-      )
-    );
+  // -----------------------------------------------------------------------
+  // Upload & process a single file via Supabase
+  // -----------------------------------------------------------------------
 
-    // Convert file to base64 data URL for persistent storage
-    const pdfDataUrl = await fileToDataUrl(uploadedFile.file);
+  const uploadAndProcess = async (entry: UploadedFile): Promise<string | null> => {
+    if (!user) throw new Error('You must be signed in to upload.');
 
-    for (let progress = 20; progress <= 90; progress += 10) {
-      await new Promise((r) => setTimeout(r, 150));
-      setFiles((prev) =>
-        prev.map((f) => (f.id === uploadedFile.id ? { ...f, progress } : f))
-      );
-    }
+    // Phase 1 – Upload to Supabase Storage + create estimate row
+    updateFile(entry.id, { status: 'uploading', progress: 15 });
+    const { estimateId } = await uploadEstimateFile(entry.file, user.id);
+    updateFile(entry.id, { estimateId, progress: 40 });
 
-    const estimate = estimateStorage.create({
-      customerId: null,
-      uploadedByUserId: user?.id || '',
-      source: 'ceco_pdf',
-      originalPdfUrl: pdfDataUrl,
-      originalPdfName: uploadedFile.file.name,
-      ocrStatus: 'done',
-      ocrError: null,
-      extractedAt: new Date().toISOString(),
+    // Phase 2 – Invoke the process-estimate Edge Function (Gemini)
+    updateFile(entry.id, { status: 'processing', progress: 55 });
+    const result = await processEstimate(estimateId);
+    updateFile(entry.id, {
+      status: 'done',
+      progress: 100,
+      itemCount: result.itemCount,
+      newFieldsDiscovered: result.newFieldsDiscovered,
     });
 
-    const sampleItems = [
-      { itemLabel: 'Frame 1', canonicalCode: '4-0 X 7-0 HM FRAME', quantity: 2 },
-      { itemLabel: 'Door 1', canonicalCode: '3-0 X 7-0 HM DOOR', quantity: 2 },
-    ];
-
-    for (const item of sampleItems) {
-      const estimateItem = estimateItemStorage.create({
-        estimateId: estimate.id,
-        itemLabel: item.itemLabel,
-        canonicalCode: item.canonicalCode,
-        quantity: item.quantity,
-      });
-
-      const sampleFields = [
-        { fieldKey: 'gauge', fieldLabel: 'Gauge', fieldValue: '16 GA', valueType: 'code' as const },
-        { fieldKey: 'finish', fieldLabel: 'Finish', fieldValue: 'P1 Prime Paint', valueType: 'string' as const },
-        { fieldKey: 'anchor_type', fieldLabel: 'Anchor Type', fieldValue: 'Floor Anchors', valueType: 'string' as const },
-      ];
-
-      for (const field of sampleFields) {
-        itemFieldStorage.create({
-          estimateItemId: estimateItem.id,
-          fieldKey: field.fieldKey,
-          fieldLabel: field.fieldLabel,
-          fieldValue: field.fieldValue,
-          valueType: field.valueType,
-          sourceConfidence: 0.95,
-        });
-      }
-    }
-
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === uploadedFile.id ? { ...f, status: 'done' as const, progress: 100, estimateId: estimate.id } : f
-      )
-    );
-
-    return estimate;
+    return estimateId;
   };
+
+  // -----------------------------------------------------------------------
+  // Process all pending files
+  // -----------------------------------------------------------------------
 
   const processFiles = async () => {
     const pendingFiles = files.filter((f) => f.status === 'pending');
@@ -164,7 +162,7 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
     if (pendingFiles.length === 0) {
       toast({
         title: 'No files to process',
-        description: 'Add PDF files to upload',
+        description: 'Add PDF or image files to upload.',
         variant: 'destructive',
       });
       return;
@@ -174,23 +172,18 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
 
     const processedEstimateIds: string[] = [];
 
-    for (const file of pendingFiles) {
+    for (const entry of pendingFiles) {
       try {
-        const estimate = await simulateOCR(file);
-        processedEstimateIds.push(estimate.id);
-      } catch {
-        setFiles((prev) =>
-          prev.map((f) =>
-            f.id === file.id
-              ? { ...f, status: 'error' as const, error: 'Processing failed' }
-              : f
-          )
-        );
+        const estimateId = await uploadAndProcess(entry);
+        if (estimateId) processedEstimateIds.push(estimateId);
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : 'An unknown error occurred';
+        updateFile(entry.id, { status: 'error', error: message });
       }
     }
 
     setIsProcessing(false);
-    
     onUploadComplete?.();
 
     // Navigate to wizard with all processed estimate IDs
@@ -212,16 +205,22 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
   const pendingCount = files.filter((f) => f.status === 'pending').length;
   const completedCount = files.filter((f) => f.status === 'done').length;
 
+  // -----------------------------------------------------------------------
+  // Render
+  // -----------------------------------------------------------------------
+
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Upload Estimates</DialogTitle>
           <DialogDescription>
-            Drop PDF files or click to browse. Multiple files supported.
+            Drop PDF or image files, or click to browse. Multiple files
+            supported.
           </DialogDescription>
         </DialogHeader>
 
+        {/* Drop zone */}
         <div
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
@@ -234,53 +233,73 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
         >
           <input
             type="file"
-            accept=".pdf"
+            accept={ACCEPT_ATTR}
             multiple
             onChange={handleFileSelect}
             className="absolute inset-0 cursor-pointer opacity-0"
             disabled={isProcessing}
           />
           <Upload className="mb-2 h-8 w-8 text-muted-foreground" />
-          <p className="text-sm font-medium">Drop PDF files here</p>
+          <p className="text-sm font-medium">Drop PDF or image files here</p>
           <p className="text-xs text-muted-foreground">or click to browse</p>
         </div>
 
+        {/* File list */}
         {files.length > 0 && (
           <div className="max-h-[200px] space-y-2 overflow-y-auto">
-            {files.map((file) => (
+            {files.map((entry) => (
               <div
-                key={file.id}
+                key={entry.id}
                 className="flex items-center gap-2 rounded border border-border p-2"
               >
-                <FileText className="h-4 w-4 shrink-0 text-primary" />
+                {fileIcon(entry.file)}
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-medium">{file.file.name}</p>
-                  {file.status === 'processing' && (
-                    <Progress value={file.progress} className="mt-1 h-1" />
+                  <p className="truncate text-xs font-medium">
+                    {entry.file.name}
+                  </p>
+                  {(entry.status === 'uploading' ||
+                    entry.status === 'processing') && (
+                    <Progress value={entry.progress} className="mt-1 h-1" />
                   )}
-                  {file.status === 'error' && (
-                    <p className="text-xs text-destructive">{file.error}</p>
+                  {entry.status === 'error' && (
+                    <p className="text-xs text-destructive">{entry.error}</p>
+                  )}
+                  {entry.status === 'done' && entry.itemCount !== undefined && (
+                    <p className="text-xs text-muted-foreground">
+                      {entry.itemCount} item(s) extracted
+                    </p>
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
-                  {file.status === 'pending' && (
-                    <Badge variant="secondary" className="text-xs">Pending</Badge>
+                  {entry.status === 'pending' && (
+                    <Badge variant="secondary" className="text-xs">
+                      Pending
+                    </Badge>
                   )}
-                  {file.status === 'processing' && (
-                    <Badge variant="default" className="text-xs">Processing</Badge>
+                  {entry.status === 'uploading' && (
+                    <Badge variant="default" className="gap-1 text-xs">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Uploading
+                    </Badge>
                   )}
-                  {file.status === 'done' && (
+                  {entry.status === 'processing' && (
+                    <Badge variant="default" className="gap-1 text-xs">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Processing
+                    </Badge>
+                  )}
+                  {entry.status === 'done' && (
                     <CheckCircle2 className="h-4 w-4 text-success" />
                   )}
-                  {file.status === 'error' && (
+                  {entry.status === 'error' && (
                     <AlertCircle className="h-4 w-4 text-destructive" />
                   )}
-                  {file.status === 'pending' && !isProcessing && (
+                  {entry.status === 'pending' && !isProcessing && (
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6"
-                      onClick={() => removeFile(file.id)}
+                      onClick={() => removeFile(entry.id)}
                     >
                       <X className="h-3 w-3" />
                     </Button>
@@ -291,13 +310,21 @@ export function UploadEstimateModal({ open, onOpenChange, onUploadComplete }: Up
           </div>
         )}
 
+        {/* Action buttons */}
         <div className="flex gap-2">
           <Button
             onClick={processFiles}
             disabled={pendingCount === 0 || isProcessing}
             className="flex-1"
           >
-            {isProcessing ? 'Processing...' : `Process ${pendingCount} File${pendingCount !== 1 ? 's' : ''}`}
+            {isProcessing ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Processing…
+              </>
+            ) : (
+              `Process ${pendingCount} File${pendingCount !== 1 ? 's' : ''}`
+            )}
           </Button>
           {completedCount > 0 && !isProcessing && (
             <Button variant="outline" onClick={handleClose}>

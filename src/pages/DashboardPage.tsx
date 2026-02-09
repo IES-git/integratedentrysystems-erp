@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -11,14 +12,61 @@ import {
   TrendingUp,
   DollarSign,
 } from 'lucide-react';
-import { customerStorage, estimateStorage, quoteStorage, orderStorage } from '@/lib/storage';
+import { listEstimates } from '@/lib/estimates-api';
+import { supabase } from '@/lib/supabase';
+import { quoteStorage, orderStorage } from '@/lib/storage';
+import type { Estimate, Customer } from '@/types';
+
+// Map Supabase customers row to our Customer type
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapCustomerRow(row: any): Customer {
+  return {
+    id: row.id,
+    name: row.name,
+    primaryContactName: row.contact_person || '',
+    email: row.email || '',
+    phone: row.phone || '',
+    billingAddress: [row.address, row.city, row.state, row.zip]
+      .filter(Boolean)
+      .join(', '),
+    shippingAddress: '',
+    notes: row.notes || '',
+    createdAt: row.created_at,
+  };
+}
 
 export default function DashboardPage() {
   const { user } = useAuth();
 
-  // Get data from storage
-  const customers = customerStorage.getAll();
-  const estimates = estimateStorage.getAll();
+  // State for Supabase data
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [estimates, setEstimates] = useState<Estimate[]>([]);
+
+  // Load data from Supabase on mount
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        // Load estimates from Supabase
+        const loadedEstimates = await listEstimates();
+        setEstimates(loadedEstimates);
+
+        // Load customers from Supabase
+        const { data: customersData } = await supabase
+          .from('customers')
+          .select('*')
+          .order('name');
+        if (customersData) {
+          setCustomers(customersData.map(mapCustomerRow));
+        }
+      } catch (err) {
+        console.error('Error loading data:', err);
+      }
+    };
+
+    loadData();
+  }, []);
+
+  // Get quotes and orders from local storage (not migrated to Supabase yet)
   const quotes = quoteStorage.getAll();
   const orders = orderStorage.getAll();
 
@@ -83,7 +131,7 @@ export default function DashboardPage() {
                           <div className="flex items-center gap-3">
                             <FileText className="h-4 w-4 text-muted-foreground" />
                             <div>
-                              <p className="text-sm font-medium">{estimate.originalPdfName}</p>
+                              <p className="text-sm font-medium">{estimate.originalFileName}</p>
                               <p className="text-xs text-muted-foreground">
                                 {new Date(estimate.createdAt).toLocaleDateString()}
                               </p>

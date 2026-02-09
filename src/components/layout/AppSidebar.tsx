@@ -56,6 +56,10 @@ const adminNavigation = [
     href: '/app/admin/users'
   },
   {
+    title: 'Field Definitions',
+    href: '/app/admin/field-definitions'
+  },
+  {
     title: 'Integrations',
     href: '/app/admin/settings/integrations'
   }

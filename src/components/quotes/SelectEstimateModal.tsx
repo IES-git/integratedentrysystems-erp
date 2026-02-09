@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { Search, FileText, CheckCircle2 } from 'lucide-react';
+import { useState, useMemo, useEffect } from 'react';
+import { Search, FileText, CheckCircle2, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -20,8 +20,9 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
-import { estimateStorage, customerStorage, userStorage } from '@/lib/storage';
-import type { Estimate, OcrStatus } from '@/types';
+import { listEstimates } from '@/lib/estimates-api';
+import { supabase } from '@/lib/supabase';
+import type { Estimate, Customer, User } from '@/types';
 
 interface SelectEstimateModalProps {
   open: boolean;
@@ -29,15 +30,88 @@ interface SelectEstimateModalProps {
   onSelect: (estimateId: string) => void;
 }
 
+// Map Supabase customers row to our Customer type
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapCustomerRow(row: any): Customer {
+  return {
+    id: row.id,
+    name: row.name,
+    primaryContactName: row.contact_person || '',
+    email: row.email || '',
+    phone: row.phone || '',
+    billingAddress: [row.address, row.city, row.state, row.zip]
+      .filter(Boolean)
+      .join(', '),
+    shippingAddress: '',
+    notes: row.notes || '',
+    createdAt: row.created_at,
+  };
+}
+
+// Map Supabase users row to our User type
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapUserRow(row: any): User {
+  return {
+    id: row.id,
+    name: `${row.first_name} ${row.last_name}`.trim(),
+    email: row.email,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    jobTitle: row.job_title,
+    role: row.role,
+    active: row.active,
+    createdAt: row.created_at,
+  };
+}
+
 export function SelectEstimateModal({ open, onOpenChange, onSelect }: SelectEstimateModalProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [customerFilter, setCustomerFilter] = useState<string>('all');
   const [salesRepFilter, setSalesRepFilter] = useState<string>('all');
   const [selectedEstimateId, setSelectedEstimateId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const estimates = estimateStorage.getAll();
-  const customers = customerStorage.getAll();
-  const users = userStorage.getAll();
+  const [estimates, setEstimates] = useState<Estimate[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
+
+  // Load data when modal opens
+  useEffect(() => {
+    if (!open) return;
+
+    const loadData = async () => {
+      setIsLoading(true);
+      try {
+        // Load estimates from Supabase
+        const loadedEstimates = await listEstimates();
+        setEstimates(loadedEstimates);
+
+        // Load customers from Supabase
+        const { data: customersData } = await supabase
+          .from('customers')
+          .select('*')
+          .order('name');
+        if (customersData) {
+          setCustomers(customersData.map(mapCustomerRow));
+        }
+
+        // Load users from Supabase
+        const { data: usersData } = await supabase
+          .from('users')
+          .select('*')
+          .order('first_name');
+        if (usersData) {
+          setUsers(usersData.map(mapUserRow));
+        }
+      } catch (err) {
+        console.error('Error loading data:', err);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadData();
+  }, [open]);
 
   // Only show estimates that are "done" (processed)
   const processedEstimates = useMemo(() => {
@@ -59,7 +133,7 @@ export function SelectEstimateModal({ open, onOpenChange, onSelect }: SelectEsti
     return processedEstimates.filter((estimate) => {
       // Search filter
       const customerName = getCustomerName(estimate.customerId).toLowerCase();
-      const fileName = estimate.originalPdfName.toLowerCase();
+      const fileName = estimate.originalFileName.toLowerCase();
       const matchesSearch =
         !searchQuery ||
         customerName.includes(searchQuery.toLowerCase()) ||
@@ -178,7 +252,12 @@ export function SelectEstimateModal({ open, onOpenChange, onSelect }: SelectEsti
           {/* Estimates List */}
           <ScrollArea className="h-64 rounded-md border">
             <div className="p-2">
-              {filteredEstimates.length === 0 ? (
+              {isLoading ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <Loader2 className="mb-2 h-8 w-8 animate-spin text-muted-foreground/50" />
+                  <p className="text-sm text-muted-foreground">Loading estimates...</p>
+                </div>
+              ) : filteredEstimates.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-8 text-center">
                   <FileText className="mb-2 h-8 w-8 text-muted-foreground/50" />
                   <p className="text-sm text-muted-foreground">
@@ -210,7 +289,7 @@ export function SelectEstimateModal({ open, onOpenChange, onSelect }: SelectEsti
                       />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">
-                          {estimate.originalPdfName}
+                          {estimate.originalFileName}
                         </p>
                         <div className="mt-0.5 flex items-center gap-2 text-xs">
                           <span
