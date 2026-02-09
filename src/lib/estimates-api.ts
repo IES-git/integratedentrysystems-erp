@@ -184,6 +184,7 @@ export async function updateEstimate(
       | 'extractedCustomerContact'
       | 'extractedCustomerEmail'
       | 'extractedCustomerPhone'
+      | 'totalPrice'
     >
   >
 ): Promise<Estimate> {
@@ -198,6 +199,8 @@ export async function updateEstimate(
     row.extracted_customer_email = updates.extractedCustomerEmail;
   if (updates.extractedCustomerPhone !== undefined)
     row.extracted_customer_phone = updates.extractedCustomerPhone;
+  if (updates.totalPrice !== undefined)
+    row.total_price = updates.totalPrice;
 
   const { data, error } = await supabase
     .from('estimates')
@@ -214,7 +217,7 @@ export async function updateEstimate(
 export async function updateEstimateItem(
   id: string,
   updates: Partial<
-    Pick<EstimateItem, 'itemLabel' | 'canonicalCode' | 'quantity' | 'sortOrder'>
+    Pick<EstimateItem, 'itemLabel' | 'canonicalCode' | 'quantity' | 'unitPrice' | 'sortOrder'>
   >
 ): Promise<EstimateItem> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -223,6 +226,7 @@ export async function updateEstimateItem(
   if (updates.canonicalCode !== undefined)
     row.canonical_code = updates.canonicalCode;
   if (updates.quantity !== undefined) row.quantity = updates.quantity;
+  if (updates.unitPrice !== undefined) row.unit_price = updates.unitPrice;
   if (updates.sortOrder !== undefined) row.sort_order = updates.sortOrder;
 
   const { data, error } = await supabase
@@ -469,6 +473,7 @@ function mapEstimateRow(row: any): Estimate {
     extractedCustomerEmail: row.extracted_customer_email,
     extractedCustomerPhone: row.extracted_customer_phone,
     customerConfidence: row.customer_confidence,
+    totalPrice: row.total_price,
     extractedAt: row.extracted_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -483,6 +488,7 @@ function mapEstimateItemRow(row: any): EstimateItem {
     itemLabel: row.item_label,
     canonicalCode: row.canonical_code,
     quantity: row.quantity,
+    unitPrice: row.unit_price,
     sortOrder: row.sort_order,
     createdAt: row.created_at,
   };

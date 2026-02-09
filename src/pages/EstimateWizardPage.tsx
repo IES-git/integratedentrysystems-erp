@@ -555,6 +555,7 @@ export default function EstimateWizardPage() {
 
               <LineItemsStep
                 lineItems={currentData.lineItems}
+                totalPrice={currentData.estimate.totalPrice}
                 onUpdateItem={handleUpdateItem}
                 onUpdateField={handleUpdateField}
                 onAddField={handleAddField}

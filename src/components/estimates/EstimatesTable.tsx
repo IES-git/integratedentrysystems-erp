@@ -32,7 +32,7 @@ import { useToast } from '@/hooks/use-toast';
 import { deleteEstimate } from '@/lib/estimates-api';
 import type { Estimate, Customer } from '@/types';
 
-type SortKey = 'originalFileName' | 'customerId' | 'createdAt';
+type SortKey = 'originalFileName' | 'customerId' | 'totalPrice' | 'createdAt';
 type SortDirection = 'asc' | 'desc';
 
 interface EstimatesTableProps {
@@ -113,6 +113,9 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
         case 'customerId':
           comparison = getCustomerName(a.customerId).localeCompare(getCustomerName(b.customerId));
           break;
+        case 'totalPrice':
+          comparison = (a.totalPrice ?? 0) - (b.totalPrice ?? 0);
+          break;
         case 'createdAt':
           comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
           break;
@@ -169,6 +172,17 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
               </Button>
             </TableHead>
             <TableHead className="h-8">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="-ml-3 h-7 px-2 text-xs font-medium"
+                onClick={() => handleSort('totalPrice')}
+              >
+                Total
+                <SortIcon columnKey="totalPrice" />
+              </Button>
+            </TableHead>
+            <TableHead className="h-8">
               <span className="text-xs font-medium">Convert To</span>
             </TableHead>
             <TableHead className="hidden h-8 md:table-cell">
@@ -206,6 +220,11 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
                   }`}
                 >
                   {getCustomerName(estimate.customerId)}
+                </span>
+              </TableCell>
+              <TableCell className="py-1.5">
+                <span className="text-sm font-medium">
+                  {estimate.totalPrice !== null ? `$${estimate.totalPrice.toFixed(2)}` : '--'}
                 </span>
               </TableCell>
               <TableCell className="py-1.5">

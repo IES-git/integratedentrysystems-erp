@@ -15,6 +15,7 @@ interface LineItemWithFields extends EstimateItem {
 
 interface LineItemsStepProps {
   lineItems: LineItemWithFields[];
+  totalPrice: number | null;
   onUpdateItem: (itemId: string, updates: Partial<EstimateItem>) => void;
   onUpdateField: (fieldId: string, updates: Partial<ItemField>) => void;
   onAddField: (itemId: string, field: Omit<ItemField, 'id' | 'createdAt' | 'updatedAt'>) => void;
@@ -26,6 +27,7 @@ interface LineItemsStepProps {
 
 export function LineItemsStep({
   lineItems,
+  totalPrice,
   onUpdateItem,
   onUpdateField,
   onAddField,
@@ -111,6 +113,23 @@ export function LineItemsStep({
         </Badge>
       </div>
 
+      {/* Total Price Banner */}
+      {totalPrice !== null && (
+        <Card className="bg-primary/5 border-primary/20">
+          <CardContent className="py-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-muted-foreground">Estimate Total</p>
+                <p className="text-xs text-muted-foreground">Extracted from document</p>
+              </div>
+              <div className="text-3xl font-bold text-primary">
+                ${totalPrice.toFixed(2)}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {lineItems.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
@@ -141,6 +160,11 @@ export function LineItemsStep({
                           </CardTitle>
                           <CardDescription className="font-mono text-xs">
                             {item.canonicalCode} × {item.quantity}
+                            {item.unitPrice !== null && (
+                              <span className="ml-2 text-primary font-semibold">
+                                ${item.unitPrice.toFixed(2)}
+                              </span>
+                            )}
                           </CardDescription>
                         </div>
                       </div>
@@ -161,7 +185,7 @@ export function LineItemsStep({
                 <CollapsibleContent>
                   <CardContent className="pt-0 border-t">
                     {/* Item Details */}
-                    <div className="grid grid-cols-3 gap-4 py-4 border-b">
+                    <div className="grid grid-cols-4 gap-4 py-4 border-b">
                       <div>
                         <Label className="text-xs text-muted-foreground">Item Label</Label>
                         <Input
@@ -186,6 +210,18 @@ export function LineItemsStep({
                           value={item.quantity}
                           onChange={(e) => onUpdateItem(item.id, { quantity: parseInt(e.target.value) || 1 })}
                           className="h-8 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground">Unit Price</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          step={0.01}
+                          value={item.unitPrice ?? ''}
+                          onChange={(e) => onUpdateItem(item.id, { unitPrice: e.target.value ? parseFloat(e.target.value) : null })}
+                          className="h-8 text-sm"
+                          placeholder="0.00"
                         />
                       </div>
                     </div>
@@ -349,6 +385,16 @@ export function LineItemsStep({
               </Card>
             </Collapsible>
           ))}
+        </div>
+      )}
+
+      {/* Total Price Summary */}
+      {totalPrice !== null && (
+        <div className="flex justify-end items-center gap-4 pt-4 border-t">
+          <span className="text-sm text-muted-foreground">Estimate Total:</span>
+          <span className="text-2xl font-bold text-primary">
+            ${totalPrice.toFixed(2)}
+          </span>
         </div>
       )}
 

@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-02-09 (Draft Saving Flow Fixed)
+Last updated: 2026-02-09 (Pricing Feature Added)
 
 ## Authentication Status
 
@@ -119,6 +119,7 @@ Main estimate record from uploaded files.
 - `extracted_customer_email` (TEXT) - AI-extracted email
 - `extracted_customer_phone` (TEXT) - AI-extracted phone
 - `customer_confidence` (NUMERIC) - Confidence score for customer extraction
+- `total_price` (NUMERIC, DEFAULT NULL) - Total estimate price extracted from document
 - `extracted_at` (TIMESTAMPTZ) - When extraction completed
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
@@ -158,6 +159,7 @@ Line items extracted from estimates.
 - `item_label` (TEXT, NOT NULL) - Item description/label
 - `canonical_code` (TEXT) - Standardized product code
 - `quantity` (INTEGER, DEFAULT 1) - Item quantity
+- `unit_price` (NUMERIC, DEFAULT NULL) - Unit price per item extracted from document
 - `sort_order` (INTEGER, DEFAULT 0) - Display order
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
@@ -311,6 +313,7 @@ $$;
 12. `add_field_definitions_delete_policy` - Added DELETE RLS policy for admins on field_definitions table
 13. `add_estimates_delete_policy` - Added DELETE RLS policy for estimates table (users can delete their own, admins can delete any)
 14. `update_storage_delete_policy_for_admins` - Updated storage DELETE policy to allow admins to delete any estimate file
+15. `add_pricing_columns` - Added total_price to estimates and unit_price to estimate_items for pricing feature
 
 ## Edge Functions
 
@@ -322,7 +325,7 @@ Serverless Edge Function that processes uploaded estimate files using Gemini 3 F
 - `slug`: process-estimate
 - `verify_jwt`: false (JWT verification disabled - function uses service role key internally)
 - `status`: ACTIVE
-- `version`: 2 (updated 2026-02-09 to fix 401 authentication errors)
+- `version`: 3 (updated 2026-02-09 to extract pricing information)
 
 **Request:**
 - Method: POST
@@ -338,10 +341,10 @@ Serverless Edge Function that processes uploaded estimate files using Gemini 3 F
    - File as inline base64 data
    - Code execution tool enabled (Agentic Vision for zooming/inspecting)
    - Structured JSON output via `responseJsonSchema`
-   - Extraction prompt with known field definitions
-6. Inserts extracted `estimate_items` and `item_fields` rows
+   - Extraction prompt with known field definitions and pricing instructions
+6. Inserts extracted `estimate_items` (including `unit_price`) and `item_fields` rows
 7. Creates new `field_definitions` with `status = 'pending_review'` for discovered fields
-8. Updates estimate with `ocr_status = 'done'`, extracted customer info, and `extracted_at` timestamp
+8. Updates estimate with `ocr_status = 'done'`, extracted customer info, `total_price`, and `extracted_at` timestamp
 9. On error: sets `ocr_status = 'error'` and `ocr_error` message
 
 **Response:**

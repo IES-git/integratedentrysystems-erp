@@ -57,6 +57,7 @@ export interface Estimate {
   extractedCustomerEmail?: string | null;
   extractedCustomerPhone?: string | null;
   customerConfidence?: number | null;
+  totalPrice: number | null;
   extractedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -68,6 +69,7 @@ export interface EstimateItem {
   itemLabel: string;
   canonicalCode: string;
   quantity: number;
+  unitPrice: number | null;
   sortOrder?: number;
   createdAt: string;
 }
