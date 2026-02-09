@@ -385,15 +385,20 @@ export function initializeDemoData(): void {
   if (userStorage.getAll().length === 0) {
     const demoUser = userStorage.create({
       name: 'John Smith',
+      firstName: 'John',
+      lastName: 'Smith',
+      jobTitle: 'Sales Representative',
       email: 'john@integratedentrysystems.com',
       role: 'sales',
       active: true,
     });
     userStorage.setCurrentUser(demoUser);
     
-    // Create additional demo users
     userStorage.create({
       name: 'Sarah Johnson',
+      firstName: 'Sarah',
+      lastName: 'Johnson',
+      jobTitle: 'Operations Manager',
       email: 'sarah@integratedentrysystems.com',
       role: 'ops',
       active: true,
@@ -401,6 +406,9 @@ export function initializeDemoData(): void {
     
     userStorage.create({
       name: 'Mike Chen',
+      firstName: 'Mike',
+      lastName: 'Chen',
+      jobTitle: 'Finance Analyst',
       email: 'mike@integratedentrysystems.com',
       role: 'finance',
       active: true,
@@ -408,6 +416,9 @@ export function initializeDemoData(): void {
     
     userStorage.create({
       name: 'Admin User',
+      firstName: 'Admin',
+      lastName: 'User',
+      jobTitle: 'System Administrator',
       email: 'admin@integratedentrysystems.com',
       role: 'admin',
       active: true,
