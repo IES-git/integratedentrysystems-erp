@@ -18,7 +18,7 @@ import {
   deleteItemField as apiDeleteItemField,
 } from '@/lib/estimates-api';
 import { supabase } from '@/lib/supabase';
-import type { Estimate, EstimateItem, ItemField, Customer } from '@/types';
+import type { Estimate, EstimateItem, ItemField, Company } from '@/types';
 import { cn } from '@/lib/utils';
 
 interface LineItemWithFields extends EstimateItem {
@@ -37,21 +37,25 @@ const WIZARD_STEPS: WizardStep[] = [
   { id: 'line-items', title: 'Line Items', description: 'Verify extracted data' },
 ];
 
-// Map Supabase customers row to our Customer type
+// Map Supabase companies row to our Company type
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapCustomerRow(row: any): Customer {
+function mapCompanyRow(row: any): Company {
   return {
     id: row.id,
     name: row.name,
-    primaryContactName: row.contact_person || '',
-    email: row.email || '',
-    phone: row.phone || '',
-    billingAddress: [row.address, row.city, row.state, row.zip]
-      .filter(Boolean)
-      .join(', '),
-    shippingAddress: '',
-    notes: row.notes || '',
+    billingAddress: row.billing_address ?? null,
+    billingCity: row.billing_city ?? null,
+    billingState: row.billing_state ?? null,
+    billingZip: row.billing_zip ?? null,
+    shippingAddress: row.shipping_address ?? null,
+    shippingCity: row.shipping_city ?? null,
+    shippingState: row.shipping_state ?? null,
+    shippingZip: row.shipping_zip ?? null,
+    notes: row.notes ?? null,
+    active: row.active,
+    settings: row.settings ?? { costMultiplier: 1.0, paymentTerms: null, defaultTemplateId: null },
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -74,7 +78,7 @@ export default function EstimateWizardPage() {
   const [currentEstimateIndex, setCurrentEstimateIndex] = useState(0);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [estimates, setEstimates] = useState<Estimate[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [estimateDataMap, setEstimateDataMap] = useState<Map<string, EstimateData>>(new Map());
   const [fileUrls, setFileUrls] = useState<Map<string, string>>(new Map());
   const [completedEstimates, setCompletedEstimates] = useState<Set<number>>(new Set());
@@ -110,8 +114,8 @@ export default function EstimateWizardPage() {
             dataMap.set(id, {
               estimate: result.estimate,
               lineItems: result.items,
-              selectedCustomerId: result.estimate.customerId,
-              noCustomer: !result.estimate.customerId,
+              selectedCustomerId: result.estimate.companyId,
+              noCustomer: !result.estimate.companyId,
             });
 
             // Get signed URL for file preview
@@ -139,19 +143,19 @@ export default function EstimateWizardPage() {
         setEstimateDataMap(dataMap);
         setFileUrls(urlMap);
 
-        // Load customers from Supabase
+        // Load companies from Supabase
         try {
-          const { data: customersData } = await supabase
-            .from('customers')
+          const { data: companiesData } = await supabase
+            .from('companies')
             .select('*')
+            .eq('active', true)
             .order('name');
 
-          if (customersData && customersData.length > 0) {
-            setCustomers(customersData.map(mapCustomerRow));
+          if (companiesData && companiesData.length > 0) {
+            setCompanies(companiesData.map(mapCompanyRow));
           }
         } catch {
-          // customers table might not be populated yet
-          console.warn('Could not load customers from Supabase');
+          console.warn('Could not load companies from Supabase');
         }
 
         // Build extracted customer data from the first estimate's OCR results
@@ -365,36 +369,37 @@ export default function EstimateWizardPage() {
     try {
       let finalCustomerId = currentData.selectedCustomerId;
 
-      // If no customer selected but we have extracted customer data, create a new customer
+      // If no company selected but we have extracted customer data, create a new company
       if (!currentData.noCustomer && !finalCustomerId && currentEstimate.extractedCustomerName) {
-        // Create new customer from extracted data
-        const { data: newCustomer, error: customerError } = await supabase
-          .from('customers')
+        const { data: newCompany, error: companyError } = await supabase
+          .from('companies')
           .insert({
             name: currentEstimate.extractedCustomerName,
-            contact_person: currentEstimate.extractedCustomerContact || null,
-            email: currentEstimate.extractedCustomerEmail || null,
-            phone: currentEstimate.extractedCustomerPhone || null,
+            notes: [
+              currentEstimate.extractedCustomerContact ? `Contact: ${currentEstimate.extractedCustomerContact}` : null,
+              currentEstimate.extractedCustomerEmail ? `Email: ${currentEstimate.extractedCustomerEmail}` : null,
+              currentEstimate.extractedCustomerPhone ? `Phone: ${currentEstimate.extractedCustomerPhone}` : null,
+            ].filter(Boolean).join('\n') || null,
           })
           .select('id')
           .single();
 
-        if (customerError) {
-          throw new Error(`Failed to create customer: ${customerError.message}`);
+        if (companyError) {
+          throw new Error(`Failed to create company: ${companyError.message}`);
         }
 
-        if (newCustomer) {
-          finalCustomerId = newCustomer.id;
+        if (newCompany) {
+          finalCustomerId = newCompany.id;
           toast({
-            title: 'Customer created',
-            description: `${currentEstimate.extractedCustomerName} has been added to your database.`,
+            title: 'Company created',
+            description: `${currentEstimate.extractedCustomerName} has been added to your customer database.`,
           });
         }
       }
 
-      // Save customer assignment to Supabase
+      // Save company assignment to Supabase
       await apiUpdateEstimate(currentEstimate.id, {
-        customerId: currentData.noCustomer ? null : finalCustomerId,
+        companyId: currentData.noCustomer ? null : finalCustomerId,
       });
 
       // Mark as completed
@@ -531,7 +536,7 @@ export default function EstimateWizardPage() {
           {currentStepIndex === 0 && (
             <CustomerStep
               extractedCustomer={extractedCustomer}
-              customers={customers}
+              companies={companies}
               selectedCustomerId={currentData.selectedCustomerId}
               noCustomer={currentData.noCustomer}
               onSelectCustomer={handleSelectCustomer}

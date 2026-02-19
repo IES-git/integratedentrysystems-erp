@@ -7,29 +7,33 @@ import { UploadEstimateModal } from '@/components/estimates/UploadEstimateModal'
 import { EstimatesTable } from '@/components/estimates/EstimatesTable';
 import { listEstimates } from '@/lib/estimates-api';
 import { supabase } from '@/lib/supabase';
-import type { Estimate, Customer } from '@/types';
+import type { Estimate, Company } from '@/types';
 
-// Map Supabase customers row to our Customer type
+// Map Supabase companies row to our Company type
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapCustomerRow(row: any): Customer {
+function mapCompanyRow(row: any): Company {
   return {
     id: row.id,
     name: row.name,
-    primaryContactName: row.contact_person || '',
-    email: row.email || '',
-    phone: row.phone || '',
-    billingAddress: [row.address, row.city, row.state, row.zip]
-      .filter(Boolean)
-      .join(', '),
-    shippingAddress: '',
-    notes: row.notes || '',
+    billingAddress: row.billing_address ?? null,
+    billingCity: row.billing_city ?? null,
+    billingState: row.billing_state ?? null,
+    billingZip: row.billing_zip ?? null,
+    shippingAddress: row.shipping_address ?? null,
+    shippingCity: row.shipping_city ?? null,
+    shippingState: row.shipping_state ?? null,
+    shippingZip: row.shipping_zip ?? null,
+    notes: row.notes ?? null,
+    active: row.active,
+    settings: row.settings ?? { costMultiplier: 1.0, paymentTerms: null, defaultTemplateId: null },
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
 export default function EstimatesListPage() {
   const [estimates, setEstimates] = useState<Estimate[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,17 +49,17 @@ export default function EstimatesListPage() {
       const loadedEstimates = await listEstimates();
       console.log('EstimatesListPage: Loaded', loadedEstimates.length, 'estimates');
 
-      // Load customers from Supabase
-      const { data: customersData } = await supabase
-        .from('customers')
+      // Load companies from Supabase
+      const { data: companiesData } = await supabase
+        .from('companies')
         .select('*')
         .order('name');
 
-      const loadedCustomers = customersData ? customersData.map(mapCustomerRow) : [];
-      console.log('EstimatesListPage: Loaded', loadedCustomers.length, 'customers');
+      const loadedCompanies = companiesData ? companiesData.map(mapCompanyRow) : [];
+      console.log('EstimatesListPage: Loaded', loadedCompanies.length, 'companies');
 
       setEstimates(loadedEstimates);
-      setCustomers(loadedCustomers);
+      setCompanies(loadedCompanies);
       setIsLoading(false);
     } catch (err) {
       console.error('EstimatesListPage: Error loading data', err);
@@ -94,20 +98,20 @@ export default function EstimatesListPage() {
     );
   }
 
-  const getCustomerName = (customerId: string | null) => {
-    if (!customerId) return 'Unassigned';
-    const customer = customers.find((c) => c.id === customerId);
-    return customer?.name || 'Unknown';
+  const getCompanyName = (companyId: string | null) => {
+    if (!companyId) return 'Unassigned';
+    const company = companies.find((c) => c.id === companyId);
+    return company?.name || 'Unknown';
   };
 
   const filteredEstimates = estimates.filter(
     (estimate) => {
       const fileName = estimate?.originalFileName || '';
-      const customerName = getCustomerName(estimate?.customerId || null) || '';
+      const companyName = getCompanyName(estimate?.companyId || null) || '';
       const query = searchQuery.toLowerCase();
       
       return fileName.toLowerCase().includes(query) || 
-             customerName.toLowerCase().includes(query);
+             companyName.toLowerCase().includes(query);
     }
   );
 
@@ -158,8 +162,9 @@ export default function EstimatesListPage() {
           ) : (
             <EstimatesTable 
               estimates={filteredEstimates} 
-              customers={customers}
+              companies={companies}
               onEstimateDeleted={loadEstimates}
+              onEstimateDuplicated={loadEstimates}
             />
           )}
         </CardContent>

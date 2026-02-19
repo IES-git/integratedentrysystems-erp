@@ -21,7 +21,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { SelectEstimateModal } from '@/components/quotes/SelectEstimateModal';
-import { quoteStorage, customerStorage } from '@/lib/storage';
+import { quoteStorage } from '@/lib/storage';
 import type { Quote, QuoteStatus } from '@/types';
 
 export default function QuotesPage() {
@@ -30,11 +30,8 @@ export default function QuotesPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isSelectModalOpen, setIsSelectModalOpen] = useState(false);
 
-  const customers = customerStorage.getAll();
-
-  const getCustomerName = (customerId: string) => {
-    const customer = customers.find((c) => c.id === customerId);
-    return customer?.name || 'Unknown';
+  const getCustomerName = (_customerId: string) => {
+    return 'Unknown';
   };
 
   const filteredQuotes = quotes.filter((quote) =>

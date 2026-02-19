@@ -13,17 +13,43 @@ export interface User {
   createdAt: string;
 }
 
-// Customer Types
-export interface Customer {
+// Company & Contact Types
+export interface CompanySettings {
+  costMultiplier: number;
+  paymentTerms: string | null;
+  defaultTemplateId: string | null;
+}
+
+export interface Company {
   id: string;
   name: string;
-  primaryContactName: string;
-  email: string;
-  phone: string;
-  billingAddress: string;
-  shippingAddress: string;
-  notes: string;
+  billingAddress: string | null;
+  billingCity: string | null;
+  billingState: string | null;
+  billingZip: string | null;
+  shippingAddress: string | null;
+  shippingCity: string | null;
+  shippingState: string | null;
+  shippingZip: string | null;
+  notes: string | null;
+  active: boolean;
+  settings: CompanySettings;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface Contact {
+  id: string;
+  companyId: string;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  phone: string | null;
+  title: string | null;
+  isPrimary: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // Manufacturer Types
@@ -44,7 +70,7 @@ export type OcrStatus = 'pending' | 'processing' | 'done' | 'error';
 
 export interface Estimate {
   id: string;
-  customerId: string | null;
+  companyId: string | null;
   uploadedByUserId: string;
   source: string;
   originalFileUrl: string;

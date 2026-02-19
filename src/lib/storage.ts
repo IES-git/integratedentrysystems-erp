@@ -3,7 +3,6 @@
 
 import type {
   User,
-  Customer,
   Manufacturer,
   Estimate,
   EstimateItem,
@@ -23,7 +22,6 @@ import type {
 const STORAGE_KEYS = {
   users: 'ies_users',
   currentUser: 'ies_current_user',
-  customers: 'ies_customers',
   manufacturers: 'ies_manufacturers',
   estimates: 'ies_estimates',
   estimateItems: 'ies_estimate_items',
@@ -108,38 +106,6 @@ export const userStorage = {
     } else {
       localStorage.removeItem(STORAGE_KEYS.currentUser);
     }
-  },
-};
-
-// Customer operations
-export const customerStorage = {
-  getAll: (): Customer[] => getItem<Customer>(STORAGE_KEYS.customers),
-  
-  getById: (id: string): Customer | undefined =>
-    getItem<Customer>(STORAGE_KEYS.customers).find(c => c.id === id),
-  
-  create: (customer: Omit<Customer, 'id' | 'createdAt'>): Customer => {
-    const customers = getItem<Customer>(STORAGE_KEYS.customers);
-    const newCustomer: Customer = { ...customer, id: generateId(), createdAt: now() };
-    setItem(STORAGE_KEYS.customers, [...customers, newCustomer]);
-    return newCustomer;
-  },
-  
-  update: (id: string, updates: Partial<Customer>): Customer | undefined => {
-    const customers = getItem<Customer>(STORAGE_KEYS.customers);
-    const index = customers.findIndex(c => c.id === id);
-    if (index === -1) return undefined;
-    customers[index] = { ...customers[index], ...updates };
-    setItem(STORAGE_KEYS.customers, customers);
-    return customers[index];
-  },
-  
-  delete: (id: string): boolean => {
-    const customers = getItem<Customer>(STORAGE_KEYS.customers);
-    const filtered = customers.filter(c => c.id !== id);
-    if (filtered.length === customers.length) return false;
-    setItem(STORAGE_KEYS.customers, filtered);
-    return true;
   },
 };
 
@@ -425,39 +391,6 @@ export function initializeDemoData(): void {
     });
   }
   
-  // Create demo customers if none exist
-  if (customerStorage.getAll().length === 0) {
-    customerStorage.create({
-      name: 'ABC Construction',
-      primaryContactName: 'Robert Wilson',
-      email: 'rwilson@abcconstruction.com',
-      phone: '(555) 123-4567',
-      billingAddress: '123 Main St, Suite 100, Dallas, TX 75201',
-      shippingAddress: '456 Commerce Dr, Dallas, TX 75202',
-      notes: 'Preferred customer - net 30 terms',
-    });
-    
-    customerStorage.create({
-      name: 'Metro Building Group',
-      primaryContactName: 'Lisa Martinez',
-      email: 'lmartinez@metrobg.com',
-      phone: '(555) 987-6543',
-      billingAddress: '789 Corporate Blvd, Houston, TX 77001',
-      shippingAddress: '789 Corporate Blvd, Houston, TX 77001',
-      notes: 'New customer - requires credit check',
-    });
-    
-    customerStorage.create({
-      name: 'Skyline Developers',
-      primaryContactName: 'James Park',
-      email: 'jpark@skylinedev.com',
-      phone: '(555) 456-7890',
-      billingAddress: '321 Tower Ave, Austin, TX 78701',
-      shippingAddress: '555 Project Site Rd, Austin, TX 78702',
-      notes: 'Large commercial projects',
-    });
-  }
-
   // Create demo manufacturers if none exist
   if (manufacturerStorage.getAll().length === 0) {
     manufacturerStorage.create({

@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, Eye, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2 } from 'lucide-react';
+import { FileText, Eye, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2, Copy, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -29,31 +29,35 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useToast } from '@/hooks/use-toast';
-import { deleteEstimate } from '@/lib/estimates-api';
-import type { Estimate, Customer } from '@/types';
+import { deleteEstimate, duplicateEstimate } from '@/lib/estimates-api';
+import { useAuth } from '@/contexts/AuthContext';
+import type { Estimate, Company } from '@/types';
 
-type SortKey = 'originalFileName' | 'customerId' | 'totalPrice' | 'createdAt';
+type SortKey = 'originalFileName' | 'companyId' | 'totalPrice' | 'createdAt';
 type SortDirection = 'asc' | 'desc';
 
 interface EstimatesTableProps {
   estimates: Estimate[];
-  customers: Customer[];
+  companies: Company[];
   onEstimateDeleted?: () => void;
+  onEstimateDuplicated?: () => void;
 }
 
-export function EstimatesTable({ estimates, customers, onEstimateDeleted }: EstimatesTableProps) {
+export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEstimateDuplicated }: EstimatesTableProps) {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user } = useAuth();
   const [sortKey, setSortKey] = useState<SortKey>('createdAt');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [estimateToDelete, setEstimateToDelete] = useState<Estimate | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isDuplicatingId, setIsDuplicatingId] = useState<string | null>(null);
 
-  const getCustomerName = (customerId: string | null) => {
-    if (!customerId) return 'Unassigned';
-    const customer = customers.find((c) => c.id === customerId);
-    return customer?.name || 'Unknown';
+  const getCompanyName = (companyId: string | null) => {
+    if (!companyId) return 'Unassigned';
+    const company = companies.find((c) => c.id === companyId);
+    return company?.name || 'Unknown';
   };
 
   const handleSort = (key: SortKey) => {
@@ -71,6 +75,28 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
 
   const handleEditEstimate = (estimateId: string) => {
     navigate(`/app/estimates/wizard?id=${estimateId}`);
+  };
+
+  const handleDuplicate = async (estimate: Estimate) => {
+    if (!user) return;
+    setIsDuplicatingId(estimate.id);
+    try {
+      const { estimateId } = await duplicateEstimate(estimate.id, user.id);
+      toast({
+        title: 'Estimate remixed',
+        description: 'Opening wizard to review your remix…',
+      });
+      onEstimateDuplicated?.();
+      navigate(`/app/estimates/wizard?id=${estimateId}`);
+    } catch (err) {
+      toast({
+        title: 'Remix failed',
+        description: err instanceof Error ? err.message : 'Failed to duplicate estimate',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsDuplicatingId(null);
+    }
   };
 
   const confirmDelete = (estimate: Estimate) => {
@@ -110,8 +136,8 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
         case 'originalFileName':
           comparison = a.originalFileName.localeCompare(b.originalFileName);
           break;
-        case 'customerId':
-          comparison = getCustomerName(a.customerId).localeCompare(getCustomerName(b.customerId));
+        case 'companyId':
+          comparison = getCompanyName(a.companyId).localeCompare(getCompanyName(b.companyId));
           break;
         case 'totalPrice':
           comparison = (a.totalPrice ?? 0) - (b.totalPrice ?? 0);
@@ -123,7 +149,7 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
       
       return sortDirection === 'asc' ? comparison : -comparison;
     });
-  }, [estimates, sortKey, sortDirection, customers]);
+  }, [estimates, sortKey, sortDirection, companies]);
 
   const SortIcon = ({ columnKey }: { columnKey: SortKey }) => {
     if (sortKey !== columnKey) {
@@ -165,10 +191,10 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
                 variant="ghost"
                 size="sm"
                 className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('customerId')}
+                onClick={() => handleSort('companyId')}
               >
                 Customer
-                <SortIcon columnKey="customerId" />
+                <SortIcon columnKey="companyId" />
               </Button>
             </TableHead>
             <TableHead className="h-8">
@@ -216,10 +242,10 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
               <TableCell className="py-1.5">
                 <span
                   className={`text-sm ${
-                    estimate.customerId ? 'text-foreground' : 'text-muted-foreground italic'
+                    estimate.companyId ? 'text-foreground' : 'text-muted-foreground italic'
                   }`}
                 >
-                  {getCustomerName(estimate.customerId)}
+                  {getCompanyName(estimate.companyId)}
                 </span>
               </TableCell>
               <TableCell className="py-1.5">
@@ -269,10 +295,23 @@ export function EstimatesTable({ estimates, customers, onEstimateDeleted }: Esti
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     {estimate.ocrStatus === 'done' && (
-                      <DropdownMenuItem onClick={() => handleEditEstimate(estimate.id)}>
-                        <Pencil className="mr-2 h-4 w-4" />
-                        Edit/Review
-                      </DropdownMenuItem>
+                      <>
+                        <DropdownMenuItem onClick={() => handleEditEstimate(estimate.id)}>
+                          <Pencil className="mr-2 h-4 w-4" />
+                          Edit/Review
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => handleDuplicate(estimate)}
+                          disabled={isDuplicatingId === estimate.id}
+                        >
+                          {isDuplicatingId === estimate.id ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Copy className="mr-2 h-4 w-4" />
+                          )}
+                          {isDuplicatingId === estimate.id ? 'Remixing…' : 'Remix'}
+                        </DropdownMenuItem>
+                      </>
                     )}
                     {estimate.ocrStatus !== 'processing' && (
                       <>

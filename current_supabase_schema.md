@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-02-09 (Pricing Feature Added)
+Last updated: 2026-02-19 (Companies & Contacts replacing Customers)
 
 ## Authentication Status
 
@@ -67,37 +67,74 @@ The "learning" table that grows as Gemini discovers new field types during estim
 **Triggers:**
 - `set_field_definitions_updated_at` - Automatically updates updated_at timestamp
 
-### public.customers
+### public.companies
 
-Customer information table for estimates.
+Business entity table replacing the old flat `customers` table.
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
-- `name` (TEXT, NOT NULL) - Customer name
-- `contact_person` (TEXT) - Contact person name
-- `email` (TEXT) - Email address
-- `phone` (TEXT) - Phone number
-- `address` (TEXT) - Street address
-- `city` (TEXT) - City
-- `state` (TEXT) - State
-- `zip` (TEXT) - ZIP code
+- `name` (TEXT, NOT NULL) - Company name
+- `billing_address` (TEXT) - Billing street address
+- `billing_city` (TEXT) - Billing city
+- `billing_state` (TEXT) - Billing state
+- `billing_zip` (TEXT) - Billing ZIP code
+- `shipping_address` (TEXT) - Shipping street address
+- `shipping_city` (TEXT) - Shipping city
+- `shipping_state` (TEXT) - Shipping state
+- `shipping_zip` (TEXT) - Shipping ZIP code
 - `notes` (TEXT) - Additional notes
-- `active` (BOOLEAN, DEFAULT true) - Whether customer is active
-- `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
-- `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
+- `active` (BOOLEAN, NOT NULL, DEFAULT true) - Whether company is active
+- `settings` (JSONB, NOT NULL, DEFAULT `{"cost_multiplier": 1.0, "payment_terms": null, "default_template_id": null}`) - Company-level pricing/quote settings
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
 
 **Indexes:**
-- `idx_customers_name` on name
-- `idx_customers_email` on email
+- `idx_companies_name` on name
+- `idx_companies_active` on active
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
-- `Authenticated users can read customers` - All authenticated users can SELECT
-- `Authenticated users can insert customers` - All authenticated users can INSERT
-- `Authenticated users can update customers` - All authenticated users can UPDATE
+- `Authenticated users can read companies` - All authenticated users can SELECT
+- `Authenticated users can insert companies` - All authenticated users can INSERT
+- `Authenticated users can update companies` - All authenticated users can UPDATE
+- `Authenticated users can delete companies` - All authenticated users can DELETE
 
 **Triggers:**
-- `set_customers_updated_at` - Automatically updates updated_at timestamp
+- `set_companies_updated_at` - Automatically updates updated_at timestamp
+
+### public.contacts
+
+Contacts (people) belonging to a company.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `company_id` (UUID, NOT NULL) - FK to companies.id, CASCADE on delete
+- `first_name` (TEXT, NOT NULL, DEFAULT '') - Contact first name
+- `last_name` (TEXT, NOT NULL, DEFAULT '') - Contact last name
+- `email` (TEXT) - Email address
+- `phone` (TEXT) - Phone number
+- `title` (TEXT) - Job title
+- `is_primary` (BOOLEAN, NOT NULL, DEFAULT false) - Whether this is the primary contact
+- `notes` (TEXT) - Additional notes
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
+
+**Constraints:**
+- `contacts_company_email_unique` UNIQUE on `(company_id, email)` - prevents duplicate contacts per company
+
+**Indexes:**
+- `idx_contacts_company_id` on company_id
+- `idx_contacts_email` on email
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read contacts` - All authenticated users can SELECT
+- `Authenticated users can insert contacts` - All authenticated users can INSERT
+- `Authenticated users can update contacts` - All authenticated users can UPDATE
+- `Authenticated users can delete contacts` - All authenticated users can DELETE
+
+**Triggers:**
+- `set_contacts_updated_at` - Automatically updates updated_at timestamp
 
 ### public.estimates
 
@@ -105,7 +142,7 @@ Main estimate record from uploaded files.
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
-- `customer_id` (UUID) - FK to customers.id, nullable (assigned during wizard "Save Draft" flow)
+- `company_id` (UUID) - FK to companies.id, nullable, SET NULL on delete (assigned during wizard "Save Draft" flow)
 - `uploaded_by_user_id` (UUID, NOT NULL) - FK to users.id
 - `source` (TEXT, NOT NULL, DEFAULT 'upload') - Source of estimate
 - `original_file_url` (TEXT, NOT NULL) - Supabase Storage path
@@ -128,13 +165,13 @@ Main estimate record from uploaded files.
 1. Upload: File uploaded to Supabase Storage, estimate record created with `ocr_status = 'pending'`
 2. Processing: Edge Function invoked, status changes to `ocr_status = 'processing'`, then `done` when complete
 3. Wizard: User reviews customer info and line items, then clicks "Save Draft"
-   - **Customer Creation:** If user selects "Use Extracted Customer" and no matching customer exists in the database, a new customer record is automatically created in the `customers` table using the extracted data
-   - Customer options: Use extracted (auto-create if needed), select existing, or no customer
+   - **Company Assignment:** If user selects "Use Extracted Customer" and no matching company exists in the database, a new company record is automatically created in the `companies` table using the extracted data
+   - Company options: Use extracted (auto-create if needed), select existing, or no company
 4. List Page: Estimate appears in `/app/estimates` list (loaded from Supabase via `listEstimates()`)
 5. Convert to Quote: User can convert estimate to customer/manufacturer quote from the list page
 
 **Indexes:**
-- `idx_estimates_customer_id` on customer_id
+- `idx_estimates_company_id` on company_id
 - `idx_estimates_uploaded_by_user_id` on uploaded_by_user_id
 - `idx_estimates_ocr_status` on ocr_status
 - `idx_estimates_created_at` on created_at DESC
@@ -314,6 +351,7 @@ $$;
 13. `add_estimates_delete_policy` - Added DELETE RLS policy for estimates table (users can delete their own, admins can delete any)
 14. `update_storage_delete_policy_for_admins` - Updated storage DELETE policy to allow admins to delete any estimate file
 15. `add_pricing_columns` - Added total_price to estimates and unit_price to estimate_items for pricing feature
+16. `replace_customers_with_companies_and_contacts` - Dropped customers table, created companies + contacts tables, renamed estimates.customer_id to company_id with updated FK
 
 ## Edge Functions
 
@@ -399,5 +437,5 @@ Admin page for managing AI-discovered field definitions used in estimate extract
 ✅ Function search paths properly configured
 
 **Known Advisories (non-critical):**
-- ⚠️ `customers` table has permissive INSERT/UPDATE RLS policies (allows all authenticated users). This is intentional for the current phase but should be tightened later.
+- ⚠️ `companies` and `contacts` tables have permissive INSERT/UPDATE/DELETE RLS policies (allows all authenticated users). This is intentional for the current phase but should be tightened later.
 - ⚠️ Leaked password protection is disabled in Supabase Auth settings. Consider enabling via the Supabase Dashboard.

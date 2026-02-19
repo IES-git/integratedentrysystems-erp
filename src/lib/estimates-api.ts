@@ -173,13 +173,13 @@ export async function listEstimates(): Promise<Estimate[]> {
 // Update
 // ---------------------------------------------------------------------------
 
-/** Update top-level estimate fields (customer info, status, etc.). */
+/** Update top-level estimate fields (company info, status, etc.). */
 export async function updateEstimate(
   id: string,
   updates: Partial<
     Pick<
       Estimate,
-      | 'customerId'
+      | 'companyId'
       | 'extractedCustomerName'
       | 'extractedCustomerContact'
       | 'extractedCustomerEmail'
@@ -190,7 +190,7 @@ export async function updateEstimate(
 ): Promise<Estimate> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const row: Record<string, any> = {};
-  if (updates.customerId !== undefined) row.customer_id = updates.customerId;
+  if (updates.companyId !== undefined) row.company_id = updates.companyId;
   if (updates.extractedCustomerName !== undefined)
     row.extracted_customer_name = updates.extractedCustomerName;
   if (updates.extractedCustomerContact !== undefined)
@@ -336,6 +336,86 @@ export async function deleteItemField(id: string): Promise<void> {
   if (error) throw new Error(`Failed to delete field: ${error.message}`);
 }
 
+/** Duplicate an existing estimate (same file, no re-OCR) and return the new estimate ID. */
+export async function duplicateEstimate(
+  sourceId: string,
+  userId: string
+): Promise<{ estimateId: string }> {
+  const result = await getEstimateWithItems(sourceId);
+  if (!result) throw new Error('Source estimate not found');
+  const { estimate, items } = result;
+
+  const { data: newEstimate, error: estimateError } = await supabase
+    .from('estimates')
+    .insert({
+      uploaded_by_user_id: userId,
+      source: 'duplicate',
+      original_file_url: estimate.originalFileUrl,
+      original_file_name: `Copy of ${estimate.originalFileName}`,
+      file_type: estimate.fileType,
+      ocr_status: 'done',
+      company_id: estimate.companyId,
+      extracted_customer_name: estimate.extractedCustomerName,
+      extracted_customer_contact: estimate.extractedCustomerContact,
+      extracted_customer_email: estimate.extractedCustomerEmail,
+      extracted_customer_phone: estimate.extractedCustomerPhone,
+      customer_confidence: estimate.customerConfidence,
+      total_price: estimate.totalPrice,
+      extracted_at: estimate.extractedAt,
+    })
+    .select('id')
+    .single();
+
+  if (estimateError || !newEstimate) {
+    throw new Error(`Failed to duplicate estimate: ${estimateError?.message}`);
+  }
+
+  try {
+    for (const item of items) {
+      const { data: newItem, error: itemError } = await supabase
+        .from('estimate_items')
+        .insert({
+          estimate_id: newEstimate.id,
+          item_label: item.itemLabel,
+          canonical_code: item.canonicalCode,
+          quantity: item.quantity,
+          unit_price: item.unitPrice,
+          sort_order: item.sortOrder,
+        })
+        .select('id')
+        .single();
+
+      if (itemError || !newItem) {
+        throw new Error(`Failed to copy item: ${itemError?.message}`);
+      }
+
+      if (item.fields.length > 0) {
+        const { error: fieldsError } = await supabase.from('item_fields').insert(
+          item.fields.map((field) => ({
+            estimate_item_id: newItem.id,
+            field_definition_id: field.fieldDefinitionId,
+            field_key: field.fieldKey,
+            field_label: field.fieldLabel,
+            field_value: field.fieldValue,
+            value_type: field.valueType,
+            source_confidence: field.sourceConfidence,
+          }))
+        );
+
+        if (fieldsError) {
+          throw new Error(`Failed to copy item fields: ${fieldsError.message}`);
+        }
+      }
+    }
+  } catch (err) {
+    // Rollback: delete the new estimate (cascades to items/fields; file is shared so not deleted)
+    await supabase.from('estimates').delete().eq('id', newEstimate.id);
+    throw err;
+  }
+
+  return { estimateId: newEstimate.id };
+}
+
 /** Delete an estimate and its associated file from storage. */
 export async function deleteEstimate(id: string): Promise<void> {
   // First, get the estimate to find the file path
@@ -460,7 +540,7 @@ export async function deleteFieldDefinition(id: string): Promise<void> {
 function mapEstimateRow(row: any): Estimate {
   return {
     id: row.id,
-    customerId: row.customer_id,
+    companyId: row.company_id,
     uploadedByUserId: row.uploaded_by_user_id,
     source: row.source,
     originalFileUrl: row.original_file_url,

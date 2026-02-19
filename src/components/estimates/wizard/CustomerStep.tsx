@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
-import type { Customer } from '@/types';
+import type { Company } from '@/types';
 
 export interface ExtractedCustomerData {
   name?: string;
@@ -21,7 +21,7 @@ type SelectionMode = 'ocr' | 'existing' | 'none';
 
 interface CustomerStepProps {
   extractedCustomer: ExtractedCustomerData | null;
-  customers: Customer[];
+  companies: Company[];
   selectedCustomerId: string | null;
   noCustomer: boolean;
   onSelectCustomer: (customerId: string | null, noCustomer: boolean) => void;
@@ -30,7 +30,7 @@ interface CustomerStepProps {
 
 export function CustomerStep({
   extractedCustomer,
-  customers,
+  companies,
   selectedCustomerId,
   noCustomer,
   onSelectCustomer,
@@ -45,35 +45,34 @@ export function CustomerStep({
   });
   const [selectedInList, setSelectedInList] = useState<string | null>(selectedCustomerId);
 
-  // Find OCR matched customer (exact or fuzzy match)
+  // Find OCR matched company (exact or fuzzy match)
   const ocrMatchedCustomer = useMemo(() => {
     if (!extractedCustomer?.name) return null;
     const extractedLower = extractedCustomer.name.toLowerCase().trim();
     // Try exact match first
-    const exact = customers.find(
+    const exact = companies.find(
       (c) => c.name.toLowerCase().trim() === extractedLower
     );
     if (exact) return exact;
     // Try partial / includes match
-    return customers.find(
+    return companies.find(
       (c) =>
         c.name.toLowerCase().includes(extractedLower) ||
         extractedLower.includes(c.name.toLowerCase())
     ) || null;
-  }, [extractedCustomer, customers]);
+  }, [extractedCustomer, companies]);
 
   const filteredCustomers = useMemo(() => {
-    if (!searchQuery.trim()) return customers;
+    if (!searchQuery.trim()) return companies;
     const query = searchQuery.toLowerCase();
-    return customers.filter(
+    return companies.filter(
       (c) =>
         c.name.toLowerCase().includes(query) ||
-        c.primaryContactName.toLowerCase().includes(query) ||
-        c.email.toLowerCase().includes(query)
+        (c.notes ?? '').toLowerCase().includes(query)
     );
-  }, [customers, searchQuery]);
+  }, [companies, searchQuery]);
 
-  const selectedCustomer = customers.find((c) => c.id === selectedInList);
+  const selectedCustomer = companies.find((c) => c.id === selectedInList);
 
   // Determine if user can proceed
   const canProceed = useMemo(() => {
@@ -266,7 +265,7 @@ export function CustomerStep({
                                 ? 'text-primary-foreground/70'
                                 : 'text-muted-foreground'
                             )}>
-                              {customer.primaryContactName}
+                              {[customer.billingCity, customer.billingState].filter(Boolean).join(', ') || 'No location'}
                             </p>
                           </div>
                         </button>

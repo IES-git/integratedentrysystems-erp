@@ -11,6 +11,7 @@ import LoginPage from "@/pages/LoginPage";
 import SignUpPage from "@/pages/SignUpPage";
 import DashboardPage from "@/pages/DashboardPage";
 import CustomersPage from "@/pages/CustomersPage";
+import CompanyDetailPage from "@/pages/CompanyDetailPage";
 import ManufacturersPage from "@/pages/ManufacturersPage";
 import EstimatesListPage from "@/pages/EstimatesListPage";
 import EstimateUploadPage from "@/pages/EstimateUploadPage";
@@ -49,6 +50,7 @@ const App = () => (
                 
                 {/* Customers */}
                 <Route path="customers" element={<CustomersPage />} />
+                <Route path="customers/:id" element={<CompanyDetailPage />} />
                 
                 {/* Manufacturers */}
                 <Route path="manufacturers" element={<ManufacturersPage />} />

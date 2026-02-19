@@ -19,18 +19,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { orderStorage, customerStorage } from '@/lib/storage';
+import { orderStorage } from '@/lib/storage';
 import type { Order, OrderStatus } from '@/types';
 
 export default function OrdersPage() {
   const [orders] = useState<Order[]>(orderStorage.getAll());
   const [searchQuery, setSearchQuery] = useState('');
 
-  const customers = customerStorage.getAll();
-
-  const getCustomerName = (customerId: string) => {
-    const customer = customers.find((c) => c.id === customerId);
-    return customer?.name || 'Unknown';
+  const getCustomerName = (_customerId: string) => {
+    return 'Unknown';
   };
 
   const filteredOrders = orders.filter((order) =>
