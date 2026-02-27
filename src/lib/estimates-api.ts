@@ -273,6 +273,10 @@ export async function createManualEstimate(userId: string): Promise<{ estimateId
     .insert({
       uploaded_by_user_id: userId,
       source: 'manual',
+      // Placeholder values required by NOT NULL DB constraints — no actual file exists
+      original_file_url: '',
+      original_file_name: 'Manual Estimate',
+      file_type: 'manual',
       ocr_status: 'done',
     })
     .select('id')

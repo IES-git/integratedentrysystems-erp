@@ -145,9 +145,9 @@ Main estimate record from uploaded files.
 - `company_id` (UUID) - FK to companies.id, nullable, SET NULL on delete (assigned during wizard "Save Draft" flow)
 - `uploaded_by_user_id` (UUID, NOT NULL) - FK to users.id
 - `source` (TEXT, NOT NULL, DEFAULT 'upload') - Source of estimate
-- `original_file_url` (TEXT, NOT NULL) - Supabase Storage path
-- `original_file_name` (TEXT, NOT NULL) - Original filename
-- `file_type` (TEXT, NOT NULL) - 'pdf' or 'image'
+- `original_file_url` (TEXT, NOT NULL) - Supabase Storage path. Empty string `''` for `source = 'manual'` estimates (no file). TODO: make nullable.
+- `original_file_name` (TEXT, NOT NULL) - Original filename. `'Manual Estimate'` for manual entries. TODO: make nullable.
+- `file_type` (TEXT, NOT NULL) - 'pdf', 'image', or 'manual' (for manually created estimates). TODO: make nullable.
 - `ocr_status` (TEXT, NOT NULL, DEFAULT 'pending') - 'pending', 'processing', 'done', 'error'
   - **Note:** Estimates with `ocr_status = 'done'` are ready to use as drafts for quotes
 - `ocr_error` (TEXT) - Error message if OCR failed
