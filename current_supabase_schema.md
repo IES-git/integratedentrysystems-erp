@@ -147,7 +147,7 @@ Main estimate record from uploaded files.
 - `source` (TEXT, NOT NULL, DEFAULT 'upload') - Source of estimate
 - `original_file_url` (TEXT, NOT NULL) - Supabase Storage path. Empty string `''` for `source = 'manual'` estimates (no file). TODO: make nullable.
 - `original_file_name` (TEXT, NOT NULL) - Original filename. `'Manual Estimate'` for manual entries. TODO: make nullable.
-- `file_type` (TEXT, NOT NULL) - 'pdf', 'image', or 'manual' (for manually created estimates). TODO: make nullable.
+- `file_type` (TEXT, NOT NULL) - 'pdf' or 'image' (CHECK constraint: `estimates_file_type_check`). Manual estimates use `'pdf'` as a placeholder. TODO: make nullable.
 - `ocr_status` (TEXT, NOT NULL, DEFAULT 'pending') - 'pending', 'processing', 'done', 'error'
   - **Note:** Estimates with `ocr_status = 'done'` are ready to use as drafts for quotes
 - `ocr_error` (TEXT) - Error message if OCR failed

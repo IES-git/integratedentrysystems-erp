@@ -276,7 +276,7 @@ export async function createManualEstimate(userId: string): Promise<{ estimateId
       // Placeholder values required by NOT NULL DB constraints — no actual file exists
       original_file_url: '',
       original_file_name: 'Manual Estimate',
-      file_type: 'manual',
+      file_type: 'pdf',
       ocr_status: 'done',
     })
     .select('id')
