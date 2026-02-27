@@ -1,17 +1,21 @@
-import { useState } from 'react';
-import { Package, Plus, Trash2, Edit2, Check, X, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { Package, Plus, Trash2, Edit2, Check, X, ChevronDown, ChevronUp, AlertCircle, ChevronsUpDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { cn } from '@/lib/utils';
-import type { EstimateItem, ItemField } from '@/types';
+import type { EstimateItem, ItemField, FieldDefinition } from '@/types';
 
 interface LineItemWithFields extends EstimateItem {
   fields: ItemField[];
 }
+
+type AddFieldMode = 'select' | 'create';
 
 interface LineItemsStepProps {
   lineItems: LineItemWithFields[];
@@ -23,6 +27,9 @@ interface LineItemsStepProps {
   onBack: () => void;
   onFinish: () => void;
   finishLabel?: string;
+  onAddItem?: () => void;
+  onDeleteItem?: (itemId: string) => void;
+  fieldDefinitions?: FieldDefinition[];
 }
 
 export function LineItemsStep({
@@ -35,6 +42,9 @@ export function LineItemsStep({
   onBack,
   onFinish,
   finishLabel = 'Save as Draft',
+  onAddItem,
+  onDeleteItem,
+  fieldDefinitions,
 }: LineItemsStepProps) {
   const [expandedItems, setExpandedItems] = useState<Set<string>>(
     new Set(lineItems.map((item) => item.id))
@@ -42,9 +52,14 @@ export function LineItemsStep({
   const [editingField, setEditingField] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const [addingFieldTo, setAddingFieldTo] = useState<string | null>(null);
+  const [addFieldMode, setAddFieldMode] = useState<AddFieldMode>('select');
+  const [selectedFieldDef, setSelectedFieldDef] = useState<FieldDefinition | null>(null);
+  const [fieldDefPopoverOpen, setFieldDefPopoverOpen] = useState(false);
   const [newFieldKey, setNewFieldKey] = useState('');
   const [newFieldLabel, setNewFieldLabel] = useState('');
   const [newFieldValue, setNewFieldValue] = useState('');
+
+  const hasFieldDefs = fieldDefinitions && fieldDefinitions.length > 0;
 
   const toggleItem = (itemId: string) => {
     setExpandedItems((prev) => {
@@ -74,23 +89,59 @@ export function LineItemsStep({
     setEditValue('');
   };
 
-  const handleAddField = (itemId: string) => {
-    if (!newFieldKey.trim() || !newFieldLabel.trim()) return;
-
-    onAddField(itemId, {
-      estimateItemId: itemId,
-      fieldKey: newFieldKey.toLowerCase().replace(/\s+/g, '_'),
-      fieldLabel: newFieldLabel,
-      fieldValue: newFieldValue,
-      valueType: 'string',
-      sourceConfidence: null,
-    });
-
+  const resetAddFieldForm = () => {
     setAddingFieldTo(null);
+    setAddFieldMode('select');
+    setSelectedFieldDef(null);
+    setFieldDefPopoverOpen(false);
     setNewFieldKey('');
     setNewFieldLabel('');
     setNewFieldValue('');
   };
+
+  const handleAddField = (itemId: string) => {
+    if (addFieldMode === 'select' && selectedFieldDef) {
+      onAddField(itemId, {
+        estimateItemId: itemId,
+        fieldKey: selectedFieldDef.fieldKey,
+        fieldLabel: selectedFieldDef.fieldLabel,
+        fieldValue: newFieldValue,
+        valueType: selectedFieldDef.valueType,
+        fieldDefinitionId: selectedFieldDef.id,
+        sourceConfidence: null,
+      });
+      resetAddFieldForm();
+      return;
+    }
+
+    if (addFieldMode === 'create') {
+      if (!newFieldKey.trim() || !newFieldLabel.trim()) return;
+      onAddField(itemId, {
+        estimateItemId: itemId,
+        fieldKey: newFieldKey.toLowerCase().replace(/\s+/g, '_'),
+        fieldLabel: newFieldLabel,
+        fieldValue: newFieldValue,
+        valueType: 'string',
+        sourceConfidence: null,
+      });
+      resetAddFieldForm();
+    }
+  };
+
+  const isAddFieldDisabled = (itemId: string) => {
+    if (addingFieldTo !== itemId) return false;
+    if (addFieldMode === 'select') return !selectedFieldDef;
+    return !newFieldKey.trim() || !newFieldLabel.trim();
+  };
+
+  // Memoised list of field definition ids already used on a given item
+  const usedFieldKeys = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const item of lineItems) {
+      map.set(item.id, new Set(item.fields.map((f) => f.fieldKey)));
+    }
+    return map;
+  }, [lineItems]);
 
   const getConfidenceColor = (confidence: number | null) => {
     if (confidence === null) return 'text-muted-foreground';
@@ -103,14 +154,26 @@ export function LineItemsStep({
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-medium">Verify Line Items</h3>
+          <h3 className="text-lg font-medium">
+            {onAddItem ? 'Add Line Items' : 'Verify Line Items'}
+          </h3>
           <p className="text-sm text-muted-foreground">
-            Review and correct the extracted information for each line item
+            {onAddItem
+              ? 'Add items and their fields to the estimate'
+              : 'Review and correct the extracted information for each line item'}
           </p>
         </div>
-        <Badge variant="secondary" className="text-sm">
-          {lineItems.length} item{lineItems.length !== 1 ? 's' : ''}
-        </Badge>
+        <div className="flex items-center gap-2">
+          {onAddItem && (
+            <Button size="sm" variant="outline" onClick={onAddItem}>
+              <Plus className="h-3.5 w-3.5 mr-1.5" />
+              Add Line Item
+            </Button>
+          )}
+          <Badge variant="secondary" className="text-sm">
+            {lineItems.length} item{lineItems.length !== 1 ? 's' : ''}
+          </Badge>
+        </div>
       </div>
 
       {/* Total Price Banner */}
@@ -134,7 +197,15 @@ export function LineItemsStep({
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <AlertCircle className="h-12 w-12 text-muted-foreground/50 mb-4" />
-            <p className="text-muted-foreground">No line items found in the estimate</p>
+            <p className="text-muted-foreground">
+              {onAddItem ? 'No line items yet — click "Add Line Item" to start' : 'No line items found in the estimate'}
+            </p>
+            {onAddItem && (
+              <Button size="sm" variant="outline" className="mt-4" onClick={onAddItem}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                Add Line Item
+              </Button>
+            )}
           </CardContent>
         </Card>
       ) : (
@@ -172,6 +243,19 @@ export function LineItemsStep({
                         <Badge variant="outline" className="text-xs">
                           {item.fields.length} fields
                         </Badge>
+                        {onDeleteItem && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDeleteItem(item.id);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         {expandedItems.has(item.id) ? (
                           <ChevronUp className="h-4 w-4 text-muted-foreground" />
                         ) : (
@@ -236,7 +320,14 @@ export function LineItemsStep({
                           variant="ghost"
                           size="sm"
                           className="h-7 text-xs"
-                          onClick={() => setAddingFieldTo(item.id)}
+                          onClick={() => {
+                            setSelectedFieldDef(null);
+                            setNewFieldKey('');
+                            setNewFieldLabel('');
+                            setNewFieldValue('');
+                            setAddFieldMode(hasFieldDefs ? 'select' : 'create');
+                            setAddingFieldTo(item.id);
+                          }}
                         >
                           <Plus className="h-3 w-3 mr-1" />
                           Add Field
@@ -332,47 +423,148 @@ export function LineItemsStep({
                       {/* Add Field Form */}
                       {addingFieldTo === item.id && (
                         <div className="mt-3 p-3 rounded-lg border border-dashed bg-muted/30 space-y-3">
-                          <div className="grid grid-cols-3 gap-2">
-                            <div>
-                              <Label className="text-xs">Field Key</Label>
-                              <Input
-                                placeholder="e.g. gauge"
-                                value={newFieldKey}
-                                onChange={(e) => setNewFieldKey(e.target.value)}
-                                className="h-8 text-sm"
-                              />
+                          {/* Mode tabs — only shown when field definitions exist */}
+                          {hasFieldDefs && (
+                            <div className="flex gap-1 p-0.5 rounded-md bg-muted w-fit">
+                              <button
+                                type="button"
+                                className={cn(
+                                  'px-3 py-1 rounded text-xs font-medium transition-colors',
+                                  addFieldMode === 'select'
+                                    ? 'bg-background shadow-sm text-foreground'
+                                    : 'text-muted-foreground hover:text-foreground'
+                                )}
+                                onClick={() => {
+                                  setAddFieldMode('select');
+                                  setNewFieldKey('');
+                                  setNewFieldLabel('');
+                                }}
+                              >
+                                Select existing field
+                              </button>
+                              <button
+                                type="button"
+                                className={cn(
+                                  'px-3 py-1 rounded text-xs font-medium transition-colors',
+                                  addFieldMode === 'create'
+                                    ? 'bg-background shadow-sm text-foreground'
+                                    : 'text-muted-foreground hover:text-foreground'
+                                )}
+                                onClick={() => {
+                                  setAddFieldMode('create');
+                                  setSelectedFieldDef(null);
+                                }}
+                              >
+                                Create new field
+                              </button>
                             </div>
-                            <div>
-                              <Label className="text-xs">Display Label</Label>
-                              <Input
-                                placeholder="e.g. Gauge"
-                                value={newFieldLabel}
-                                onChange={(e) => setNewFieldLabel(e.target.value)}
-                                className="h-8 text-sm"
-                              />
+                          )}
+
+                          {/* Select existing field mode */}
+                          {addFieldMode === 'select' && hasFieldDefs && (
+                            <div className="grid grid-cols-[1fr_1fr] gap-2">
+                              <div className="col-span-2 sm:col-span-1">
+                                <Label className="text-xs">Field Definition</Label>
+                                <Popover open={fieldDefPopoverOpen} onOpenChange={setFieldDefPopoverOpen}>
+                                  <PopoverTrigger asChild>
+                                    <Button
+                                      variant="outline"
+                                      role="combobox"
+                                      className="w-full h-8 text-sm justify-between font-normal"
+                                    >
+                                      <span className="truncate">
+                                        {selectedFieldDef ? selectedFieldDef.fieldLabel : 'Search fields…'}
+                                      </span>
+                                      <ChevronsUpDown className="ml-2 h-3 w-3 shrink-0 opacity-50" />
+                                    </Button>
+                                  </PopoverTrigger>
+                                  <PopoverContent className="w-64 p-0" align="start">
+                                    <Command>
+                                      <CommandInput placeholder="Search field definitions…" className="h-8 text-sm" />
+                                      <CommandList>
+                                        <CommandEmpty>No matching fields.</CommandEmpty>
+                                        <CommandGroup>
+                                          {(fieldDefinitions ?? [])
+                                            .filter((fd) => !usedFieldKeys.get(item.id)?.has(fd.fieldKey))
+                                            .map((fd) => (
+                                              <CommandItem
+                                                key={fd.id}
+                                                value={`${fd.fieldLabel} ${fd.fieldKey}`}
+                                                onSelect={() => {
+                                                  setSelectedFieldDef(fd);
+                                                  setFieldDefPopoverOpen(false);
+                                                }}
+                                              >
+                                                <div className="flex flex-col">
+                                                  <span className="text-sm">{fd.fieldLabel}</span>
+                                                  <span className="text-[10px] font-mono text-muted-foreground">{fd.fieldKey}</span>
+                                                </div>
+                                              </CommandItem>
+                                            ))}
+                                        </CommandGroup>
+                                      </CommandList>
+                                    </Command>
+                                  </PopoverContent>
+                                </Popover>
+                              </div>
+                              <div className="col-span-2 sm:col-span-1">
+                                <Label className="text-xs">Value</Label>
+                                <Input
+                                  placeholder={selectedFieldDef ? `e.g. ${selectedFieldDef.fieldKey}` : '—'}
+                                  value={newFieldValue}
+                                  onChange={(e) => setNewFieldValue(e.target.value)}
+                                  className="h-8 text-sm"
+                                  disabled={!selectedFieldDef}
+                                />
+                              </div>
                             </div>
-                            <div>
-                              <Label className="text-xs">Value</Label>
-                              <Input
-                                placeholder="e.g. 16 GA"
-                                value={newFieldValue}
-                                onChange={(e) => setNewFieldValue(e.target.value)}
-                                className="h-8 text-sm"
-                              />
+                          )}
+
+                          {/* Create new field mode */}
+                          {addFieldMode === 'create' && (
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <Label className="text-xs">Field Key</Label>
+                                <Input
+                                  placeholder="e.g. gauge"
+                                  value={newFieldKey}
+                                  onChange={(e) => setNewFieldKey(e.target.value)}
+                                  className="h-8 text-sm"
+                                />
+                              </div>
+                              <div>
+                                <Label className="text-xs">Display Label</Label>
+                                <Input
+                                  placeholder="e.g. Gauge"
+                                  value={newFieldLabel}
+                                  onChange={(e) => setNewFieldLabel(e.target.value)}
+                                  className="h-8 text-sm"
+                                />
+                              </div>
+                              <div>
+                                <Label className="text-xs">Value</Label>
+                                <Input
+                                  placeholder="e.g. 16 GA"
+                                  value={newFieldValue}
+                                  onChange={(e) => setNewFieldValue(e.target.value)}
+                                  className="h-8 text-sm"
+                                />
+                              </div>
                             </div>
-                          </div>
+                          )}
+
                           <div className="flex justify-end gap-2">
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => setAddingFieldTo(null)}
+                              onClick={resetAddFieldForm}
                             >
                               Cancel
                             </Button>
                             <Button
                               size="sm"
                               onClick={() => handleAddField(item.id)}
-                              disabled={!newFieldKey.trim() || !newFieldLabel.trim()}
+                              disabled={isAddFieldDisabled(item.id)}
                             >
                               Add Field
                             </Button>

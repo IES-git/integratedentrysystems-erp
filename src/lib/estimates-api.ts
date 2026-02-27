@@ -266,6 +266,25 @@ export async function updateItemField(
 // Create
 // ---------------------------------------------------------------------------
 
+/** Create a blank manual estimate (no file, no OCR). Returns the new estimate ID. */
+export async function createManualEstimate(userId: string): Promise<{ estimateId: string }> {
+  const { data: estimate, error } = await supabase
+    .from('estimates')
+    .insert({
+      uploaded_by_user_id: userId,
+      source: 'manual',
+      ocr_status: 'done',
+    })
+    .select('id')
+    .single();
+
+  if (error || !estimate) {
+    throw new Error(`Failed to create estimate: ${error?.message}`);
+  }
+
+  return { estimateId: estimate.id };
+}
+
 /** Add a new line item to an estimate. */
 export async function addEstimateItem(
   estimateId: string,

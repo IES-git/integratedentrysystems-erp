@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { FileText, Search, Upload, AlertCircle } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { FileText, PenLine, Search, Upload, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -32,6 +33,7 @@ function mapCompanyRow(row: any): Company {
 }
 
 export default function EstimatesListPage() {
+  const navigate = useNavigate();
   const [estimates, setEstimates] = useState<Estimate[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -129,10 +131,16 @@ export default function EstimatesListPage() {
             View and manage parsed PDF estimates
           </p>
         </div>
-        <Button onClick={() => setUploadModalOpen(true)}>
-          <Upload className="mr-2 h-4 w-4" />
-          Upload New
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => navigate('/app/estimates/create')}>
+            <PenLine className="mr-2 h-4 w-4" />
+            Create New
+          </Button>
+          <Button onClick={() => setUploadModalOpen(true)}>
+            <Upload className="mr-2 h-4 w-4" />
+            Upload New
+          </Button>
+        </div>
       </div>
 
       <Card>
