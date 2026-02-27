@@ -9,6 +9,8 @@ import {
   AlertCircle,
   Building2,
   SlidersHorizontal,
+  UserPlus,
+  ChevronDown,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,6 +27,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -45,6 +48,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -75,6 +85,11 @@ export default function CustomersPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [addContact, setAddContact] = useState(true);
   const [isBulkMarkupOpen, setIsBulkMarkupOpen] = useState(false);
+
+  // Add Contact dialog state
+  const [isContactDialogOpen, setIsContactDialogOpen] = useState(false);
+  const [contactCompanyId, setContactCompanyId] = useState<string>('');
+  const [isSavingContact, setIsSavingContact] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -180,6 +195,40 @@ export default function CustomersPage() {
     setIsDialogOpen(true);
   };
 
+  const openContactDialog = () => {
+    setContactCompanyId('');
+    setIsContactDialogOpen(true);
+  };
+
+  const handleSaveContact = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!contactCompanyId) return;
+    const fd = new FormData(e.currentTarget);
+    setIsSavingContact(true);
+    try {
+      await createContact({
+        companyId: contactCompanyId,
+        firstName: fd.get('contactFirstName') as string,
+        lastName: fd.get('contactLastName') as string,
+        email: (fd.get('contactEmail') as string) || undefined,
+        phone: (fd.get('contactPhone') as string) || undefined,
+        title: (fd.get('contactTitle') as string) || undefined,
+        isPrimary: false,
+      });
+      toast({ title: 'Contact added', description: 'New contact has been saved.' });
+      await load();
+      setIsContactDialogOpen(false);
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'Failed to save contact',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSavingContact(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex min-h-[400px] items-center justify-center">
@@ -218,10 +267,30 @@ export default function CustomersPage() {
             <SlidersHorizontal className="mr-2 h-4 w-4" />
             Bulk Markup
           </Button>
-          <Button onClick={openNewDialog}>
-            <Plus className="mr-2 h-4 w-4" />
-            Add Customer
-          </Button>
+          <div className="flex">
+            <Button onClick={openNewDialog} className="rounded-r-none pr-3">
+              <Plus className="mr-2 h-4 w-4" />
+              Add
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button className="rounded-l-none border-l border-l-primary-foreground/20 px-2">
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={openNewDialog}>
+                  <Building2 className="mr-2 h-4 w-4" />
+                  New Customer
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={openContactDialog}>
+                  <UserPlus className="mr-2 h-4 w-4" />
+                  New Contact
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       </div>
 
@@ -499,6 +568,78 @@ export default function CustomersPage() {
               </Button>
               <Button type="submit" disabled={isSaving}>
                 {isSaving ? 'Saving...' : editingCompany ? 'Save Changes' : 'Create Customer'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Contact Dialog */}
+      <Dialog open={isContactDialogOpen} onOpenChange={setIsContactDialogOpen}>
+        <DialogContent className="max-w-md">
+          <form onSubmit={handleSaveContact}>
+            <DialogHeader>
+              <DialogTitle className="font-display text-2xl">New Contact</DialogTitle>
+              <DialogDescription>Add a contact to an existing customer company</DialogDescription>
+            </DialogHeader>
+
+            <div className="mt-4 grid gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="contactCompany">Customer *</Label>
+                <Select value={contactCompanyId} onValueChange={setContactCompanyId} required>
+                  <SelectTrigger id="contactCompany">
+                    <SelectValue placeholder="Select a company…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {companies
+                      .filter((c) => c.active)
+                      .map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          {c.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="contactFirstName">First Name *</Label>
+                  <Input id="contactFirstName" name="contactFirstName" required />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="contactLastName">Last Name *</Label>
+                  <Input id="contactLastName" name="contactLastName" required />
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="contactEmail">Email</Label>
+                  <Input id="contactEmail" name="contactEmail" type="email" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="contactPhone">Phone</Label>
+                  <Input id="contactPhone" name="contactPhone" />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="contactTitle">Title / Role</Label>
+                <Input id="contactTitle" name="contactTitle" placeholder="e.g. Project Manager" />
+              </div>
+            </div>
+
+            <DialogFooter className="mt-6">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setIsContactDialogOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isSavingContact || !contactCompanyId}>
+                {isSavingContact ? 'Saving…' : 'Add Contact'}
               </Button>
             </DialogFooter>
           </form>
