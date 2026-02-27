@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { pdf } from '@react-pdf/renderer';
+import { pdf, PDFViewer } from '@react-pdf/renderer';
 import {
   ArrowLeft,
   Building2,
   Download,
+  Eye,
   FileText,
   Loader2,
   Save,
@@ -20,6 +21,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import { getEstimateWithItems } from '@/lib/estimates-api';
@@ -39,8 +41,23 @@ interface EstimateItemWithFields extends EstimateItem {
 interface LineItem {
   estimateItem: EstimateItemWithFields;
   unitCost: number;
+  multiplier: number;
   unitPrice: number;
   lineTotal: number;
+}
+
+/** Case-insensitive lookup of an item in the bulk markup overrides map. */
+function findItemOverride(
+  overrides: Record<string, number>,
+  item: EstimateItemWithFields
+): number | undefined {
+  const label = item.itemLabel?.toLowerCase().trim();
+  const code = item.canonicalCode?.toLowerCase().trim();
+  for (const [key, val] of Object.entries(overrides)) {
+    const k = key.toLowerCase().trim();
+    if (k === label || (code && k === code)) return val;
+  }
+  return undefined;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -82,9 +99,18 @@ function MultiplierBadge({ multiplier }: { multiplier: number }) {
 interface CustomerLineItemsTableProps {
   items: LineItem[];
   currency: string;
+  companyDefaultMultiplier: number;
+  bulkOverrides: Record<string, number>;
+  onUpdateMultiplier: (itemId: string, multiplier: number) => void;
 }
 
-function CustomerLineItemsTable({ items, currency }: CustomerLineItemsTableProps) {
+function CustomerLineItemsTable({
+  items,
+  currency,
+  companyDefaultMultiplier,
+  bulkOverrides,
+  onUpdateMultiplier,
+}: CustomerLineItemsTableProps) {
   return (
     <div className="overflow-x-auto rounded-lg border">
       <table className="w-full text-sm">
@@ -93,37 +119,78 @@ function CustomerLineItemsTable({ items, currency }: CustomerLineItemsTableProps
             <th className="px-4 py-3 text-left font-medium text-muted-foreground">Item</th>
             <th className="px-4 py-3 text-center font-medium text-muted-foreground">Qty</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">Cost</th>
+            <th className="px-4 py-3 text-center font-medium text-muted-foreground">Markup</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">Customer Price</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">Line Total</th>
           </tr>
         </thead>
         <tbody>
-          {items.map((item, idx) => (
-            <tr
-              key={item.estimateItem.id}
-              className={idx % 2 === 0 ? 'bg-background' : 'bg-muted/20'}
-            >
-              <td className="px-4 py-3">
-                <span className="font-medium">{item.estimateItem.itemLabel}</span>
-              </td>
-              <td className="px-4 py-3 text-center text-muted-foreground">
-                {item.estimateItem.quantity}
-              </td>
-              <td className="px-4 py-3 text-right">
-                <span className="text-muted-foreground line-through decoration-muted-foreground/50">
+          {items.map((item, idx) => {
+            const bulkOverride = findItemOverride(bulkOverrides, item.estimateItem);
+            const isOverriddenFromDefault = item.multiplier !== companyDefaultMultiplier;
+            const hasBulkOverride = bulkOverride !== undefined;
+
+            return (
+              <tr
+                key={item.estimateItem.id}
+                className={idx % 2 === 0 ? 'bg-background' : 'bg-muted/20'}
+              >
+                <td className="px-4 py-3">
+                  <span className="font-medium">{item.estimateItem.itemLabel}</span>
+                </td>
+                <td className="px-4 py-3 text-center text-muted-foreground">
+                  {item.estimateItem.quantity}
+                </td>
+                <td className="px-4 py-3 text-right text-muted-foreground">
                   {fmt(item.unitCost, currency)}
-                </span>
-              </td>
-              <td className="px-4 py-3 text-right">
-                <span className="font-semibold text-foreground">
-                  {fmt(item.unitPrice, currency)}
-                </span>
-              </td>
-              <td className="px-4 py-3 text-right font-semibold">
-                {fmt(item.lineTotal, currency)}
-              </td>
-            </tr>
-          ))}
+                </td>
+                <td className="px-4 py-3 text-center">
+                  <div className="flex flex-col items-center gap-0.5">
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.05"
+                        value={item.multiplier}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value);
+                          if (!isNaN(v) && v > 0) {
+                            onUpdateMultiplier(item.estimateItem.id, parseFloat(v.toFixed(2)));
+                          }
+                        }}
+                        className={`w-16 rounded border px-1.5 py-0.5 text-center text-xs font-semibold focus:outline-none focus:ring-1 ${
+                          isOverriddenFromDefault
+                            ? 'border-amber-300 bg-amber-50 text-amber-900 focus:ring-amber-400'
+                            : 'border-border bg-background text-foreground focus:ring-ring'
+                        }`}
+                      />
+                      <span className="text-xs text-muted-foreground">×</span>
+                    </div>
+                    {hasBulkOverride && (
+                      <span className="text-[10px] text-blue-600 font-medium">bulk</span>
+                    )}
+                    {!hasBulkOverride && isOverriddenFromDefault && (
+                      <button
+                        type="button"
+                        onClick={() => onUpdateMultiplier(item.estimateItem.id, companyDefaultMultiplier)}
+                        className="text-[10px] text-muted-foreground underline hover:text-foreground"
+                      >
+                        reset
+                      </button>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <span className="font-semibold text-foreground">
+                    {fmt(item.unitPrice, currency)}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-right font-semibold">
+                  {fmt(item.lineTotal, currency)}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -247,7 +314,13 @@ export default function QuoteBuilderPage() {
   const [isDownloadingManufacturer, setIsDownloadingManufacturer] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [savedQuote, setSavedQuote] = useState<Quote | null>(null);
-  const [editableMultiplier, setEditableMultiplier] = useState(1.0);
+  const [previewType, setPreviewType] = useState<'customer' | 'manufacturer' | null>(null);
+  const [previewAiSummary, setPreviewAiSummary] = useState<string | null>(null);
+  const [isGeneratingPreviewSummary, setIsGeneratingPreviewSummary] = useState(false);
+  // Per-item multipliers: keyed by estimateItem.id
+  const [itemMultipliers, setItemMultipliers] = useState<Record<string, number>>({});
+  // Bulk markup overrides stored on the company (for display hints)
+  const [bulkOverrides, setBulkOverrides] = useState<Record<string, number>>({});
 
   // ── Load data ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -267,14 +340,31 @@ export default function QuoteBuilderPage() {
           navigate('/app/estimates');
           return;
         }
-        setEstimateItems(result.items);
+        const items = result.items;
+        setEstimateItems(items);
 
         if (customerId) {
           const co = await getCompany(customerId);
           setCompany(co);
           if (co) {
-            setEditableMultiplier(co.settings?.costMultiplier ?? 1.0);
+            const defaultMult = co.settings?.costMultiplier ?? 1.0;
+            const overrides: Record<string, number> = co.settings?.markupOverrides ?? {};
+            setBulkOverrides(overrides);
+            // Initialise per-item multipliers from bulk overrides, falling back to default
+            const initMultipliers: Record<string, number> = {};
+            for (const item of items) {
+              const override = findItemOverride(overrides, item);
+              initMultipliers[item.id] = override ?? defaultMult;
+            }
+            setItemMultipliers(initMultipliers);
           }
+        } else {
+          // No customer — default everything to 1.0
+          const initMultipliers: Record<string, number> = {};
+          for (const item of result.items) {
+            initMultipliers[item.id] = 1.0;
+          }
+          setItemMultipliers(initMultipliers);
         }
       } catch (err) {
         console.error(err);
@@ -299,17 +389,43 @@ export default function QuoteBuilderPage() {
     () =>
       estimateItems.map((ei) => {
         const unitCost = ei.unitPrice ?? 0;
-        const unitPrice = parseFloat((unitCost * editableMultiplier).toFixed(2));
+        const multiplier = itemMultipliers[ei.id] ?? companyDefaultMultiplier;
+        const unitPrice = parseFloat((unitCost * multiplier).toFixed(2));
         const qty = ei.quantity;
         return {
           estimateItem: ei,
           unitCost,
+          multiplier,
           unitPrice,
           lineTotal: parseFloat((qty * unitPrice).toFixed(2)),
         };
       }),
-    [estimateItems, editableMultiplier]
+    [estimateItems, itemMultipliers, companyDefaultMultiplier]
   );
+
+  // ── Per-item multiplier callbacks ──────────────────────────────────────────
+  const handleUpdateMultiplier = useCallback((itemId: string, multiplier: number) => {
+    setItemMultipliers((prev) => ({ ...prev, [itemId]: multiplier }));
+  }, []);
+
+  const handleApplyToAll = useCallback((multiplier: number) => {
+    setItemMultipliers((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) next[key] = multiplier;
+      return next;
+    });
+  }, []);
+
+  const handleResetToDefaults = useCallback(() => {
+    setItemMultipliers(() => {
+      const next: Record<string, number> = {};
+      for (const item of estimateItems) {
+        const override = findItemOverride(bulkOverrides, item);
+        next[item.id] = override ?? companyDefaultMultiplier;
+      }
+      return next;
+    });
+  }, [estimateItems, bulkOverrides, companyDefaultMultiplier]);
 
   const subtotal = useMemo(
     () => lineItems.reduce((sum, li) => sum + li.lineTotal, 0),
@@ -326,6 +442,10 @@ export default function QuoteBuilderPage() {
       ),
     [lineItems]
   );
+
+  // Effective "global" multiplier for quote-level field (ratio of totals, or default)
+  const effectiveMarkupMultiplier =
+    costSubtotal > 0 ? parseFloat((subtotal / costSubtotal).toFixed(4)) : companyDefaultMultiplier;
 
   // ── Build quote items for Supabase ─────────────────────────────────────────
   const buildQuoteItems = useCallback(
@@ -353,7 +473,7 @@ export default function QuoteBuilderPage() {
         companyId: customerId ?? null,
         createdByUserId: user.id,
         quoteType,
-        markupMultiplier: editableMultiplier,
+        markupMultiplier: effectiveMarkupMultiplier,
         subtotal,
         total,
         notes: notes.trim() || null,
@@ -374,7 +494,7 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [estimateId, user, customerId, quoteType, editableMultiplier, subtotal, total, notes, buildQuoteItems, toast, navigate]);
+  }, [estimateId, user, customerId, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, buildQuoteItems, toast, navigate]);
 
   // ── PDF helpers ────────────────────────────────────────────────────────────
   const buildQuoteForPdf = useCallback((): Quote => {
@@ -386,7 +506,7 @@ export default function QuoteBuilderPage() {
       createdByUserId: user?.id ?? '',
       status: 'draft' as const,
       quoteType,
-      markupMultiplier: editableMultiplier,
+      markupMultiplier: effectiveMarkupMultiplier,
       subtotal,
       total,
       currency: 'USD',
@@ -395,7 +515,7 @@ export default function QuoteBuilderPage() {
       updatedAt: now,
     };
     return base;
-  }, [savedQuote, estimateId, customerId, user, quoteType, editableMultiplier, subtotal, total, notes]);
+  }, [savedQuote, estimateId, customerId, user, quoteType, effectiveMarkupMultiplier, subtotal, total, notes]);
 
   const buildQuoteItemsForPdf = useCallback((): QuoteItem[] => {
     const now = new Date().toISOString();
@@ -413,6 +533,78 @@ export default function QuoteBuilderPage() {
       createdAt: now,
     }));
   }, [lineItems, savedQuote]);
+
+  // ── Reactive PDF data for live preview ────────────────────────────────────
+  const pdfQuote = useMemo((): Quote => {
+    const now = new Date().toISOString();
+    if (savedQuote) return savedQuote;
+    return {
+      id: `preview-${estimateId}`,
+      estimateId: estimateId ?? '',
+      companyId: customerId ?? null,
+      createdByUserId: user?.id ?? '',
+      status: 'draft' as const,
+      quoteType,
+      markupMultiplier: effectiveMarkupMultiplier,
+      subtotal,
+      total,
+      currency: 'USD',
+      notes: notes.trim() || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }, [savedQuote, estimateId, customerId, user?.id, quoteType, effectiveMarkupMultiplier, subtotal, total, notes]);
+
+  const pdfItems = useMemo((): QuoteItem[] => {
+    const now = new Date().toISOString();
+    return lineItems.map((li, idx) => ({
+      id: li.estimateItem.id,
+      quoteId: savedQuote?.id ?? 'preview',
+      estimateItemId: li.estimateItem.id,
+      itemLabel: li.estimateItem.itemLabel,
+      canonicalCode: li.estimateItem.canonicalCode ?? null,
+      quantity: li.estimateItem.quantity,
+      unitCost: li.unitCost,
+      unitPrice: li.unitPrice,
+      lineTotal: li.lineTotal,
+      sortOrder: idx,
+      createdAt: now,
+    }));
+  }, [lineItems, savedQuote?.id]);
+
+  const pdfManufacturerItems = useMemo(
+    () =>
+      pdfItems.map((qi, idx) => ({
+        ...qi,
+        fields: lineItems[idx]?.estimateItem.fields ?? [],
+      })),
+    [pdfItems, lineItems]
+  );
+
+  const handlePreviewCustomer = useCallback(async () => {
+    setPreviewAiSummary(null);
+    setPreviewType('customer');
+    setIsGeneratingPreviewSummary(true);
+    try {
+      const summary = await generateQuoteSummary({
+        companyName: company?.name ?? null,
+        items: pdfItems.map((i) => ({
+          label: i.itemLabel,
+          quantity: i.quantity,
+          lineTotal: i.lineTotal,
+        })),
+        total: pdfQuote.total,
+        currency: pdfQuote.currency,
+        notes: pdfQuote.notes,
+      });
+      setPreviewAiSummary(summary);
+    } catch (err) {
+      console.warn('Preview AI summary failed:', err);
+      setPreviewAiSummary(null);
+    } finally {
+      setIsGeneratingPreviewSummary(false);
+    }
+  }, [company, pdfItems, pdfQuote]);
 
   const handleDownloadCustomer = useCallback(async () => {
     setIsDownloadingCustomer(true);
@@ -511,6 +703,77 @@ export default function QuoteBuilderPage() {
   const typeBadge = quoteTypeBadgeMap[quoteType];
 
   return (
+    <>
+    {/* ── PDF Preview Dialog ── */}
+    <Dialog open={previewType !== null} onOpenChange={(open) => !open && setPreviewType(null)}>
+      <DialogContent className="max-w-5xl w-[95vw] h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
+        <DialogHeader className="px-6 py-4 border-b shrink-0">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Eye className="h-4 w-4" />
+            {previewType === 'customer' ? 'Customer Quote Preview' : 'Manufacturer RFQ Preview'}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex-1 min-h-0">
+          {previewType !== null && (
+            <PDFViewer width="100%" height="100%" showToolbar>
+              {previewType === 'customer' ? (
+                <CustomerQuotePdf
+                  quote={pdfQuote}
+                  items={pdfItems}
+                  company={company}
+                  aiSummary={previewAiSummary}
+                />
+              ) : (
+                <ManufacturerQuotePdf
+                  quote={pdfQuote}
+                  items={pdfManufacturerItems}
+                  company={company}
+                />
+              )}
+            </PDFViewer>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t shrink-0 flex items-center justify-between gap-3 bg-background">
+          {previewType === 'customer' && isGeneratingPreviewSummary && (
+            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Generating AI summary…
+            </p>
+          )}
+          {previewType === 'customer' && !isGeneratingPreviewSummary && (
+            <p className="text-xs text-muted-foreground">
+              {previewAiSummary ? 'AI summary included.' : 'AI summary unavailable.'}
+            </p>
+          )}
+          {previewType === 'manufacturer' && (
+            <p className="text-xs text-muted-foreground">
+              Internal use only — not for customer distribution.
+            </p>
+          )}
+          <div className="flex items-center gap-2 ml-auto shrink-0">
+            <Button variant="outline" onClick={() => setPreviewType(null)}>
+              Close
+            </Button>
+            <Button
+              onClick={previewType === 'customer' ? handleDownloadCustomer : handleDownloadManufacturer}
+              disabled={
+                previewType === 'customer' ? isDownloadingCustomer : isDownloadingManufacturer
+              }
+            >
+              {(previewType === 'customer' ? isDownloadingCustomer : isDownloadingManufacturer) ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-2 h-4 w-4" />
+              )}
+              Download PDF
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+
     <div className="flex h-full flex-col lg:flex-row">
       {/* ── Main content ── */}
       <div className="flex-1 overflow-auto">
@@ -551,38 +814,42 @@ export default function QuoteBuilderPage() {
               </div>
             </div>
 
-            {/* Markup banner (customer or both) — always visible, multiplier is editable */}
+            {/* Markup banner (customer or both) */}
             {(quoteType === 'customer' || quoteType === 'both') && (
               <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                 <Tag className="h-4 w-4 shrink-0" />
                 <span className="flex-1 min-w-0">
-                  {company ? `Markup for ${company.name}` : 'Markup multiplier'} — customer prices update dynamically.
+                  {company ? `Markup for ${company.name}` : 'Markup'} — edit per-item below, or use these controls to apply globally.
                 </span>
-                <div className="flex items-center gap-2 shrink-0">
-                  <label className="text-xs font-semibold uppercase tracking-wide opacity-70">
-                    Multiplier
+                <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                  <label className="text-xs font-semibold uppercase tracking-wide opacity-70 whitespace-nowrap">
+                    Apply to all
                   </label>
                   <input
                     type="number"
                     min="0.01"
                     step="0.05"
-                    value={editableMultiplier}
-                    onChange={(e) => {
+                    defaultValue={companyDefaultMultiplier}
+                    onBlur={(e) => {
                       const v = parseFloat(e.target.value);
-                      if (!isNaN(v) && v > 0) setEditableMultiplier(parseFloat(v.toFixed(2)));
+                      if (!isNaN(v) && v > 0) handleApplyToAll(parseFloat(v.toFixed(2)));
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const v = parseFloat((e.target as HTMLInputElement).value);
+                        if (!isNaN(v) && v > 0) handleApplyToAll(parseFloat(v.toFixed(2)));
+                      }
                     }}
                     className="w-20 rounded border border-amber-300 bg-white px-2 py-1 text-center text-sm font-semibold text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-400"
                   />
                   <span className="font-semibold">×</span>
-                  {editableMultiplier !== companyDefaultMultiplier && (
-                    <button
-                      type="button"
-                      onClick={() => setEditableMultiplier(companyDefaultMultiplier)}
-                      className="text-xs underline opacity-70 hover:opacity-100 whitespace-nowrap"
-                    >
-                      Reset to {companyDefaultMultiplier}×
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={handleResetToDefaults}
+                    className="text-xs underline opacity-70 hover:opacity-100 whitespace-nowrap"
+                  >
+                    Reset to defaults
+                  </button>
                 </div>
               </div>
             )}
@@ -596,14 +863,26 @@ export default function QuoteBuilderPage() {
                 <TabsTrigger value="manufacturer">Manufacturer RFQ</TabsTrigger>
               </TabsList>
               <TabsContent value="customer">
-                <CustomerLineItemsTable items={lineItems} currency="USD" />
+                <CustomerLineItemsTable
+                  items={lineItems}
+                  currency="USD"
+                  companyDefaultMultiplier={companyDefaultMultiplier}
+                  bulkOverrides={bulkOverrides}
+                  onUpdateMultiplier={handleUpdateMultiplier}
+                />
               </TabsContent>
               <TabsContent value="manufacturer">
                 <ManufacturerLineItemsTable items={lineItems} currency="USD" />
               </TabsContent>
             </Tabs>
           ) : quoteType === 'customer' ? (
-            <CustomerLineItemsTable items={lineItems} currency="USD" />
+            <CustomerLineItemsTable
+              items={lineItems}
+              currency="USD"
+              companyDefaultMultiplier={companyDefaultMultiplier}
+              bulkOverrides={bulkOverrides}
+              onUpdateMultiplier={handleUpdateMultiplier}
+            />
           ) : (
             <ManufacturerLineItemsTable items={lineItems} currency="USD" />
           )}
@@ -645,11 +924,11 @@ export default function QuoteBuilderPage() {
                       <span>Cost Subtotal</span>
                       <span>{fmt(costSubtotal)}</span>
                     </div>
-                    {editableMultiplier !== 1.0 && (
+                    {effectiveMarkupMultiplier !== 1.0 && (
                       <div className="flex justify-between text-muted-foreground">
                         <span className="flex items-center gap-1">
                           Markup
-                          <MultiplierBadge multiplier={editableMultiplier} />
+                          <MultiplierBadge multiplier={parseFloat(effectiveMarkupMultiplier.toFixed(2))} />
                         </span>
                         <span>+{fmt(subtotal - costSubtotal)}</span>
                       </div>
@@ -701,38 +980,68 @@ export default function QuoteBuilderPage() {
                 Save Quote
               </Button>
 
-              {/* Download buttons */}
-              <div className="space-y-2">
+              {/* Preview & Download buttons */}
+              <div className="space-y-3">
                 {(quoteType === 'customer' || quoteType === 'both') && (
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={handleDownloadCustomer}
-                    disabled={isDownloadingCustomer || lineItems.length === 0}
-                  >
-                    {isDownloadingCustomer ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : (
-                      <Download className="mr-2 h-4 w-4" />
-                    )}
-                    Customer Quote PDF
-                  </Button>
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Customer Quote
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={handlePreviewCustomer}
+                        disabled={lineItems.length === 0}
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="flex-1"
+                        onClick={handleDownloadCustomer}
+                        disabled={isDownloadingCustomer || lineItems.length === 0}
+                      >
+                        {isDownloadingCustomer ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Download className="mr-2 h-4 w-4" />
+                        )}
+                        Download
+                      </Button>
+                    </div>
+                  </div>
                 )}
 
                 {(quoteType === 'manufacturer' || quoteType === 'both') && (
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={handleDownloadManufacturer}
-                    disabled={isDownloadingManufacturer || lineItems.length === 0}
-                  >
-                    {isDownloadingManufacturer ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : (
-                      <Download className="mr-2 h-4 w-4" />
-                    )}
-                    Manufacturer RFQ PDF
-                  </Button>
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Manufacturer RFQ
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setPreviewType('manufacturer')}
+                        disabled={lineItems.length === 0}
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="flex-1"
+                        onClick={handleDownloadManufacturer}
+                        disabled={isDownloadingManufacturer || lineItems.length === 0}
+                      >
+                        {isDownloadingManufacturer ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Download className="mr-2 h-4 w-4" />
+                        )}
+                        Download
+                      </Button>
+                    </div>
+                  </div>
                 )}
 
                 {quoteType === 'both' && (
@@ -765,5 +1074,6 @@ export default function QuoteBuilderPage() {
         </div>
       </div>
     </div>
+    </>
   );
 }
