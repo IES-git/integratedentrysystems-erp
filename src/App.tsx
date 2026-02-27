@@ -18,6 +18,8 @@ import EstimateUploadPage from "@/pages/EstimateUploadPage";
 import EstimateWizardPage from "@/pages/EstimateWizardPage";
 import QuotesPage from "@/pages/QuotesPage";
 import QuoteWizardPage from "@/pages/QuoteWizardPage";
+import QuoteBuilderPage from "@/pages/QuoteBuilderPage";
+import QuoteDetailPage from "@/pages/QuoteDetailPage";
 import OrdersPage from "@/pages/OrdersPage";
 import TemplatesPage from "@/pages/TemplatesPage";
 import AdminUsersPage from "@/pages/AdminUsersPage";
@@ -63,6 +65,8 @@ const App = () => (
                 {/* Quotes */}
                 <Route path="quotes" element={<QuotesPage />} />
                 <Route path="quotes/wizard" element={<QuoteWizardPage />} />
+                <Route path="quotes/new" element={<QuoteBuilderPage />} />
+                <Route path="quotes/:id" element={<QuoteDetailPage />} />
                 
                 {/* Orders */}
                 <Route path="orders" element={<OrdersPage />} />

@@ -5,12 +5,11 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
-import type { Customer, Manufacturer } from '@/types';
+import type { Company } from '@/types';
 
 interface RecipientStepProps {
-  currentCustomer: Customer | undefined;
-  customers: Customer[];
-  manufacturers: Manufacturer[];
+  currentCustomer: Company | undefined;
+  companies: Company[];
   useCurrentRecipients: boolean;
   selectedCustomerId: string | null;
   selectedManufacturerId: string | null;
@@ -23,8 +22,7 @@ interface RecipientStepProps {
 
 export function RecipientStep({
   currentCustomer,
-  customers,
-  manufacturers,
+  companies,
   useCurrentRecipients,
   selectedCustomerId,
   selectedManufacturerId,
@@ -38,27 +36,19 @@ export function RecipientStep({
   const [manufacturerSearch, setManufacturerSearch] = useState('');
 
   const filteredCustomers = useMemo(() => {
-    if (!customerSearch.trim()) return customers;
+    if (!customerSearch.trim()) return companies;
     const query = customerSearch.toLowerCase();
-    return customers.filter(
-      (c) =>
-        c.name.toLowerCase().includes(query) ||
-        c.primaryContactName.toLowerCase().includes(query)
-    );
-  }, [customers, customerSearch]);
+    return companies.filter((c) => c.name.toLowerCase().includes(query));
+  }, [companies, customerSearch]);
 
   const filteredManufacturers = useMemo(() => {
-    if (!manufacturerSearch.trim()) return manufacturers;
+    if (!manufacturerSearch.trim()) return companies;
     const query = manufacturerSearch.toLowerCase();
-    return manufacturers.filter(
-      (m) =>
-        m.name.toLowerCase().includes(query) ||
-        m.primaryContactName.toLowerCase().includes(query)
-    );
-  }, [manufacturers, manufacturerSearch]);
+    return companies.filter((m) => m.name.toLowerCase().includes(query));
+  }, [companies, manufacturerSearch]);
 
-  const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
-  const selectedManufacturer = manufacturers.find((m) => m.id === selectedManufacturerId);
+  const selectedCustomer = companies.find((c) => c.id === selectedCustomerId);
+  const selectedManufacturer = companies.find((m) => m.id === selectedManufacturerId);
 
   const canProceed = selectedCustomerId || selectedManufacturerId;
 
@@ -118,7 +108,8 @@ export function RecipientStep({
             </div>
             {currentCustomer ? (
               <p className="mt-1 text-sm text-muted-foreground pl-6">
-                {currentCustomer.name} – {currentCustomer.primaryContactName}
+                {currentCustomer.name}
+                {currentCustomer.billingCity ? ` · ${currentCustomer.billingCity}` : ''}
               </p>
             ) : (
               <p className="mt-1 text-sm text-muted-foreground pl-6 italic">

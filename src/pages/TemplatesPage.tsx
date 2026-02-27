@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { FileCode2, Search, Plus, MoreHorizontal, Users, Factory } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { FileCode2, Search, Plus, MoreHorizontal, Users, Factory, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -38,41 +38,85 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { templateStorage } from '@/lib/storage';
+import {
+  listTemplates,
+  createTemplate,
+  deleteTemplate,
+} from '@/lib/templates-api';
 import type { Template, TemplateAudience } from '@/types';
 
 export default function TemplatesPage() {
-  const [templates, setTemplates] = useState<Template[]>(templateStorage.getAll());
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const { user } = useAuth();
   const { toast } = useToast();
 
+  const loadTemplates = useCallback(async () => {
+    try {
+      const data = await listTemplates();
+      setTemplates(data);
+    } catch (err) {
+      toast({
+        title: 'Failed to load templates',
+        description: err instanceof Error ? err.message : undefined,
+        variant: 'destructive',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    loadTemplates();
+  }, [loadTemplates]);
+
   const filteredTemplates = templates.filter((template) =>
     template.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const handleCreateTemplate = (formData: FormData) => {
-    const newTemplate = templateStorage.create({
-      name: formData.get('name') as string,
-      audience: formData.get('audience') as TemplateAudience,
-      description: formData.get('description') as string,
-      matchingRulesJson: null,
-      createdByUserId: user?.id || '',
-    });
-
-    setTemplates(templateStorage.getAll());
-    setIsDialogOpen(false);
-    toast({
-      title: 'Template created',
-      description: `"${newTemplate.name}" has been created.`,
-    });
+  const handleCreateTemplate = async (formData: FormData) => {
+    if (!user) return;
+    setIsSaving(true);
+    try {
+      const newTemplate = await createTemplate({
+        name: formData.get('name') as string,
+        audience: formData.get('audience') as TemplateAudience,
+        description: (formData.get('description') as string) || '',
+        matchingRulesJson: null,
+        createdByUserId: user.id,
+      });
+      setTemplates((prev) => [newTemplate, ...prev]);
+      setIsDialogOpen(false);
+      toast({
+        title: 'Template created',
+        description: `"${newTemplate.name}" has been created.`,
+      });
+    } catch (err) {
+      toast({
+        title: 'Failed to create template',
+        description: err instanceof Error ? err.message : undefined,
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleDeleteTemplate = (id: string) => {
-    templateStorage.delete(id);
-    setTemplates(templateStorage.getAll());
-    toast({ title: 'Template deleted' });
+  const handleDeleteTemplate = async (id: string) => {
+    try {
+      await deleteTemplate(id);
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+      toast({ title: 'Template deleted' });
+    } catch (err) {
+      toast({
+        title: 'Failed to delete template',
+        description: err instanceof Error ? err.message : undefined,
+        variant: 'destructive',
+      });
+    }
   };
 
   const customerTemplates = templates.filter((t) => t.audience === 'customer');
@@ -101,6 +145,7 @@ export default function TemplatesPage() {
                 handleCreateTemplate(new FormData(e.currentTarget));
               }}
             >
+
               <DialogHeader>
                 <DialogTitle className="font-display text-2xl">
                   Create Template
@@ -136,10 +181,14 @@ export default function TemplatesPage() {
                   type="button"
                   variant="outline"
                   onClick={() => setIsDialogOpen(false)}
+                  disabled={isSaving}
                 >
                   Cancel
                 </Button>
-                <Button type="submit">Create Template</Button>
+                <Button type="submit" disabled={isSaving}>
+                  {isSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Create Template
+                </Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -190,7 +239,11 @@ export default function TemplatesPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {filteredTemplates.length === 0 ? (
+          {isLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : filteredTemplates.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12">
               <FileCode2 className="mb-4 h-12 w-12 text-muted-foreground/50" />
               <p className="text-muted-foreground">

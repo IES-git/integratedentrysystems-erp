@@ -18,6 +18,7 @@ export interface CompanySettings {
   costMultiplier: number;
   paymentTerms: string | null;
   defaultTemplateId: string | null;
+  markupOverrides?: Record<string, number>;
 }
 
 export interface Company {
@@ -160,15 +161,20 @@ export interface TemplateField {
 
 // Quote Types
 export type QuoteStatus = 'draft' | 'sent' | 'approved' | 'rejected' | 'converted';
+export type QuoteType = 'customer' | 'manufacturer' | 'both';
 
 export interface Quote {
   id: string;
-  customerId: string;
-  createdByUserId: string;
   estimateId: string;
+  companyId: string | null;
+  createdByUserId: string;
   status: QuoteStatus;
-  totalPrice: number;
+  quoteType: QuoteType;
+  markupMultiplier: number;
+  subtotal: number;
+  total: number;
   currency: string;
+  notes: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -176,21 +182,15 @@ export interface Quote {
 export interface QuoteItem {
   id: string;
   quoteId: string;
-  estimateItemId: string;
-  canonicalCode: string;
+  estimateItemId: string | null;
+  itemLabel: string;
+  canonicalCode: string | null;
   quantity: number;
+  unitCost: number;
+  unitPrice: number;
+  lineTotal: number;
+  sortOrder: number;
   createdAt: string;
-}
-
-export interface QuoteItemField {
-  id: string;
-  quoteItemId: string;
-  fieldKey: string;
-  fieldLabel: string;
-  fieldValue: string;
-  valueType: FieldValueType;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export type QuoteDocumentAudience = 'customer' | 'manufacturer';

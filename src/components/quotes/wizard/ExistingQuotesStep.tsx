@@ -5,26 +5,27 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { Quote, Customer } from '@/types';
+import type { Quote, Company } from '@/types';
 
 interface ExistingQuotesStepProps {
   existingQuotes: Quote[];
-  customers: Customer[];
+  companies: Company[];
   onSelectQuote: (quote: Quote) => void;
   onSkip: () => void;
 }
 
 export function ExistingQuotesStep({
   existingQuotes,
-  customers,
+  companies,
   onSelectQuote,
   onSkip,
 }: ExistingQuotesStepProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedQuoteId, setSelectedQuoteId] = useState<string | null>(null);
 
-  const getCustomerName = (customerId: string) => {
-    return customers.find((c) => c.id === customerId)?.name || 'Unknown';
+  const getCustomerName = (companyId: string | null) => {
+    if (!companyId) return 'Unknown';
+    return companies.find((c) => c.id === companyId)?.name || 'Unknown';
   };
 
   const sortedQuotes = useMemo(() => {
@@ -37,13 +38,13 @@ export function ExistingQuotesStep({
     if (!searchQuery.trim()) return sortedQuotes;
     const query = searchQuery.toLowerCase();
     return sortedQuotes.filter((q) => {
-      const customerName = getCustomerName(q.customerId).toLowerCase();
+      const customerName = getCustomerName(q.companyId).toLowerCase();
       return (
         customerName.includes(query) ||
         q.id.toLowerCase().includes(query)
       );
     });
-  }, [sortedQuotes, searchQuery, customers]);
+  }, [sortedQuotes, searchQuery, companies]);
 
   const selectedQuote = existingQuotes.find((q) => q.id === selectedQuoteId);
 
@@ -131,7 +132,7 @@ export function ExistingQuotesStep({
                     <div className="flex items-center gap-2">
                       <User className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                       <span className="font-medium truncate">
-                        {getCustomerName(quote.customerId)}
+                        {getCustomerName(quote.companyId)}
                       </span>
                     </div>
                     <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
@@ -150,7 +151,7 @@ export function ExistingQuotesStep({
                       {quote.status}
                     </Badge>
                     <p className="mt-1 text-sm font-medium">
-                      {formatCurrency(quote.totalPrice)}
+                      {formatCurrency(quote.total)}
                     </p>
                   </div>
                 </div>

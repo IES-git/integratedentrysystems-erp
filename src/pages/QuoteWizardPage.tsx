@@ -8,31 +8,10 @@ import { RecipientStep } from '@/components/quotes/wizard/RecipientStep';
 import { TemplateSelectionStep } from '@/components/quotes/wizard/TemplateSelectionStep';
 import { useToast } from '@/hooks/use-toast';
 import { getEstimate } from '@/lib/estimates-api';
-import { supabase } from '@/lib/supabase';
-import {
-  quoteStorage,
-  manufacturerStorage,
-  templateStorage,
-} from '@/lib/storage';
-import type { Estimate, Quote, Customer, Manufacturer, Template } from '@/types';
-
-// Map Supabase customers row to our Customer type
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapCustomerRow(row: any): Customer {
-  return {
-    id: row.id,
-    name: row.name,
-    primaryContactName: row.contact_person || '',
-    email: row.email || '',
-    phone: row.phone || '',
-    billingAddress: [row.address, row.city, row.state, row.zip]
-      .filter(Boolean)
-      .join(', '),
-    shippingAddress: '',
-    notes: row.notes || '',
-    createdAt: row.created_at,
-  };
-}
+import { listQuotesByEstimate } from '@/lib/quotes-api';
+import { listCompanies } from '@/lib/companies-api';
+import { listTemplates } from '@/lib/templates-api';
+import type { Estimate, Quote, Company, Template } from '@/types';
 
 const WIZARD_STEPS: WizardStep[] = [
   { id: 'existing', title: 'Previous Quotes', description: 'Use details from a previous quote' },
@@ -50,8 +29,7 @@ export default function QuoteWizardPage() {
 
   // Data
   const [estimate, setEstimate] = useState<Estimate | null>(null);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [manufacturers, setManufacturers] = useState<Manufacturer[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [existingQuotes, setExistingQuotes] = useState<Quote[]>([]);
 
@@ -65,8 +43,8 @@ export default function QuoteWizardPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
 
   const currentCustomer = useMemo(
-    () => customers.find((c) => c.id === estimate?.customerId),
-    [customers, estimate?.customerId]
+    () => companies.find((c) => c.id === estimate?.customerId),
+    [companies, estimate?.customerId]
   );
 
   // Load data on mount
@@ -107,19 +85,16 @@ export default function QuoteWizardPage() {
           setUseCurrentRecipients(false);
         }
 
-        // Load customers from Supabase
-        const { data: customersData } = await supabase
-          .from('customers')
-          .select('*')
-          .order('name');
-        if (customersData) {
-          setCustomers(customersData.map(mapCustomerRow));
-        }
+        // Load all companies and templates from Supabase in parallel
+        const [companiesData, templatesData] = await Promise.all([
+          listCompanies(),
+          listTemplates(),
+        ]);
+        setCompanies(companiesData);
+        setTemplates(templatesData);
 
-        // Load manufacturers and templates from local storage (not migrated yet)
-        setManufacturers(manufacturerStorage.getAll());
-        setTemplates(templateStorage.getAll());
-        setExistingQuotes(quoteStorage.getAll().filter((q) => q.estimateId === estimateId));
+        const existingQ = await listQuotesByEstimate(estimateId);
+        setExistingQuotes(existingQ);
       } catch (err) {
         console.error('Error loading data:', err);
         toast({
@@ -143,7 +118,7 @@ export default function QuoteWizardPage() {
   const handleSelectExistingQuote = useCallback((quote: Quote | null) => {
     setSelectedExistingQuote(quote);
     if (quote) {
-      setSelectedCustomerId(quote.customerId);
+      setSelectedCustomerId(quote.companyId);
     }
     setCurrentStepIndex(1);
   }, []);
@@ -211,7 +186,7 @@ export default function QuoteWizardPage() {
           {currentStepIndex === 0 && (
             <ExistingQuotesStep
               existingQuotes={existingQuotes}
-              customers={customers}
+              companies={companies}
               onSelectQuote={handleSelectExistingQuote}
               onSkip={handleSkipExisting}
             />
@@ -220,8 +195,7 @@ export default function QuoteWizardPage() {
           {currentStepIndex === 1 && (
             <RecipientStep
               currentCustomer={currentCustomer}
-              customers={customers}
-              manufacturers={manufacturers}
+              companies={companies}
               useCurrentRecipients={useCurrentRecipients}
               selectedCustomerId={selectedCustomerId}
               selectedManufacturerId={selectedManufacturerId}

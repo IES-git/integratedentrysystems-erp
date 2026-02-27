@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileCheck, Search, MoreHorizontal, Plus, Send, CheckCircle, XCircle } from 'lucide-react';
+import { FileCheck, Search, MoreHorizontal, Plus, Send, CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,21 +21,25 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { SelectEstimateModal } from '@/components/quotes/SelectEstimateModal';
-import { quoteStorage } from '@/lib/storage';
+import { listQuotes } from '@/lib/quotes-api';
 import type { Quote, QuoteStatus } from '@/types';
 
 export default function QuotesPage() {
   const navigate = useNavigate();
-  const [quotes] = useState<Quote[]>(quoteStorage.getAll());
+  const [quotes, setQuotes] = useState<Quote[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSelectModalOpen, setIsSelectModalOpen] = useState(false);
 
-  const getCustomerName = (_customerId: string) => {
-    return 'Unknown';
-  };
+  useEffect(() => {
+    listQuotes()
+      .then(setQuotes)
+      .catch(console.error)
+      .finally(() => setIsLoading(false));
+  }, []);
 
   const filteredQuotes = quotes.filter((quote) =>
-    getCustomerName(quote.customerId).toLowerCase().includes(searchQuery.toLowerCase())
+    quote.id.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   const getStatusBadge = (status: QuoteStatus) => {
@@ -53,6 +57,20 @@ export default function QuotesPage() {
     );
   };
 
+  const getQuoteTypeBadge = (quoteType: Quote['quoteType']) => {
+    const config = {
+      customer: { label: 'Customer', className: 'bg-blue-100 text-blue-700 border-blue-200' },
+      manufacturer: { label: 'Manufacturer', className: 'bg-purple-100 text-purple-700 border-purple-200' },
+      both: { label: 'Both', className: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+    };
+    const c = config[quoteType];
+    return (
+      <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${c.className}`}>
+        {c.label}
+      </span>
+    );
+  };
+
   const formatCurrency = (amount: number, currency: string = 'USD') => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
@@ -61,7 +79,7 @@ export default function QuotesPage() {
   };
 
   const handleSelectEstimate = (estimateId: string) => {
-    navigate(`/app/quotes/new?estimateId=${estimateId}`);
+    navigate(`/app/quotes/wizard?estimateId=${estimateId}`);
   };
 
   return (
@@ -167,7 +185,11 @@ export default function QuotesPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {filteredQuotes.length === 0 ? (
+          {isLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : filteredQuotes.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12">
               <FileCheck className="mb-4 h-12 w-12 text-muted-foreground/50" />
               <p className="text-muted-foreground">
@@ -183,7 +205,7 @@ export default function QuotesPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Quote #</TableHead>
-                    <TableHead>Customer</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                     <TableHead className="hidden md:table-cell">Created</TableHead>
@@ -195,17 +217,15 @@ export default function QuotesPage() {
                     <TableRow key={quote.id}>
                       <TableCell>
                         <span className="font-mono text-sm">
-                          Q-{quote.id.slice(-6).toUpperCase()}
+                          Q-{quote.id.slice(-8).toUpperCase()}
                         </span>
                       </TableCell>
                       <TableCell>
-                        <span className="font-medium">
-                          {getCustomerName(quote.customerId)}
-                        </span>
+                        {getQuoteTypeBadge(quote.quoteType)}
                       </TableCell>
                       <TableCell>{getStatusBadge(quote.status)}</TableCell>
                       <TableCell className="text-right font-medium">
-                        {formatCurrency(quote.totalPrice, quote.currency)}
+                        {formatCurrency(quote.total, quote.currency)}
                       </TableCell>
                       <TableCell className="hidden md:table-cell text-muted-foreground">
                         {new Date(quote.createdAt).toLocaleDateString()}
@@ -220,16 +240,6 @@ export default function QuotesPage() {
                           <DropdownMenuContent align="end">
                             <DropdownMenuItem asChild>
                               <a href={`/app/quotes/${quote.id}`}>View Details</a>
-                            </DropdownMenuItem>
-                            <DropdownMenuItem asChild>
-                              <a href={`/app/quotes/${quote.id}/builder`}>
-                                Edit Quote
-                              </a>
-                            </DropdownMenuItem>
-                            <DropdownMenuItem asChild>
-                              <a href={`/app/quotes/${quote.id}/documents`}>
-                                View Documents
-                              </a>
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem>Clone Quote</DropdownMenuItem>

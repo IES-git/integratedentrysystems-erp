@@ -8,6 +8,7 @@ import {
   MapPin,
   AlertCircle,
   Building2,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -58,6 +59,7 @@ import {
   type CompanyWithContactCount,
 } from '@/lib/companies-api';
 import type { Company } from '@/types';
+import { BulkMarkupModal } from '@/components/customers/BulkMarkupModal';
 
 export default function CustomersPage() {
   const navigate = useNavigate();
@@ -72,6 +74,7 @@ export default function CustomersPage() {
   const [deleteTarget, setDeleteTarget] = useState<CompanyWithContactCount | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [addContact, setAddContact] = useState(true);
+  const [isBulkMarkupOpen, setIsBulkMarkupOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -210,10 +213,16 @@ export default function CustomersPage() {
           <h1 className="font-display text-2xl sm:text-3xl lg:text-4xl tracking-wide">Customers</h1>
           <p className="mt-1 text-muted-foreground">Manage your customer companies and contacts</p>
         </div>
-        <Button onClick={openNewDialog}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Customer
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setIsBulkMarkupOpen(true)}>
+            <SlidersHorizontal className="mr-2 h-4 w-4" />
+            Bulk Markup
+          </Button>
+          <Button onClick={openNewDialog}>
+            <Plus className="mr-2 h-4 w-4" />
+            Add Customer
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -495,6 +504,14 @@ export default function CustomersPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Bulk Markup Modal */}
+      <BulkMarkupModal
+        open={isBulkMarkupOpen}
+        onOpenChange={setIsBulkMarkupOpen}
+        companies={companies}
+        onSaved={load}
+      />
 
       {/* Delete confirmation */}
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>

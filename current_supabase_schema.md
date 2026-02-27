@@ -84,7 +84,7 @@ Business entity table replacing the old flat `customers` table.
 - `shipping_zip` (TEXT) - Shipping ZIP code
 - `notes` (TEXT) - Additional notes
 - `active` (BOOLEAN, NOT NULL, DEFAULT true) - Whether company is active
-- `settings` (JSONB, NOT NULL, DEFAULT `{"cost_multiplier": 1.0, "payment_terms": null, "default_template_id": null}`) - Company-level pricing/quote settings
+- `settings` (JSONB, NOT NULL, DEFAULT `{"cost_multiplier": 1.0, "payment_terms": null, "default_template_id": null}`) - Company-level pricing/quote settings. Optional key `markup_overrides` (object) stores item-specific multiplier overrides, e.g. `{"hinges": 1.1, "frames": 1.3}`. Overrides take precedence over `cost_multiplier` for matching items; all other items fall back to `cost_multiplier`.
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
 
@@ -334,6 +334,132 @@ END;
 $$;
 ```
 
+### public.quotes
+
+Quote records generated from estimates, supporting customer-facing and manufacturer-facing quote types.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `estimate_id` (UUID, NOT NULL) - FK to estimates.id, CASCADE on delete
+- `company_id` (UUID, nullable) - FK to companies.id, SET NULL on delete
+- `created_by_user_id` (UUID, NOT NULL) - FK to users.id, RESTRICT on delete
+- `status` (TEXT, NOT NULL, DEFAULT 'draft') - 'draft' | 'sent' | 'approved' | 'rejected' | 'converted'
+- `quote_type` (TEXT, NOT NULL) - 'customer' | 'manufacturer' | 'both'
+- `markup_multiplier` (NUMERIC, NOT NULL, DEFAULT 1.0) - Snapshot of company cost_multiplier at time of creation
+- `subtotal` (NUMERIC, NOT NULL, DEFAULT 0) - Sum of all line totals before any adjustments
+- `total` (NUMERIC, NOT NULL, DEFAULT 0) - Final total after adjustments
+- `currency` (TEXT, NOT NULL, DEFAULT 'USD') - ISO currency code
+- `notes` (TEXT, nullable) - Quote notes / payment terms / special instructions
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
+
+**Indexes:**
+- `idx_quotes_estimate_id` on estimate_id
+- `idx_quotes_company_id` on company_id
+- `idx_quotes_created_by_user_id` on created_by_user_id
+- `idx_quotes_status` on status
+- `idx_quotes_created_at` on created_at DESC
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read quotes` - All authenticated users can SELECT
+- `Users can insert their own quotes` - Users can INSERT with their own user_id
+- `Users can update their own quotes, admins can update all` - Users can UPDATE their own quotes, admins can update all
+- `Users can delete their own quotes, admins can delete any` - Users can DELETE their own quotes, admins can delete any
+
+**Triggers:**
+- `set_quotes_updated_at` - Automatically updates updated_at timestamp
+
+### public.quote_items
+
+Line items belonging to a quote, storing both original cost and marked-up price for dual-audience PDF generation.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `quote_id` (UUID, NOT NULL) - FK to quotes.id, CASCADE on delete
+- `estimate_item_id` (UUID, nullable) - FK to estimate_items.id, SET NULL on delete
+- `item_label` (TEXT, NOT NULL) - Item description/label
+- `canonical_code` (TEXT, nullable) - Standardized product code / SKU
+- `quantity` (INTEGER, NOT NULL, DEFAULT 1) - Item quantity
+- `unit_cost` (NUMERIC, NOT NULL, DEFAULT 0) - Original cost from estimate (used in manufacturer PDF)
+- `unit_price` (NUMERIC, NOT NULL, DEFAULT 0) - Marked-up price: unit_cost × markup_multiplier (used in customer PDF)
+- `line_total` (NUMERIC, NOT NULL, DEFAULT 0) - quantity × unit_price
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
+
+**Indexes:**
+- `idx_quote_items_quote_id` on quote_id
+- `idx_quote_items_estimate_item_id` on estimate_item_id
+- `idx_quote_items_sort_order` on (quote_id, sort_order)
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Users can read quote items they have access to` - SELECT allowed for authenticated users when the parent quote exists
+- `Users can insert items for their own quotes` - INSERT allowed when the parent quote belongs to the current user
+- `Users can update items for their own quotes` - UPDATE allowed for own quotes or admins
+- `Users can delete items for their own quotes` - DELETE allowed for own quotes or admins
+
+### public.templates
+
+Quote document templates defining the format and audience for customer or manufacturer output.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `name` (TEXT, NOT NULL) - Template name
+- `audience` (TEXT, NOT NULL) - `'customer'` or `'manufacturer'` (CHECK constraint)
+- `description` (TEXT, NOT NULL, DEFAULT '') - Human-readable description
+- `matching_rules_json` (TEXT, nullable) - JSON blob of AI matching hints/rules
+- `created_by_user_id` (UUID, NOT NULL) - FK to users.id, RESTRICT on delete
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
+
+**Indexes:**
+- `idx_templates_audience` on audience
+- `idx_templates_created_by` on created_by_user_id
+- `idx_templates_created_at` on created_at DESC
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read templates` - All authenticated users can SELECT
+- `Authenticated users can insert templates` - INSERT allowed when created_by_user_id = auth.uid()
+- `Users can update their own templates, admins can update all` - UPDATE for own templates or admins
+- `Users can delete their own templates, admins can delete any` - DELETE for own templates or admins
+
+**Triggers:**
+- `set_templates_updated_at` - Automatically updates updated_at timestamp
+
+**Seed data:** 3 starter templates seeded on creation — "Standard Customer Quote" (customer), "Detailed Manufacturer RFQ" (manufacturer), "Quick Estimate Summary" (customer)
+
+---
+
+### public.template_fields
+
+Individual field configuration rows belonging to a template, controlling which fields appear in the PDF output and how they are labelled/grouped.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `template_id` (UUID, NOT NULL) - FK to templates.id, CASCADE on delete
+- `field_key` (TEXT, NOT NULL) - Field identifier key (matches item_fields.field_key)
+- `display_label_override` (TEXT, nullable) - Custom label override for PDF output
+- `group_name` (TEXT, nullable) - Section/group heading in the PDF
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order within the template
+- `visibility` (TEXT, NOT NULL, DEFAULT 'show') - `'show'` or `'hide'` (CHECK constraint)
+- `formatting_hint` (TEXT, nullable) - Optional formatting instructions for PDF renderer
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
+
+**Indexes:**
+- `idx_template_fields_template_id` on template_id
+- `idx_template_fields_sort_order` on (template_id, sort_order)
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read template fields` - All authenticated users can SELECT
+- `Users can insert fields for their own templates` - INSERT when parent template belongs to auth.uid() or admin
+- `Users can update fields for their own templates` - UPDATE when parent template belongs to auth.uid() or admin
+- `Users can delete fields for their own templates` - DELETE when parent template belongs to auth.uid() or admin
+
+---
+
 ## Migrations Applied
 
 1. `create_users_table_with_rls` - Initial users table creation with RLS policies
@@ -352,6 +478,8 @@ $$;
 14. `update_storage_delete_policy_for_admins` - Updated storage DELETE policy to allow admins to delete any estimate file
 15. `add_pricing_columns` - Added total_price to estimates and unit_price to estimate_items for pricing feature
 16. `replace_customers_with_companies_and_contacts` - Dropped customers table, created companies + contacts tables, renamed estimates.customer_id to company_id with updated FK
+17. `create_quotes_and_quote_items_tables` - Created quotes and quote_items tables with RLS policies mirroring the estimates pattern
+18. `create_templates_and_template_fields_tables` - Created templates and template_fields tables with RLS; seeded 3 starter templates
 
 ## Edge Functions
 
