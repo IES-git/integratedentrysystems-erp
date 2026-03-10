@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-02-19 (Companies & Contacts replacing Customers)
+Last updated: 2026-03-09 (company_type, manufacturer_id, field_value_options)
 
 ## Authentication Status
 
@@ -74,6 +74,7 @@ Business entity table replacing the old flat `customers` table.
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `name` (TEXT, NOT NULL) - Company name
+- `company_type` (TEXT, NOT NULL, DEFAULT 'customer') - Type of company: `'customer'`, `'manufacturer'`, or `'both'` (CHECK constraint)
 - `billing_address` (TEXT) - Billing street address
 - `billing_city` (TEXT) - Billing city
 - `billing_state` (TEXT) - Billing state
@@ -91,6 +92,7 @@ Business entity table replacing the old flat `customers` table.
 **Indexes:**
 - `idx_companies_name` on name
 - `idx_companies_active` on active
+- `idx_companies_company_type` on company_type
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
@@ -198,11 +200,13 @@ Line items extracted from estimates.
 - `quantity` (INTEGER, DEFAULT 1) - Item quantity
 - `unit_price` (NUMERIC, DEFAULT NULL) - Unit price per item extracted from document
 - `sort_order` (INTEGER, DEFAULT 0) - Display order
+- `manufacturer_id` (UUID, nullable) - FK to companies.id, SET NULL on delete — the manufacturer associated with this line item
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
 **Indexes:**
 - `idx_estimate_items_estimate_id` on estimate_id
 - `idx_estimate_items_sort_order` on (estimate_id, sort_order)
+- `idx_estimate_items_manufacturer_id` on manufacturer_id
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
@@ -303,6 +307,29 @@ END;
 $$ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public;
+```
+
+### public.upsert_field_value_option(p_field_definition_id UUID, p_value TEXT)
+
+Helper RPC used by `recordFieldValueUsage()` in the API layer.  Inserts a new `field_value_options` row with `usage_count = 1` on first use, or increments `usage_count` on subsequent uses.  The JS API includes a manual fallback in case this RPC is not yet deployed.
+
+```sql
+CREATE OR REPLACE FUNCTION public.upsert_field_value_option(
+  p_field_definition_id UUID,
+  p_value TEXT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO field_value_options (field_definition_id, value, usage_count)
+  VALUES (p_field_definition_id, p_value, 1)
+  ON CONFLICT (field_definition_id, value)
+  DO UPDATE SET usage_count = field_value_options.usage_count + 1;
+END;
+$$;
 ```
 
 ### public.handle_new_user()
@@ -460,6 +487,33 @@ Individual field configuration rows belonging to a template, controlling which f
 
 ---
 
+### public.field_value_options
+
+Tracks previously used values for each field definition, enabling smart dropdown suggestions ordered by usage frequency.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `field_definition_id` (UUID, NOT NULL) - FK to field_definitions.id, CASCADE on delete
+- `value` (TEXT, NOT NULL) - The stored field value
+- `usage_count` (INTEGER, NOT NULL, DEFAULT 1) - How many times this value has been used
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
+
+**Constraints:**
+- `field_value_options_field_definition_id_value_key` UNIQUE on `(field_definition_id, value)`
+
+**Indexes:**
+- `idx_field_value_options_field_definition_id` on field_definition_id
+- `idx_field_value_options_usage_count` on (field_definition_id, usage_count DESC)
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read field value options` - All authenticated users can SELECT
+- `Authenticated users can insert field value options` - All authenticated users can INSERT
+- `Authenticated users can update field value options` - All authenticated users can UPDATE
+- `Authenticated users can delete field value options` - All authenticated users can DELETE
+
+---
+
 ## Migrations Applied
 
 1. `create_users_table_with_rls` - Initial users table creation with RLS policies
@@ -480,6 +534,9 @@ Individual field configuration rows belonging to a template, controlling which f
 16. `replace_customers_with_companies_and_contacts` - Dropped customers table, created companies + contacts tables, renamed estimates.customer_id to company_id with updated FK
 17. `create_quotes_and_quote_items_tables` - Created quotes and quote_items tables with RLS policies mirroring the estimates pattern
 18. `create_templates_and_template_fields_tables` - Created templates and template_fields tables with RLS; seeded 3 starter templates
+19. `add_company_type_and_manufacturer_id` - Added `company_type` column (TEXT CHECK 'customer'|'manufacturer'|'both') to companies; added `manufacturer_id` FK column to estimate_items referencing companies
+20. `create_field_value_options_table` - Created field_value_options table for tracking historical field values per field_definition with usage counts and RLS policies
+21. `create_upsert_field_value_option_rpc` - Created `upsert_field_value_option(p_field_definition_id, p_value)` RPC function used by the API layer to atomically increment usage counts
 
 ## Edge Functions
 
@@ -544,6 +601,10 @@ Admin page for managing AI-discovered field definitions used in estimate extract
 - `updateFieldDefinitionStatus(id, status)` - Approve or reject a field definition
 - `updateFieldDefinition(id, updates)` - Update label, description, or value type
 - `deleteFieldDefinition(id)` - Permanently remove a field definition
+- `createOrApproveFieldDefinition({ fieldKey, fieldLabel, valueType? })` - Upsert a field definition by `field_key`; inserts with `status='approved'` on first use or updates existing row to approved. Called from the line-items wizard when the user saves a manually-created field.
+- `getFieldDefinitionsForItemType(itemLabel?, canonicalCode?)` - Returns approved field definitions previously used on items matching the given label or code, ordered by `usage_count DESC`. Powers the "Suggested for [item type]" group in the Add Field combobox.
+- `getFieldValueOptions(fieldDefinitionId)` - Returns historically-used values for a field definition, ordered by `usage_count DESC`. Used to populate value-history dropdowns in the line-items wizard.
+- `recordFieldValueUsage(fieldDefinitionId, value)` - Upserts `field_value_options` (insert with `usage_count=1` or increment). Called whenever a field value is saved in the wizard.
 
 ## Estimate Management
 
@@ -552,6 +613,7 @@ Admin page for managing AI-discovered field definitions used in estimate extract
 - `processEstimate(estimateId)` - Invoke Edge Function to extract data using Gemini
 - `getEstimate(id)` - Fetch a single estimate by ID
 - `getEstimateWithItems(id)` - Fetch estimate with items and fields
+- `getEstimatesWithItems()` - List all estimates with their line items (`id`, `canonical_code`, `item_label`). Used by the estimates list page for search-by-item-code and the Items column.
 - `listEstimates()` - List all estimates (most recent first)
 - `updateEstimate(id, updates)` - Update estimate fields (customer, extracted data, etc.)
 - `deleteEstimate(id)` - Delete estimate, its items/fields, and the file from storage

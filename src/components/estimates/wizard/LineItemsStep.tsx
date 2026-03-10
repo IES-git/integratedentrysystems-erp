@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { Package, Plus, Trash2, Edit2, Check, X, ChevronDown, ChevronUp, AlertCircle, ChevronsUpDown } from 'lucide-react';
+import { useState, useMemo, useEffect, useRef } from 'react';
+import { Package, Plus, Trash2, Edit2, Check, X, ChevronDown, ChevronUp, AlertCircle, ChevronsUpDown, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -7,9 +7,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { cn } from '@/lib/utils';
-import type { EstimateItem, ItemField, FieldDefinition } from '@/types';
+import { getFieldDefinitionsForItemType, getFieldValueOptions, recordFieldValueUsage, createOrApproveFieldDefinition } from '@/lib/estimates-api';
+import type { EstimateItem, ItemField, FieldDefinition, FieldValueOption } from '@/types';
 
 interface LineItemWithFields extends EstimateItem {
   fields: ItemField[];
@@ -49,8 +50,16 @@ export function LineItemsStep({
   const [expandedItems, setExpandedItems] = useState<Set<string>>(
     new Set(lineItems.map((item) => item.id))
   );
+
+  // Field editing state
   const [editingField, setEditingField] = useState<string | null>(null);
+  const [editingFieldObj, setEditingFieldObj] = useState<ItemField | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [fieldValueOptions, setFieldValueOptions] = useState<FieldValueOption[]>([]);
+  const [fieldValuePopoverOpen, setFieldValuePopoverOpen] = useState(false);
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  // Add field state
   const [addingFieldTo, setAddingFieldTo] = useState<string | null>(null);
   const [addFieldMode, setAddFieldMode] = useState<AddFieldMode>('select');
   const [selectedFieldDef, setSelectedFieldDef] = useState<FieldDefinition | null>(null);
@@ -59,7 +68,59 @@ export function LineItemsStep({
   const [newFieldLabel, setNewFieldLabel] = useState('');
   const [newFieldValue, setNewFieldValue] = useState('');
 
+  // Smart suggestions state
+  const [suggestedFieldDefs, setSuggestedFieldDefs] = useState<FieldDefinition[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+
+  // Add-field value options (combobox for value input when field def is selected)
+  const [addFieldValueOptions, setAddFieldValueOptions] = useState<FieldValueOption[]>([]);
+  const [addFieldValuePopoverOpen, setAddFieldValuePopoverOpen] = useState(false);
+
   const hasFieldDefs = fieldDefinitions && fieldDefinitions.length > 0;
+
+  // Field defs not in the suggested set (used for the "All Fields" group)
+  const otherFieldDefs = useMemo(() => {
+    const suggestedIds = new Set(suggestedFieldDefs.map((fd) => fd.id));
+    return (fieldDefinitions ?? []).filter((fd) => !suggestedIds.has(fd.id));
+  }, [fieldDefinitions, suggestedFieldDefs]);
+
+  // Fetch item-scoped suggestions when the Add Field form opens for an item
+  useEffect(() => {
+    if (!addingFieldTo) {
+      setSuggestedFieldDefs([]);
+      return;
+    }
+    const item = lineItems.find((i) => i.id === addingFieldTo);
+    if (!item) return;
+
+    setLoadingSuggestions(true);
+    getFieldDefinitionsForItemType(item.itemLabel, item.canonicalCode)
+      .then(setSuggestedFieldDefs)
+      .catch(console.error)
+      .finally(() => setLoadingSuggestions(false));
+  }, [addingFieldTo, lineItems]);
+
+  // Fetch value history when a field def is selected in add-field mode
+  useEffect(() => {
+    if (!selectedFieldDef?.id) {
+      setAddFieldValueOptions([]);
+      return;
+    }
+    getFieldValueOptions(selectedFieldDef.id)
+      .then(setAddFieldValueOptions)
+      .catch(console.error);
+  }, [selectedFieldDef]);
+
+  // Fetch value history when entering edit mode for a field with a definition
+  useEffect(() => {
+    if (!editingFieldObj?.fieldDefinitionId) {
+      setFieldValueOptions([]);
+      return;
+    }
+    getFieldValueOptions(editingFieldObj.fieldDefinitionId)
+      .then(setFieldValueOptions)
+      .catch(console.error);
+  }, [editingFieldObj]);
 
   const toggleItem = (itemId: string) => {
     setExpandedItems((prev) => {
@@ -75,18 +136,29 @@ export function LineItemsStep({
 
   const startEditField = (field: ItemField) => {
     setEditingField(field.id);
+    setEditingFieldObj(field);
     setEditValue(field.fieldValue);
+    setFieldValuePopoverOpen(false);
   };
 
   const saveFieldEdit = (fieldId: string) => {
     onUpdateField(fieldId, { fieldValue: editValue });
+    if (editingFieldObj?.fieldDefinitionId && editValue.trim()) {
+      recordFieldValueUsage(editingFieldObj.fieldDefinitionId, editValue.trim()).catch(console.error);
+    }
     setEditingField(null);
+    setEditingFieldObj(null);
     setEditValue('');
+    setFieldValueOptions([]);
+    setFieldValuePopoverOpen(false);
   };
 
   const cancelFieldEdit = () => {
     setEditingField(null);
+    setEditingFieldObj(null);
     setEditValue('');
+    setFieldValueOptions([]);
+    setFieldValuePopoverOpen(false);
   };
 
   const resetAddFieldForm = () => {
@@ -97,6 +169,8 @@ export function LineItemsStep({
     setNewFieldKey('');
     setNewFieldLabel('');
     setNewFieldValue('');
+    setAddFieldValueOptions([]);
+    setAddFieldValuePopoverOpen(false);
   };
 
   const handleAddField = (itemId: string) => {
@@ -110,20 +184,25 @@ export function LineItemsStep({
         fieldDefinitionId: selectedFieldDef.id,
         sourceConfidence: null,
       });
+      if (selectedFieldDef.id && newFieldValue.trim()) {
+        recordFieldValueUsage(selectedFieldDef.id, newFieldValue.trim()).catch(console.error);
+      }
       resetAddFieldForm();
       return;
     }
 
     if (addFieldMode === 'create') {
       if (!newFieldKey.trim() || !newFieldLabel.trim()) return;
+      const fieldKey = newFieldKey.toLowerCase().replace(/\s+/g, '_');
       onAddField(itemId, {
         estimateItemId: itemId,
-        fieldKey: newFieldKey.toLowerCase().replace(/\s+/g, '_'),
+        fieldKey,
         fieldLabel: newFieldLabel,
         fieldValue: newFieldValue,
         valueType: 'string',
         sourceConfidence: null,
       });
+      createOrApproveFieldDefinition({ fieldKey, fieldLabel: newFieldLabel }).catch(console.error);
       resetAddFieldForm();
     }
   };
@@ -134,7 +213,7 @@ export function LineItemsStep({
     return !newFieldKey.trim() || !newFieldLabel.trim();
   };
 
-  // Memoised list of field definition ids already used on a given item
+  // Memoised set of field keys already used per item
   const usedFieldKeys = useMemo(() => {
     const map = new Map<string, Set<string>>();
     for (const item of lineItems) {
@@ -149,6 +228,22 @@ export function LineItemsStep({
     if (confidence >= 0.7) return 'text-warning';
     return 'text-destructive';
   };
+
+  // Filtered value options for the inline field edit
+  const filteredFieldValueOptions = useMemo(() => {
+    if (!editValue.trim()) return fieldValueOptions;
+    return fieldValueOptions.filter((o) =>
+      o.value.toLowerCase().includes(editValue.toLowerCase())
+    );
+  }, [fieldValueOptions, editValue]);
+
+  // Filtered value options for the add-field value input
+  const filteredAddFieldValueOptions = useMemo(() => {
+    if (!newFieldValue.trim()) return addFieldValueOptions;
+    return addFieldValueOptions.filter((o) =>
+      o.value.toLowerCase().includes(newFieldValue.toLowerCase())
+    );
+  }, [addFieldValueOptions, newFieldValue]);
 
   return (
     <div className="space-y-6">
@@ -279,7 +374,7 @@ export function LineItemsStep({
                         />
                       </div>
                       <div>
-                        <Label className="text-xs text-muted-foreground">Code</Label>
+                        <Label className="text-xs text-muted-foreground">Item Code</Label>
                         <Input
                           value={item.canonicalCode}
                           onChange={(e) => onUpdateItem(item.id, { canonicalCode: e.target.value })}
@@ -298,15 +393,20 @@ export function LineItemsStep({
                       </div>
                       <div>
                         <Label className="text-xs text-muted-foreground">Unit Price</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          step={0.01}
-                          value={item.unitPrice ?? ''}
-                          onChange={(e) => onUpdateItem(item.id, { unitPrice: e.target.value ? parseFloat(e.target.value) : null })}
-                          className="h-8 text-sm"
-                          placeholder="0.00"
-                        />
+                        <div className="relative">
+                          <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                            $
+                          </span>
+                          <Input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={item.unitPrice ?? ''}
+                            onChange={(e) => onUpdateItem(item.id, { unitPrice: e.target.value ? parseFloat(e.target.value) : null })}
+                            className="h-8 pl-6 text-sm"
+                            placeholder="0.00"
+                          />
+                        </div>
                       </div>
                     </div>
 
@@ -352,20 +452,80 @@ export function LineItemsStep({
                             <div className="flex-1">
                               {editingField === field.id ? (
                                 <div className="flex items-center gap-2">
-                                  <Input
-                                    value={editValue}
-                                    onChange={(e) => setEditValue(e.target.value)}
-                                    className="h-7 text-sm"
-                                    autoFocus
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') saveFieldEdit(field.id);
-                                      if (e.key === 'Escape') cancelFieldEdit();
-                                    }}
-                                  />
+                                  {/* Combobox for fields with value history */}
+                                  {fieldValueOptions.length > 0 ? (
+                                    <Popover open={fieldValuePopoverOpen} onOpenChange={setFieldValuePopoverOpen}>
+                                      <PopoverTrigger asChild>
+                                        <div className="relative flex-1">
+                                          <Input
+                                            ref={editInputRef}
+                                            value={editValue}
+                                            onChange={(e) => {
+                                              setEditValue(e.target.value);
+                                              setFieldValuePopoverOpen(true);
+                                            }}
+                                            className="h-7 text-sm pr-7"
+                                            autoFocus
+                                            onFocus={() => setFieldValuePopoverOpen(true)}
+                                            onKeyDown={(e) => {
+                                              if (e.key === 'Enter') {
+                                                saveFieldEdit(field.id);
+                                                setFieldValuePopoverOpen(false);
+                                              }
+                                              if (e.key === 'Escape') {
+                                                if (fieldValuePopoverOpen) {
+                                                  setFieldValuePopoverOpen(false);
+                                                } else {
+                                                  cancelFieldEdit();
+                                                }
+                                              }
+                                            }}
+                                          />
+                                          <ChevronsUpDown className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground/50" />
+                                        </div>
+                                      </PopoverTrigger>
+                                      <PopoverContent
+                                        className="w-48 p-1"
+                                        align="start"
+                                        onOpenAutoFocus={(e) => e.preventDefault()}
+                                      >
+                                        {filteredFieldValueOptions.length === 0 ? (
+                                          <p className="px-2 py-1.5 text-xs text-muted-foreground">No matching values</p>
+                                        ) : (
+                                          filteredFieldValueOptions.map((opt) => (
+                                            <button
+                                              key={opt.id}
+                                              className="w-full text-left px-2 py-1.5 text-sm hover:bg-muted rounded flex items-center justify-between gap-2"
+                                              onMouseDown={(e) => {
+                                                e.preventDefault();
+                                                setEditValue(opt.value);
+                                                setFieldValuePopoverOpen(false);
+                                                editInputRef.current?.focus();
+                                              }}
+                                            >
+                                              <span className="truncate">{opt.value}</span>
+                                              <span className="text-[10px] text-muted-foreground shrink-0">{opt.usageCount}×</span>
+                                            </button>
+                                          ))
+                                        )}
+                                      </PopoverContent>
+                                    </Popover>
+                                  ) : (
+                                    <Input
+                                      value={editValue}
+                                      onChange={(e) => setEditValue(e.target.value)}
+                                      className="h-7 text-sm"
+                                      autoFocus
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') saveFieldEdit(field.id);
+                                        if (e.key === 'Escape') cancelFieldEdit();
+                                      }}
+                                    />
+                                  )}
                                   <Button
                                     variant="ghost"
                                     size="icon"
-                                    className="h-7 w-7"
+                                    className="h-7 w-7 shrink-0"
                                     onClick={() => saveFieldEdit(field.id)}
                                   >
                                     <Check className="h-3 w-3" />
@@ -373,7 +533,7 @@ export function LineItemsStep({
                                   <Button
                                     variant="ghost"
                                     size="icon"
-                                    className="h-7 w-7"
+                                    className="h-7 w-7 shrink-0"
                                     onClick={cancelFieldEdit}
                                   >
                                     <X className="h-3 w-3" />
@@ -460,7 +620,7 @@ export function LineItemsStep({
                             </div>
                           )}
 
-                          {/* Select existing field mode */}
+                          {/* Select existing field mode — grouped combobox */}
                           {addFieldMode === 'select' && hasFieldDefs && (
                             <div className="grid grid-cols-[1fr_1fr] gap-2">
                               <div className="col-span-2 sm:col-span-1">
@@ -475,47 +635,139 @@ export function LineItemsStep({
                                       <span className="truncate">
                                         {selectedFieldDef ? selectedFieldDef.fieldLabel : 'Search fields…'}
                                       </span>
-                                      <ChevronsUpDown className="ml-2 h-3 w-3 shrink-0 opacity-50" />
+                                      {loadingSuggestions ? (
+                                        <Loader2 className="ml-2 h-3 w-3 shrink-0 animate-spin opacity-50" />
+                                      ) : (
+                                        <ChevronsUpDown className="ml-2 h-3 w-3 shrink-0 opacity-50" />
+                                      )}
                                     </Button>
                                   </PopoverTrigger>
-                                  <PopoverContent className="w-64 p-0" align="start">
+                                  <PopoverContent className="w-72 p-0" align="start">
                                     <Command>
                                       <CommandInput placeholder="Search field definitions…" className="h-8 text-sm" />
                                       <CommandList>
                                         <CommandEmpty>No matching fields.</CommandEmpty>
+
+                                        {/* Suggested fields for this item type */}
+                                        {suggestedFieldDefs.filter((fd) => !usedFieldKeys.get(item.id)?.has(fd.fieldKey)).length > 0 && (
+                                          <CommandGroup heading={`Suggested for "${item.itemLabel}"`}>
+                                            {suggestedFieldDefs
+                                              .filter((fd) => !usedFieldKeys.get(item.id)?.has(fd.fieldKey))
+                                              .map((fd) => (
+                                                <CommandItem
+                                                  key={fd.id}
+                                                  value={`suggested ${fd.fieldLabel} ${fd.fieldKey}`}
+                                                  onSelect={() => {
+                                                    setSelectedFieldDef(fd);
+                                                    setFieldDefPopoverOpen(false);
+                                                  }}
+                                                >
+                                                  <div className="flex flex-col">
+                                                    <span className="text-sm">{fd.fieldLabel}</span>
+                                                    <span className="text-[10px] font-mono text-muted-foreground">{fd.fieldKey}</span>
+                                                  </div>
+                                                </CommandItem>
+                                              ))}
+                                          </CommandGroup>
+                                        )}
+
+                                        {/* All other approved fields */}
+                                        {otherFieldDefs.filter((fd) => !usedFieldKeys.get(item.id)?.has(fd.fieldKey)).length > 0 && (
+                                          <>
+                                            {suggestedFieldDefs.length > 0 && <CommandSeparator />}
+                                            <CommandGroup heading="All Fields">
+                                              {otherFieldDefs
+                                                .filter((fd) => !usedFieldKeys.get(item.id)?.has(fd.fieldKey))
+                                                .map((fd) => (
+                                                  <CommandItem
+                                                    key={fd.id}
+                                                    value={`${fd.fieldLabel} ${fd.fieldKey}`}
+                                                    onSelect={() => {
+                                                      setSelectedFieldDef(fd);
+                                                      setFieldDefPopoverOpen(false);
+                                                    }}
+                                                  >
+                                                    <div className="flex flex-col">
+                                                      <span className="text-sm">{fd.fieldLabel}</span>
+                                                      <span className="text-[10px] font-mono text-muted-foreground">{fd.fieldKey}</span>
+                                                    </div>
+                                                  </CommandItem>
+                                                ))}
+                                            </CommandGroup>
+                                          </>
+                                        )}
+
+                                        <CommandSeparator />
                                         <CommandGroup>
-                                          {(fieldDefinitions ?? [])
-                                            .filter((fd) => !usedFieldKeys.get(item.id)?.has(fd.fieldKey))
-                                            .map((fd) => (
-                                              <CommandItem
-                                                key={fd.id}
-                                                value={`${fd.fieldLabel} ${fd.fieldKey}`}
-                                                onSelect={() => {
-                                                  setSelectedFieldDef(fd);
-                                                  setFieldDefPopoverOpen(false);
-                                                }}
-                                              >
-                                                <div className="flex flex-col">
-                                                  <span className="text-sm">{fd.fieldLabel}</span>
-                                                  <span className="text-[10px] font-mono text-muted-foreground">{fd.fieldKey}</span>
-                                                </div>
-                                              </CommandItem>
-                                            ))}
+                                          <CommandItem
+                                            value="__create_new_field__"
+                                            onSelect={() => {
+                                              setAddFieldMode('create');
+                                              setSelectedFieldDef(null);
+                                              setFieldDefPopoverOpen(false);
+                                            }}
+                                          >
+                                            <Plus className="mr-2 h-3.5 w-3.5 text-primary" />
+                                            <span className="text-primary">Create New Field</span>
+                                          </CommandItem>
                                         </CommandGroup>
                                       </CommandList>
                                     </Command>
                                   </PopoverContent>
                                 </Popover>
                               </div>
+
+                              {/* Value input — combobox when history exists */}
                               <div className="col-span-2 sm:col-span-1">
                                 <Label className="text-xs">Value</Label>
-                                <Input
-                                  placeholder={selectedFieldDef ? `e.g. ${selectedFieldDef.fieldKey}` : '—'}
-                                  value={newFieldValue}
-                                  onChange={(e) => setNewFieldValue(e.target.value)}
-                                  className="h-8 text-sm"
-                                  disabled={!selectedFieldDef}
-                                />
+                                {addFieldValueOptions.length > 0 ? (
+                                  <Popover open={addFieldValuePopoverOpen} onOpenChange={setAddFieldValuePopoverOpen}>
+                                    <PopoverTrigger asChild>
+                                      <div className="relative">
+                                        <Input
+                                          placeholder={selectedFieldDef ? `e.g. ${selectedFieldDef.fieldKey}` : '—'}
+                                          value={newFieldValue}
+                                          onChange={(e) => {
+                                            setNewFieldValue(e.target.value);
+                                            setAddFieldValuePopoverOpen(true);
+                                          }}
+                                          className="h-8 text-sm pr-7"
+                                          disabled={!selectedFieldDef}
+                                          onFocus={() => setAddFieldValuePopoverOpen(true)}
+                                        />
+                                        <ChevronsUpDown className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground/50" />
+                                      </div>
+                                    </PopoverTrigger>
+                                    <PopoverContent
+                                      className="w-48 p-1"
+                                      align="start"
+                                      onOpenAutoFocus={(e) => e.preventDefault()}
+                                    >
+                                      {filteredAddFieldValueOptions.map((opt) => (
+                                        <button
+                                          key={opt.id}
+                                          className="w-full text-left px-2 py-1.5 text-sm hover:bg-muted rounded flex items-center justify-between gap-2"
+                                          onMouseDown={(e) => {
+                                            e.preventDefault();
+                                            setNewFieldValue(opt.value);
+                                            setAddFieldValuePopoverOpen(false);
+                                          }}
+                                        >
+                                          <span className="truncate">{opt.value}</span>
+                                          <span className="text-[10px] text-muted-foreground shrink-0">{opt.usageCount}×</span>
+                                        </button>
+                                      ))}
+                                    </PopoverContent>
+                                  </Popover>
+                                ) : (
+                                  <Input
+                                    placeholder={selectedFieldDef ? `e.g. ${selectedFieldDef.fieldKey}` : '—'}
+                                    value={newFieldValue}
+                                    onChange={(e) => setNewFieldValue(e.target.value)}
+                                    className="h-8 text-sm"
+                                    disabled={!selectedFieldDef}
+                                  />
+                                )}
                               </div>
                             </div>
                           )}

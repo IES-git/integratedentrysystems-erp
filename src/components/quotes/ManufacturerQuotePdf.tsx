@@ -409,7 +409,7 @@ export function ManufacturerQuotePdf({
                   {idx + 1}. {item.itemLabel}
                 </Text>
                 {item.canonicalCode && (
-                  <Text style={styles.itemCode}>Code: {item.canonicalCode}</Text>
+                  <Text style={styles.itemCode}>Item Code: {item.canonicalCode}</Text>
                 )}
               </View>
               <View style={styles.itemHeaderRight}>

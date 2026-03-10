@@ -8,10 +8,12 @@ import { supabase } from './supabase';
 import type {
   Estimate,
   EstimateItem,
+  EstimateWithItems,
   ItemField,
   FieldDefinition,
   FieldDefinitionStatus,
   FieldValueType,
+  FieldValueOption,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -167,6 +169,36 @@ export async function listEstimates(): Promise<Estimate[]> {
 
   if (error) throw new Error(`Failed to list estimates: ${error.message}`);
   return (data || []).map(mapEstimateRow);
+}
+
+/**
+ * List all estimates with their line items (id, canonical_code, item_label only).
+ * Used by the estimates list page for search-by-item-code and the Items column.
+ */
+export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
+  const { data, error } = await supabase
+    .from('estimates')
+    .select(`
+      *,
+      estimate_items (
+        id,
+        canonical_code,
+        item_label
+      )
+    `)
+    .order('created_at', { ascending: false });
+
+  if (error) throw new Error(`Failed to list estimates with items: ${error.message}`);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data || []).map((row: any) => ({
+    ...mapEstimateRow(row),
+    items: (row.estimate_items || []).map((item: any) => ({
+      id: item.id,
+      canonicalCode: item.canonical_code ?? '',
+      itemLabel: item.item_label,
+    })),
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +517,59 @@ export async function getEstimateFileUrl(filePath: string): Promise<string> {
 // Field Definitions
 // ---------------------------------------------------------------------------
 
+/**
+ * Return field definitions that have been used on items matching the given
+ * item label or canonical code, ordered by usage frequency (most-used first).
+ * Falls back to an empty array if neither parameter is provided.
+ */
+export async function getFieldDefinitionsForItemType(
+  itemLabel?: string,
+  canonicalCode?: string
+): Promise<FieldDefinition[]> {
+  if (!itemLabel && !canonicalCode) return [];
+
+  // Build OR filters for item_label / canonical_code
+  const orFilters: string[] = [];
+  if (itemLabel) orFilters.push(`item_label.ilike.${itemLabel}`);
+  if (canonicalCode) orFilters.push(`canonical_code.ilike.${canonicalCode}`);
+
+  // Fetch matching estimate_item ids
+  const { data: matchingItems, error: itemsError } = await supabase
+    .from('estimate_items')
+    .select('id')
+    .or(orFilters.join(','));
+
+  if (itemsError) throw new Error(`Failed to fetch item types: ${itemsError.message}`);
+  if (!matchingItems || matchingItems.length === 0) return [];
+
+  const matchingItemIds = matchingItems.map((r) => r.id);
+
+  // Fetch distinct field_definition_ids used on those items
+  const { data: itemFields, error: fieldsError } = await supabase
+    .from('item_fields')
+    .select('field_definition_id')
+    .in('estimate_item_id', matchingItemIds)
+    .not('field_definition_id', 'is', null);
+
+  if (fieldsError) throw new Error(`Failed to fetch item fields: ${fieldsError.message}`);
+  if (!itemFields || itemFields.length === 0) return [];
+
+  const uniqueDefIds = [
+    ...new Set(itemFields.map((r) => r.field_definition_id as string)),
+  ];
+
+  const { data, error } = await supabase
+    .from('field_definitions')
+    .select('*')
+    .in('id', uniqueDefIds)
+    .eq('status', 'approved')
+    .order('usage_count', { ascending: false });
+
+  if (error) throw new Error(`Failed to fetch field definitions: ${error.message}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data || []).map(mapFieldDefinitionRow);
+}
+
 /** List field definitions, optionally filtered by status. */
 export async function getFieldDefinitions(
   status?: FieldDefinitionStatus
@@ -555,6 +640,95 @@ export async function deleteFieldDefinition(id: string): Promise<void> {
     throw new Error(`Failed to delete field definition: ${error.message}`);
 }
 
+/**
+ * Upsert a field definition by field_key: inserts with status='approved' if it doesn't exist,
+ * or updates the label and status to 'approved' if it does.  Used when the user manually
+ * creates a new field from the line-items wizard so it becomes discoverable for future items.
+ */
+export async function createOrApproveFieldDefinition(input: {
+  fieldKey: string;
+  fieldLabel: string;
+  valueType?: FieldValueType;
+}): Promise<FieldDefinition> {
+  const { data, error } = await supabase
+    .from('field_definitions')
+    .upsert(
+      {
+        field_key: input.fieldKey,
+        field_label: input.fieldLabel,
+        value_type: input.valueType ?? 'string',
+        status: 'approved',
+      },
+      { onConflict: 'field_key', ignoreDuplicates: false }
+    )
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to create field definition: ${error.message}`);
+  return mapFieldDefinitionRow(data);
+}
+
+// ---------------------------------------------------------------------------
+// Field Value Options
+// ---------------------------------------------------------------------------
+
+/** Fetch previously used values for a field definition, ordered by usage frequency. */
+export async function getFieldValueOptions(
+  fieldDefinitionId: string
+): Promise<FieldValueOption[]> {
+  const { data, error } = await supabase
+    .from('field_value_options')
+    .select('*')
+    .eq('field_definition_id', fieldDefinitionId)
+    .order('usage_count', { ascending: false });
+
+  if (error) throw new Error(`Failed to fetch field value options: ${error.message}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    fieldDefinitionId: row.field_definition_id,
+    value: row.value,
+    usageCount: row.usage_count,
+    createdAt: row.created_at,
+  }));
+}
+
+/**
+ * Record (or increment) usage of a value for a given field definition.
+ * Upserts into field_value_options: inserts with usage_count=1 on first use,
+ * increments usage_count on subsequent uses.
+ */
+export async function recordFieldValueUsage(
+  fieldDefinitionId: string,
+  value: string
+): Promise<void> {
+  const { error } = await supabase.rpc('upsert_field_value_option', {
+    p_field_definition_id: fieldDefinitionId,
+    p_value: value,
+  });
+
+  if (error) {
+    // Fallback: manual upsert if the RPC doesn't exist yet
+    const { data: existing } = await supabase
+      .from('field_value_options')
+      .select('id, usage_count')
+      .eq('field_definition_id', fieldDefinitionId)
+      .eq('value', value)
+      .single();
+
+    if (existing) {
+      await supabase
+        .from('field_value_options')
+        .update({ usage_count: existing.usage_count + 1 })
+        .eq('id', existing.id);
+    } else {
+      await supabase
+        .from('field_value_options')
+        .insert({ field_definition_id: fieldDefinitionId, value, usage_count: 1 });
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Row Mappers  (snake_case DB rows  ->  camelCase TypeScript types)
 // ---------------------------------------------------------------------------
@@ -593,6 +767,7 @@ function mapEstimateItemRow(row: any): EstimateItem {
     quantity: row.quantity,
     unitPrice: row.unit_price,
     sortOrder: row.sort_order,
+    manufacturerId: row.manufacturer_id ?? null,
     createdAt: row.created_at,
   };
 }

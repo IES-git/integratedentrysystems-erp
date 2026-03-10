@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, Eye, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2, Copy, Loader2 } from 'lucide-react';
+import { FileText, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2, Copy, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -31,13 +31,13 @@ import {
 import { useToast } from '@/hooks/use-toast';
 import { deleteEstimate, duplicateEstimate } from '@/lib/estimates-api';
 import { useAuth } from '@/contexts/AuthContext';
-import type { Estimate, Company } from '@/types';
+import type { EstimateWithItems, Company } from '@/types';
 
-type SortKey = 'originalFileName' | 'companyId' | 'totalPrice' | 'createdAt';
+type SortKey = 'companyId' | 'totalPrice' | 'createdAt';
 type SortDirection = 'asc' | 'desc';
 
 interface EstimatesTableProps {
-  estimates: Estimate[];
+  estimates: EstimateWithItems[];
   companies: Company[];
   onEstimateDeleted?: () => void;
   onEstimateDuplicated?: () => void;
@@ -50,7 +50,7 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
   const [sortKey, setSortKey] = useState<SortKey>('createdAt');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [estimateToDelete, setEstimateToDelete] = useState<Estimate | null>(null);
+  const [estimateToDelete, setEstimateToDelete] = useState<EstimateWithItems | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDuplicatingId, setIsDuplicatingId] = useState<string | null>(null);
 
@@ -77,7 +77,7 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
     navigate(`/app/estimates/wizard?id=${estimateId}`);
   };
 
-  const handleDuplicate = async (estimate: Estimate) => {
+  const handleDuplicate = async (estimate: EstimateWithItems) => {
     if (!user) return;
     setIsDuplicatingId(estimate.id);
     try {
@@ -99,7 +99,7 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
     }
   };
 
-  const confirmDelete = (estimate: Estimate) => {
+  const confirmDelete = (estimate: EstimateWithItems) => {
     setEstimateToDelete(estimate);
     setDeleteDialogOpen(true);
   };
@@ -112,7 +112,7 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
       await deleteEstimate(estimateToDelete.id);
       toast({
         title: 'Estimate deleted',
-        description: `${estimateToDelete.originalFileName} has been deleted.`,
+        description: 'The estimate has been deleted.',
       });
       setDeleteDialogOpen(false);
       setEstimateToDelete(null);
@@ -131,11 +131,8 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
   const sortedEstimates = useMemo(() => {
     return [...estimates].sort((a, b) => {
       let comparison = 0;
-      
+
       switch (sortKey) {
-        case 'originalFileName':
-          comparison = a.originalFileName.localeCompare(b.originalFileName);
-          break;
         case 'companyId':
           comparison = getCompanyName(a.companyId).localeCompare(getCompanyName(b.companyId));
           break;
@@ -146,7 +143,7 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
           comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
           break;
       }
-      
+
       return sortDirection === 'asc' ? comparison : -comparison;
     });
   }, [estimates, sortKey, sortDirection, companies]);
@@ -155,7 +152,7 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
     if (sortKey !== columnKey) {
       return <ArrowUpDown className="ml-1 h-3 w-3 text-muted-foreground/50" />;
     }
-    return sortDirection === 'asc' 
+    return sortDirection === 'asc'
       ? <ArrowUp className="ml-1 h-3 w-3" />
       : <ArrowDown className="ml-1 h-3 w-3" />;
   };
@@ -173,192 +170,200 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
     <>
       <div className="overflow-x-auto">
         <Table>
-        <TableHeader>
-          <TableRow className="hover:bg-transparent">
-            <TableHead className="h-8">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('originalFileName')}
-              >
-                File Name
-                <SortIcon columnKey="originalFileName" />
-              </Button>
-            </TableHead>
-            <TableHead className="h-8">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('companyId')}
-              >
-                Customer
-                <SortIcon columnKey="companyId" />
-              </Button>
-            </TableHead>
-            <TableHead className="h-8">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('totalPrice')}
-              >
-                Total
-                <SortIcon columnKey="totalPrice" />
-              </Button>
-            </TableHead>
-            <TableHead className="h-8">
-              <span className="text-xs font-medium">Convert To</span>
-            </TableHead>
-            <TableHead className="hidden h-8 md:table-cell">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-3 h-7 px-2 text-xs font-medium"
-                onClick={() => handleSort('createdAt')}
-              >
-                Uploaded
-                <SortIcon columnKey="createdAt" />
-              </Button>
-            </TableHead>
-            <TableHead className="h-8 w-10"></TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {sortedEstimates.map((estimate) => (
-            <TableRow key={estimate.id} className="h-10">
-              <TableCell className="py-1.5">
-                <div className="flex items-center gap-2">
-                  <FileText className="h-4 w-4 shrink-0 text-primary" />
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{estimate.originalFileName}</p>
-                    <p className="text-[10px] font-mono text-muted-foreground">
-                      {estimate.id.slice(-8)}
-                    </p>
-                  </div>
-                </div>
-              </TableCell>
-              <TableCell className="py-1.5">
-                <span
-                  className={`text-sm ${
-                    estimate.companyId ? 'text-foreground' : 'text-muted-foreground italic'
-                  }`}
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="h-8">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-7 px-2 text-xs font-medium"
+                  onClick={() => handleSort('companyId')}
                 >
-                  {getCompanyName(estimate.companyId)}
-                </span>
-              </TableCell>
-              <TableCell className="py-1.5">
-                <span className="text-sm font-medium">
-                  {estimate.totalPrice !== null ? `$${estimate.totalPrice.toFixed(2)}` : '--'}
-                </span>
-              </TableCell>
-              <TableCell className="py-1.5">
-                {estimate.ocrStatus === 'done' ? (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs">
-                        <FileOutput className="h-3.5 w-3.5" />
-                        Quote
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'customer')}>
-                        <User className="mr-2 h-4 w-4" />
-                        Customer Quote
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'manufacturer')}>
-                        <Factory className="mr-2 h-4 w-4" />
-                        Manufacturer Quote
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'both')}>
-                        <Users className="mr-2 h-4 w-4" />
-                        Multiple Quotes
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                ) : (
-                  <Badge variant="secondary" className="h-6 text-xs">
-                    {estimate.ocrStatus === 'processing' ? 'Processing...' : estimate.ocrStatus}
-                  </Badge>
-                )}
-              </TableCell>
-              <TableCell className="hidden py-1.5 text-sm md:table-cell">
-                {new Date(estimate.createdAt).toLocaleDateString()}
-              </TableCell>
-              <TableCell className="py-1.5">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-7 w-7">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    {estimate.ocrStatus === 'done' && (
-                      <>
-                        <DropdownMenuItem onClick={() => handleEditEstimate(estimate.id)}>
-                          <Pencil className="mr-2 h-4 w-4" />
-                          Edit/Review
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => handleDuplicate(estimate)}
-                          disabled={isDuplicatingId === estimate.id}
-                        >
-                          {isDuplicatingId === estimate.id ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <Copy className="mr-2 h-4 w-4" />
-                          )}
-                          {isDuplicatingId === estimate.id ? 'Remixing…' : 'Remix'}
-                        </DropdownMenuItem>
-                      </>
-                    )}
-                    {estimate.ocrStatus !== 'processing' && (
-                      <>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          onClick={() => confirmDelete(estimate)}
-                          className="text-destructive focus:text-destructive"
-                        >
-                          <Trash2 className="mr-2 h-4 w-4" />
-                          Delete
-                        </DropdownMenuItem>
-                      </>
-                    )}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </TableCell>
+                  Customer
+                  <SortIcon columnKey="companyId" />
+                </Button>
+              </TableHead>
+              <TableHead className="h-8">
+                <span className="text-xs font-medium">Items</span>
+              </TableHead>
+              <TableHead className="h-8">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-7 px-2 text-xs font-medium"
+                  onClick={() => handleSort('totalPrice')}
+                >
+                  Total
+                  <SortIcon columnKey="totalPrice" />
+                </Button>
+              </TableHead>
+              <TableHead className="h-8">
+                <span className="text-xs font-medium">Convert To</span>
+              </TableHead>
+              <TableHead className="h-8">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-7 px-2 text-xs font-medium"
+                  onClick={() => handleSort('createdAt')}
+                >
+                  Date Made
+                  <SortIcon columnKey="createdAt" />
+                </Button>
+              </TableHead>
+              <TableHead className="h-8 w-10"></TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+          </TableHeader>
+          <TableBody>
+            {sortedEstimates.map((estimate) => {
+              const itemCodes = estimate.items
+                .map((i) => i.canonicalCode)
+                .filter(Boolean);
 
-    {/* Delete Confirmation Dialog */}
-    <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete Estimate?</AlertDialogTitle>
-          <AlertDialogDescription>
-            Are you sure you want to delete "{estimateToDelete?.originalFileName}"? This action cannot be undone and will also delete:
-            <ul className="mt-2 list-disc list-inside space-y-1">
-              <li>All line items and fields</li>
-              <li>The original uploaded file</li>
-            </ul>
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={handleDelete}
-            disabled={isDeleting}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-          >
-            {isDeleting ? 'Deleting...' : 'Delete'}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  </>
+              return (
+                <TableRow key={estimate.id} className="h-10">
+                  <TableCell className="py-1.5">
+                    <div className="flex flex-col gap-0.5">
+                      <span
+                        className={`text-sm ${
+                          estimate.companyId ? 'text-foreground font-medium' : 'text-muted-foreground italic'
+                        }`}
+                      >
+                        {getCompanyName(estimate.companyId)}
+                      </span>
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {estimate.id.slice(-8)}
+                      </span>
+                    </div>
+                  </TableCell>
+                  <TableCell className="py-1.5">
+                    {itemCodes.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {itemCodes.map((code) => (
+                          <Badge
+                            key={code}
+                            variant="secondary"
+                            className="h-5 rounded px-1.5 font-mono text-[10px]"
+                          >
+                            {code}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="py-1.5">
+                    <span className="text-sm font-medium">
+                      {estimate.totalPrice !== null ? `$${estimate.totalPrice.toFixed(2)}` : '--'}
+                    </span>
+                  </TableCell>
+                  <TableCell className="py-1.5">
+                    {estimate.ocrStatus === 'done' ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs">
+                            <FileOutput className="h-3.5 w-3.5" />
+                            Quote
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start">
+                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'customer')}>
+                            <User className="mr-2 h-4 w-4" />
+                            Customer Quote
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'manufacturer')}>
+                            <Factory className="mr-2 h-4 w-4" />
+                            Manufacturer Quote
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'both')}>
+                            <Users className="mr-2 h-4 w-4" />
+                            Multiple Quotes
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : (
+                      <Badge variant="secondary" className="h-6 text-xs">
+                        {estimate.ocrStatus === 'processing' ? 'Processing...' : estimate.ocrStatus}
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="py-1.5 text-sm text-muted-foreground">
+                    {new Date(estimate.createdAt).toLocaleDateString()}
+                  </TableCell>
+                  <TableCell className="py-1.5">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-7 w-7">
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        {estimate.ocrStatus === 'done' && (
+                          <>
+                            <DropdownMenuItem onClick={() => handleEditEstimate(estimate.id)}>
+                              <Pencil className="mr-2 h-4 w-4" />
+                              Edit/Review
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => handleDuplicate(estimate)}
+                              disabled={isDuplicatingId === estimate.id}
+                            >
+                              {isDuplicatingId === estimate.id ? (
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              ) : (
+                                <Copy className="mr-2 h-4 w-4" />
+                              )}
+                              {isDuplicatingId === estimate.id ? 'Remixing…' : 'Remix'}
+                            </DropdownMenuItem>
+                          </>
+                        )}
+                        {estimate.ocrStatus !== 'processing' && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onClick={() => confirmDelete(estimate)}
+                              className="text-destructive focus:text-destructive"
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Delete
+                            </DropdownMenuItem>
+                          </>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Estimate?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this estimate? This action cannot be undone and will also delete:
+              <ul className="mt-2 list-disc list-inside space-y-1">
+                <li>All line items and fields</li>
+                <li>The original uploaded file</li>
+              </ul>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isDeleting ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

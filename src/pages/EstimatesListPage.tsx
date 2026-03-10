@@ -6,9 +6,9 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { UploadEstimateModal } from '@/components/estimates/UploadEstimateModal';
 import { EstimatesTable } from '@/components/estimates/EstimatesTable';
-import { listEstimates } from '@/lib/estimates-api';
+import { getEstimatesWithItems } from '@/lib/estimates-api';
 import { supabase } from '@/lib/supabase';
-import type { Estimate, Company } from '@/types';
+import type { EstimateWithItems, Company } from '@/types';
 
 // Map Supabase companies row to our Company type
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -16,6 +16,7 @@ function mapCompanyRow(row: any): Company {
   return {
     id: row.id,
     name: row.name,
+    companyType: row.company_type ?? 'customer',
     billingAddress: row.billing_address ?? null,
     billingCity: row.billing_city ?? null,
     billingState: row.billing_state ?? null,
@@ -34,7 +35,7 @@ function mapCompanyRow(row: any): Company {
 
 export default function EstimatesListPage() {
   const navigate = useNavigate();
-  const [estimates, setEstimates] = useState<Estimate[]>([]);
+  const [estimates, setEstimates] = useState<EstimateWithItems[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
@@ -47,8 +48,8 @@ export default function EstimatesListPage() {
       setIsLoading(true);
       setError(null);
 
-      // Load estimates from Supabase
-      const loadedEstimates = await listEstimates();
+      // Load estimates with their line items for search and display
+      const loadedEstimates = await getEstimatesWithItems();
       console.log('EstimatesListPage: Loaded', loadedEstimates.length, 'estimates');
 
       // Load companies from Supabase
@@ -106,16 +107,16 @@ export default function EstimatesListPage() {
     return company?.name || 'Unknown';
   };
 
-  const filteredEstimates = estimates.filter(
-    (estimate) => {
-      const fileName = estimate?.originalFileName || '';
-      const companyName = getCompanyName(estimate?.companyId || null) || '';
-      const query = searchQuery.toLowerCase();
-      
-      return fileName.toLowerCase().includes(query) || 
-             companyName.toLowerCase().includes(query);
-    }
-  );
+  const filteredEstimates = estimates.filter((estimate) => {
+    const query = searchQuery.toLowerCase();
+    if (!query) return true;
+    const companyName = getCompanyName(estimate?.companyId || null) || '';
+    const itemCodes = estimate.items.map((i) => i.canonicalCode).filter(Boolean);
+    return (
+      companyName.toLowerCase().includes(query) ||
+      itemCodes.some((code) => code.toLowerCase().includes(query))
+    );
+  });
 
   const handleUploadComplete = () => {
     // Reload estimates from Supabase after upload

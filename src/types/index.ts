@@ -21,9 +21,12 @@ export interface CompanySettings {
   markupOverrides?: Record<string, number>;
 }
 
+export type CompanyType = 'customer' | 'manufacturer' | 'both';
+
 export interface Company {
   id: string;
   name: string;
+  companyType: CompanyType;
   billingAddress: string | null;
   billingCity: string | null;
   billingState: string | null;
@@ -98,6 +101,19 @@ export interface EstimateItem {
   quantity: number;
   unitPrice: number | null;
   sortOrder?: number;
+  manufacturerId: string | null;
+  createdAt: string;
+}
+
+export interface EstimateWithItems extends Estimate {
+  items: Pick<EstimateItem, 'id' | 'canonicalCode' | 'itemLabel'>[];
+}
+
+export interface FieldValueOption {
+  id: string;
+  fieldDefinitionId: string;
+  value: string;
+  usageCount: number;
   createdAt: string;
 }
 
@@ -191,6 +207,10 @@ export interface QuoteItem {
   lineTotal: number;
   sortOrder: number;
   createdAt: string;
+}
+
+export interface QuoteWithItems extends Quote {
+  items: Pick<QuoteItem, 'id' | 'canonicalCode' | 'itemLabel'>[];
 }
 
 export type QuoteDocumentAudience = 'customer' | 'manufacturer';

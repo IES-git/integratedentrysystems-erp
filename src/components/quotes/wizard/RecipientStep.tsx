@@ -1,10 +1,11 @@
 import { useState, useMemo } from 'react';
-import { Search, User, Building2, CheckCircle2, Users, ArrowLeft } from 'lucide-react';
+import { Search, User, Building2, CheckCircle2, Users, ArrowLeft, UserPlus, Plus, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { createCompany } from '@/lib/companies-api';
 import type { Company } from '@/types';
 
 interface RecipientStepProps {
@@ -35,22 +36,75 @@ export function RecipientStep({
   const [customerSearch, setCustomerSearch] = useState('');
   const [manufacturerSearch, setManufacturerSearch] = useState('');
 
+  // Inline create state — shared local list
+  const [localCompanies, setLocalCompanies] = useState<Company[]>([]);
+
+  // Customer inline create
+  const [showCreateCustomer, setShowCreateCustomer] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState('');
+  const [isCreatingCustomer, setIsCreatingCustomer] = useState(false);
+  const [createCustomerError, setCreateCustomerError] = useState<string | null>(null);
+
+  // Manufacturer inline create
+  const [showCreateManufacturer, setShowCreateManufacturer] = useState(false);
+  const [newManufacturerName, setNewManufacturerName] = useState('');
+  const [isCreatingManufacturer, setIsCreatingManufacturer] = useState(false);
+  const [createManufacturerError, setCreateManufacturerError] = useState<string | null>(null);
+
+  const allCompanies = useMemo(() => [...companies, ...localCompanies], [companies, localCompanies]);
+
   const filteredCustomers = useMemo(() => {
-    if (!customerSearch.trim()) return companies;
+    if (!customerSearch.trim()) return allCompanies;
     const query = customerSearch.toLowerCase();
-    return companies.filter((c) => c.name.toLowerCase().includes(query));
-  }, [companies, customerSearch]);
+    return allCompanies.filter((c) => c.name.toLowerCase().includes(query));
+  }, [allCompanies, customerSearch]);
 
   const filteredManufacturers = useMemo(() => {
-    if (!manufacturerSearch.trim()) return companies;
+    if (!manufacturerSearch.trim()) return allCompanies;
     const query = manufacturerSearch.toLowerCase();
-    return companies.filter((m) => m.name.toLowerCase().includes(query));
-  }, [companies, manufacturerSearch]);
+    return allCompanies.filter((m) => m.name.toLowerCase().includes(query));
+  }, [allCompanies, manufacturerSearch]);
 
-  const selectedCustomer = companies.find((c) => c.id === selectedCustomerId);
-  const selectedManufacturer = companies.find((m) => m.id === selectedManufacturerId);
+  const selectedCustomer = allCompanies.find((c) => c.id === selectedCustomerId);
+  const selectedManufacturer = allCompanies.find((m) => m.id === selectedManufacturerId);
 
   const canProceed = selectedCustomerId || selectedManufacturerId;
+
+  const handleCreateCustomer = async () => {
+    const name = newCustomerName.trim();
+    if (!name) return;
+    setIsCreatingCustomer(true);
+    setCreateCustomerError(null);
+    try {
+      const newCompany = await createCompany({ name, companyType: 'customer' });
+      setLocalCompanies((prev) => [...prev, newCompany]);
+      onCustomerChange(newCompany.id);
+      setShowCreateCustomer(false);
+      setNewCustomerName('');
+    } catch (err) {
+      setCreateCustomerError(err instanceof Error ? err.message : 'Failed to create customer');
+    } finally {
+      setIsCreatingCustomer(false);
+    }
+  };
+
+  const handleCreateManufacturer = async () => {
+    const name = newManufacturerName.trim();
+    if (!name) return;
+    setIsCreatingManufacturer(true);
+    setCreateManufacturerError(null);
+    try {
+      const newCompany = await createCompany({ name, companyType: 'manufacturer' });
+      setLocalCompanies((prev) => [...prev, newCompany]);
+      onManufacturerChange(newCompany.id);
+      setShowCreateManufacturer(false);
+      setNewManufacturerName('');
+    } catch (err) {
+      setCreateManufacturerError(err instanceof Error ? err.message : 'Failed to create manufacturer');
+    } finally {
+      setIsCreatingManufacturer(false);
+    }
+  };
 
   const SelectionIndicator = ({ selected }: { selected: boolean }) => (
     <div
@@ -79,7 +133,7 @@ export function RecipientStep({
         Select the customer and/or manufacturer for this quote.
       </p>
 
-      {/* Use Current Customer Option - or show disabled if no customer */}
+      {/* Use Current Customer Option */}
       <div
         onClick={() => {
           if (currentCustomer) {
@@ -120,7 +174,7 @@ export function RecipientStep({
         </div>
       </div>
 
-      {/* Select Different Customer */}
+      {/* Select Different Recipients */}
       <div
         onClick={() => onUseCurrentChange(false)}
         className={cn(
@@ -188,6 +242,44 @@ export function RecipientStep({
                       ))}
                     </div>
                   </ScrollArea>
+
+                  {/* Create New Customer inline form */}
+                  {showCreateCustomer ? (
+                    <div className="rounded-md border border-dashed p-3 space-y-2 bg-muted/30">
+                      <Label className="text-xs">New Customer Name <span className="text-destructive">*</span></Label>
+                      <Input
+                        placeholder="e.g. Acme Corp"
+                        value={newCustomerName}
+                        onChange={(e) => setNewCustomerName(e.target.value)}
+                        className="h-8 text-sm"
+                        autoFocus
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleCreateCustomer(); if (e.key === 'Escape') setShowCreateCustomer(false); }}
+                      />
+                      {createCustomerError && (
+                        <p className="text-xs text-destructive flex items-center gap-1">
+                          <AlertCircle className="h-3 w-3" />
+                          {createCustomerError}
+                        </p>
+                      )}
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={handleCreateCustomer} disabled={!newCustomerName.trim() || isCreatingCustomer} className="flex-1">
+                          {isCreatingCustomer ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Create & Select'}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => { setShowCreateCustomer(false); setNewCustomerName(''); setCreateCustomerError(null); }}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setShowCreateCustomer(true)}
+                      className="w-full flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-primary hover:bg-primary/5 transition-colors border border-dashed border-primary/30"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Create New Customer
+                    </button>
+                  )}
+
                   {selectedCustomer && (
                     <p className="text-xs text-muted-foreground flex items-center gap-1">
                       <CheckCircle2 className="h-3 w-3 text-success" />
@@ -241,6 +333,44 @@ export function RecipientStep({
                       ))}
                     </div>
                   </ScrollArea>
+
+                  {/* Create New Manufacturer inline form */}
+                  {showCreateManufacturer ? (
+                    <div className="rounded-md border border-dashed p-3 space-y-2 bg-muted/30">
+                      <Label className="text-xs">New Manufacturer Name <span className="text-destructive">*</span></Label>
+                      <Input
+                        placeholder="e.g. Steelcraft"
+                        value={newManufacturerName}
+                        onChange={(e) => setNewManufacturerName(e.target.value)}
+                        className="h-8 text-sm"
+                        autoFocus
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleCreateManufacturer(); if (e.key === 'Escape') setShowCreateManufacturer(false); }}
+                      />
+                      {createManufacturerError && (
+                        <p className="text-xs text-destructive flex items-center gap-1">
+                          <AlertCircle className="h-3 w-3" />
+                          {createManufacturerError}
+                        </p>
+                      )}
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={handleCreateManufacturer} disabled={!newManufacturerName.trim() || isCreatingManufacturer} className="flex-1">
+                          {isCreatingManufacturer ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Create & Select'}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => { setShowCreateManufacturer(false); setNewManufacturerName(''); setCreateManufacturerError(null); }}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setShowCreateManufacturer(true)}
+                      className="w-full flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-primary hover:bg-primary/5 transition-colors border border-dashed border-primary/30"
+                    >
+                      <UserPlus className="h-3.5 w-3.5" />
+                      Create New Manufacturer
+                    </button>
+                  )}
+
                   {selectedManufacturer && (
                     <p className="text-xs text-muted-foreground flex items-center gap-1">
                       <CheckCircle2 className="h-3 w-3 text-success" />

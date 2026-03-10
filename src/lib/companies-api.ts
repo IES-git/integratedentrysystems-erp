@@ -3,7 +3,7 @@
  */
 
 import { supabase } from './supabase';
-import type { Company, CompanySettings, Contact } from '@/types';
+import type { Company, CompanySettings, CompanyType, Contact } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Company — List & Read
@@ -76,6 +76,7 @@ export type CreateCompanyInput = Pick<Company, 'name'> &
   Partial<
     Pick<
       Company,
+      | 'companyType'
       | 'billingAddress'
       | 'billingCity'
       | 'billingState'
@@ -256,6 +257,7 @@ function companyInputToRow(input: Partial<CreateCompanyInput>): Record<string, a
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const row: Record<string, any> = {};
   if (input.name !== undefined) row.name = input.name;
+  if (input.companyType !== undefined) row.company_type = input.companyType;
   if (input.billingAddress !== undefined) row.billing_address = input.billingAddress;
   if (input.billingCity !== undefined) row.billing_city = input.billingCity;
   if (input.billingState !== undefined) row.billing_state = input.billingState;
@@ -279,6 +281,7 @@ function mapCompanyRow(row: any): Company {
   return {
     id: row.id,
     name: row.name,
+    companyType: (row.company_type ?? 'customer') as CompanyType,
     billingAddress: row.billing_address,
     billingCity: row.billing_city,
     billingState: row.billing_state,

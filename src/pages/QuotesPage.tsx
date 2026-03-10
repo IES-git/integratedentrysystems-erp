@@ -21,26 +21,68 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { SelectEstimateModal } from '@/components/quotes/SelectEstimateModal';
-import { listQuotes } from '@/lib/quotes-api';
-import type { Quote, QuoteStatus } from '@/types';
+import { listQuotesWithItems } from '@/lib/quotes-api';
+import { supabase } from '@/lib/supabase';
+import type { QuoteWithItems, QuoteStatus, Company } from '@/types';
 
 export default function QuotesPage() {
   const navigate = useNavigate();
-  const [quotes, setQuotes] = useState<Quote[]>([]);
+  const [quotes, setQuotes] = useState<QuoteWithItems[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSelectModalOpen, setIsSelectModalOpen] = useState(false);
 
   useEffect(() => {
-    listQuotes()
-      .then(setQuotes)
+    Promise.all([
+      listQuotesWithItems(),
+      supabase.from('companies').select('id, name').order('name'),
+    ])
+      .then(([loadedQuotes, { data: companiesData }]) => {
+        setQuotes(loadedQuotes);
+        setCompanies(
+          (companiesData ?? []).map((c) => ({
+            id: c.id,
+            name: c.name,
+            companyType: 'customer' as const,
+            billingAddress: null,
+            billingCity: null,
+            billingState: null,
+            billingZip: null,
+            shippingAddress: null,
+            shippingCity: null,
+            shippingState: null,
+            shippingZip: null,
+            notes: null,
+            active: true,
+            settings: { costMultiplier: 1.0, paymentTerms: null, defaultTemplateId: null },
+            createdAt: '',
+            updatedAt: '',
+          }))
+        );
+      })
       .catch(console.error)
       .finally(() => setIsLoading(false));
   }, []);
 
-  const filteredQuotes = quotes.filter((quote) =>
-    quote.id.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const getCompanyName = (companyId: string | null) => {
+    if (!companyId) return '';
+    return companies.find((c) => c.id === companyId)?.name ?? '';
+  };
+
+  const filteredQuotes = quotes.filter((quote) => {
+    const query = searchQuery.toLowerCase();
+    if (!query) return true;
+    const companyName = getCompanyName(quote.companyId);
+    const dateStr = new Date(quote.createdAt).toLocaleDateString();
+    const itemCodes = quote.items.map((i) => i.canonicalCode).filter(Boolean);
+    return (
+      quote.id.toLowerCase().includes(query) ||
+      companyName.toLowerCase().includes(query) ||
+      dateStr.toLowerCase().includes(query) ||
+      itemCodes.some((code) => code.toLowerCase().includes(query))
+    );
+  });
 
   const getStatusBadge = (status: QuoteStatus) => {
     const config: Record<QuoteStatus, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; label: string }> = {

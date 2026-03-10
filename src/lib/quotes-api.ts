@@ -3,7 +3,7 @@
  */
 
 import { supabase } from './supabase';
-import type { Quote, QuoteItem, QuoteStatus, QuoteType } from '@/types';
+import type { Quote, QuoteItem, QuoteWithItems, QuoteStatus, QuoteType } from '@/types';
 import type { EstimateItem, ItemField } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -186,6 +186,36 @@ export async function listQuotes(): Promise<Quote[]> {
 
   if (error) throw new Error(`Failed to list quotes: ${error.message}`);
   return (data ?? []).map(mapQuoteRow);
+}
+
+/**
+ * List all quotes with their line item codes (id, canonical_code, item_label only).
+ * Used by the quotes list page for search-by-item-code.
+ */
+export async function listQuotesWithItems(): Promise<QuoteWithItems[]> {
+  const { data, error } = await supabase
+    .from('quotes')
+    .select(`
+      *,
+      quote_items (
+        id,
+        canonical_code,
+        item_label
+      )
+    `)
+    .order('created_at', { ascending: false });
+
+  if (error) throw new Error(`Failed to list quotes with items: ${error.message}`);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data ?? []).map((row: any) => ({
+    ...mapQuoteRow(row),
+    items: (row.quote_items || []).map((item: any) => ({
+      id: item.id,
+      canonicalCode: item.canonical_code ?? '',
+      itemLabel: item.item_label,
+    })),
+  }));
 }
 
 /** List all quotes for a specific estimate. */
