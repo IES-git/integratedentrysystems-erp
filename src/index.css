@@ -36,8 +36,8 @@
     --muted: 210 15% 95%;
     --muted-foreground: 215 16% 47%;
 
-    /* Accent - Teal/cyan highlight */
-    --accent: 187 72% 38%;
+    /* Accent - IES Blue highlight */
+    --accent: 210 85% 38%;
     --accent-foreground: 0 0% 100%;
 
     /* Destructive - Red for errors/delete */
@@ -95,8 +95,8 @@
     --muted: 220 25% 16%;
     --muted-foreground: 215 16% 60%;
 
-    /* Accent - Teal/cyan */
-    --accent: 187 72% 48%;
+    /* Accent - IES Blue */
+    --accent: 210 85% 48%;
     --accent-foreground: 0 0% 100%;
 
     /* Destructive */
