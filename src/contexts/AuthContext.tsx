@@ -21,7 +21,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Initialize demo data for customers/manufacturers/templates
     initializeDemoData();
 
-    // Check for existing Supabase session
+    // Fast, reliable initial session check (reads from localStorage synchronously).
+    // This ensures isLoading is resolved immediately on page load/refresh without
+    // waiting for the async onAuthStateChange INITIAL_SESSION event.
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
         fetchUserProfile(session.user.id);
@@ -30,15 +32,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    // Listen for auth changes (for logout, session expiry, etc.)
+    // Listen for auth changes (logout, session expiry, token refresh).
+    // SIGNED_IN is intentionally NOT handled here — fetchUserProfile() makes
+    // a Supabase data request and calling it inside onAuthStateChange causes a
+    // deadlock in the Supabase auth library (the auth lock is held during the
+    // event callback). login() calls fetchUserProfile() directly instead, after
+    // signInWithPassword() fully completes and releases the lock.
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log('Auth state changed:', event, !!session);
-      
-      // Only handle sign out and token refresh, not sign in
-      // (sign in is handled directly in the login/signup functions)
-      if (event === 'SIGNED_OUT' || event === 'TOKEN_REFRESHED') {
+
+      if (event === 'SIGNED_OUT') {
+        setUser(null);
+        setIsLoading(false);
+      } else if (event === 'TOKEN_REFRESHED') {
         if (session?.user) {
           await fetchUserProfile(session.user.id);
         } else {
@@ -124,9 +132,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (data.user) {
         console.log('Auth successful, fetching profile...');
-        // Directly fetch the user profile instead of waiting for the listener
+        // Call fetchUserProfile directly here (after signInWithPassword fully
+        // completes) rather than from onAuthStateChange. Calling Supabase data
+        // methods inside the auth event callback deadlocks because the auth
+        // library holds a lock while dispatching events.
         const success = await fetchUserProfile(data.user.id);
-        
         if (success) {
           console.log('Login successful, user profile loaded');
           return true;

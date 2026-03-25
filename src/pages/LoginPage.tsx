@@ -35,7 +35,9 @@ export default function LoginPage() {
           title: 'Welcome back!',
           description: 'You have successfully logged in.',
         });
-        navigate('/app');
+        // Navigation is handled by the useEffect below once the user profile
+        // is committed to context — avoids the race condition where AppLayout
+        // would render before auth state was ready and get stuck on the spinner.
       } else {
         toast({
           title: 'Login failed',

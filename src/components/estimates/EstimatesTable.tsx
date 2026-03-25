@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2, Copy, Loader2 } from 'lucide-react';
+import { FileText, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2, Copy, Loader2, Layers, DoorOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -75,6 +75,10 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
 
   const handleEditEstimate = (estimateId: string) => {
     navigate(`/app/estimates/wizard?id=${estimateId}`);
+  };
+
+  const handleManageOpenings = (estimateId: string) => {
+    navigate(`/app/estimates/create?id=${estimateId}&step=1`);
   };
 
   const handleDuplicate = async (estimate: EstimateWithItems) => {
@@ -187,6 +191,9 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                 <span className="text-xs font-medium">Items</span>
               </TableHead>
               <TableHead className="h-8">
+                <span className="text-xs font-medium">Openings</span>
+              </TableHead>
+              <TableHead className="h-8">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -199,6 +206,9 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
               </TableHead>
               <TableHead className="h-8">
                 <span className="text-xs font-medium">Convert To</span>
+              </TableHead>
+              <TableHead className="h-8">
+                <span className="text-xs font-medium">Created By</span>
               </TableHead>
               <TableHead className="h-8">
                 <Button
@@ -216,9 +226,12 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
           </TableHeader>
           <TableBody>
             {sortedEstimates.map((estimate) => {
-              const itemCodes = estimate.items
-                .map((i) => i.canonicalCode)
-                .filter(Boolean);
+              // Unique canonical codes only — items can share the same code
+              const itemCodes = [
+                ...new Set(
+                  estimate.items.map((i) => i.canonicalCode).filter(Boolean)
+                ),
+              ];
 
               return (
                 <TableRow key={estimate.id} className="h-10">
@@ -251,6 +264,16 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                       </div>
                     ) : (
                       <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="py-1.5">
+                    {(estimate.openingsCount ?? 0) > 0 ? (
+                      <div className="flex items-center gap-1 text-sm text-foreground">
+                        <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                        {estimate.openingsCount} {estimate.openingsCount === 1 ? 'opening' : 'openings'}
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">—</span>
                     )}
                   </TableCell>
                   <TableCell className="py-1.5">
@@ -289,6 +312,9 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                     )}
                   </TableCell>
                   <TableCell className="py-1.5 text-sm text-muted-foreground">
+                    {estimate.createdByUserName ?? '—'}
+                  </TableCell>
+                  <TableCell className="py-1.5 text-sm text-muted-foreground">
                     {new Date(estimate.createdAt).toLocaleDateString()}
                   </TableCell>
                   <TableCell className="py-1.5">
@@ -304,6 +330,10 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                             <DropdownMenuItem onClick={() => handleEditEstimate(estimate.id)}>
                               <Pencil className="mr-2 h-4 w-4" />
                               Edit/Review
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleManageOpenings(estimate.id)}>
+                              <DoorOpen className="mr-2 h-4 w-4" />
+                              Manage Openings
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               onClick={() => handleDuplicate(estimate)}

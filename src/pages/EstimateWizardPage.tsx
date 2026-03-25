@@ -1,7 +1,30 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, FileText, PanelLeftClose, PanelLeft, Loader2 } from 'lucide-react';
+import { ArrowLeft, FileText, PanelLeftClose, PanelLeft, Loader2, ChevronsUpDown, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command';
 import { WizardSteps, type WizardStep } from '@/components/estimates/wizard/WizardSteps';
 import { CustomerStep, type ExtractedCustomerData } from '@/components/estimates/wizard/CustomerStep';
 import { LineItemsStep } from '@/components/estimates/wizard/LineItemsStep';
@@ -11,14 +34,19 @@ import { useToast } from '@/hooks/use-toast';
 import {
   getEstimateWithItems,
   getEstimateFileUrl,
+  getEstimateOpenings,
   updateEstimate as apiUpdateEstimate,
   updateEstimateItem as apiUpdateEstimateItem,
   updateItemField as apiUpdateItemField,
   addItemField as apiAddItemField,
   deleteItemField as apiDeleteItemField,
+  addEstimateItem as apiAddEstimateItem,
+  deleteEstimateItem as apiDeleteEstimateItem,
+  getFieldDefinitions,
+  getItemTypes,
 } from '@/lib/estimates-api';
 import { supabase } from '@/lib/supabase';
-import type { Estimate, EstimateItem, ItemField, Company } from '@/types';
+import type { Estimate, EstimateItem, ItemField, Company, FieldDefinition, ItemType, EstimateOpeningWithItems } from '@/types';
 import { cn } from '@/lib/utils';
 
 interface LineItemWithFields extends EstimateItem {
@@ -73,10 +101,14 @@ export default function EstimateWizardPage() {
     return [];
   })();
 
+  // Support ?step=1 to open directly on a specific wizard step (e.g. Line Items)
+  const startStepParam = parseInt(searchParams.get('step') ?? '0', 10);
+  const initialStep = Number.isFinite(startStepParam) && startStepParam > 0 ? startStepParam : 0;
+
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [currentEstimateIndex, setCurrentEstimateIndex] = useState(0);
-  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [currentStepIndex, setCurrentStepIndex] = useState(initialStep);
   const [estimates, setEstimates] = useState<Estimate[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [estimateDataMap, setEstimateDataMap] = useState<Map<string, EstimateData>>(new Map());
@@ -84,6 +116,20 @@ export default function EstimateWizardPage() {
   const [completedEstimates, setCompletedEstimates] = useState<Set<number>>(new Set());
   const [extractedCustomer, setExtractedCustomer] = useState<ExtractedCustomerData | null>(null);
   const [showPreview, setShowPreview] = useState(true);
+  const [fieldDefinitions, setFieldDefinitions] = useState<FieldDefinition[]>([]);
+  const [openingsByEstimate, setOpeningsByEstimate] = useState<Map<string, EstimateOpeningWithItems[]>>(new Map());
+
+  // Add Item dialog state
+  const [addItemDialogOpen, setAddItemDialogOpen] = useState(false);
+  const [addItemMode, setAddItemMode] = useState<'existing' | 'new'>('existing');
+  const [itemTypes, setItemTypes] = useState<ItemType[]>([]);
+  const [itemTypesLoading, setItemTypesLoading] = useState(false);
+  const [selectedItemType, setSelectedItemType] = useState<ItemType | null>(null);
+  const [itemTypePopoverOpen, setItemTypePopoverOpen] = useState(false);
+  const [newItemLabel, setNewItemLabel] = useState('');
+  const [newItemCode, setNewItemCode] = useState('');
+  const [newItemQuantity, setNewItemQuantity] = useState(1);
+  const [addingItem, setAddingItem] = useState(false);
 
   const currentEstimate = estimates[currentEstimateIndex];
   const currentData = currentEstimate ? estimateDataMap.get(currentEstimate.id) : null;
@@ -143,19 +189,36 @@ export default function EstimateWizardPage() {
         setEstimateDataMap(dataMap);
         setFileUrls(urlMap);
 
-        // Load companies from Supabase
+        // Load openings for all estimates
         try {
-          const { data: companiesData } = await supabase
-            .from('companies')
-            .select('*')
-            .eq('active', true)
-            .order('name');
-
-          if (companiesData && companiesData.length > 0) {
-            setCompanies(companiesData.map(mapCompanyRow));
-          }
+          const openingsMap = new Map<string, EstimateOpeningWithItems[]>();
+          await Promise.all(
+            loadedEstimates.map(async (est) => {
+              const estimateOpenings = await getEstimateOpenings(est.id);
+              if (estimateOpenings.length > 0) {
+                openingsMap.set(est.id, estimateOpenings);
+              }
+            })
+          );
+          setOpeningsByEstimate(openingsMap);
         } catch {
-          console.warn('Could not load companies from Supabase');
+          console.warn('Could not load openings');
+        }
+
+        // Load companies and field definitions in parallel
+        try {
+          const [companiesResult, fieldDefsResult] = await Promise.all([
+            supabase.from('companies').select('*').eq('active', true).order('name'),
+            getFieldDefinitions('approved'),
+          ]);
+
+          if (companiesResult.data && companiesResult.data.length > 0) {
+            setCompanies(companiesResult.data.map(mapCompanyRow));
+          }
+
+          setFieldDefinitions(fieldDefsResult);
+        } catch {
+          console.warn('Could not load companies or field definitions from Supabase');
         }
 
         // Build extracted customer data from the first estimate's OCR results
@@ -363,6 +426,118 @@ export default function EstimateWizardPage() {
     });
   };
 
+  const resetAddItemDialog = () => {
+    setAddItemMode('existing');
+    setSelectedItemType(null);
+    setItemTypePopoverOpen(false);
+    setNewItemLabel('');
+    setNewItemCode('');
+    setNewItemQuantity(1);
+  };
+
+  const handleAddItem = async () => {
+    setAddItemDialogOpen(true);
+    setItemTypesLoading(true);
+    try {
+      const types = await getItemTypes();
+      setItemTypes(types);
+    } catch {
+      // Non-fatal — fall back to empty list so user can still create manually
+    } finally {
+      setItemTypesLoading(false);
+    }
+  };
+
+  const handleConfirmAddItem = async () => {
+    if (!currentEstimate) return;
+    setAddingItem(true);
+    try {
+      let itemLabel: string;
+      let canonicalCode: string | undefined;
+      let quantity: number;
+
+      if (addItemMode === 'existing' && selectedItemType) {
+        itemLabel = selectedItemType.itemLabel;
+        canonicalCode = selectedItemType.canonicalCode;
+        quantity = 1;
+      } else {
+        if (!newItemLabel.trim()) return;
+        itemLabel = newItemLabel.trim();
+        canonicalCode = newItemCode.trim() || undefined;
+        quantity = newItemQuantity || 1;
+      }
+
+      const currentItems = estimateDataMap.get(currentEstimate.id)?.lineItems ?? [];
+      const newItem = await apiAddEstimateItem(currentEstimate.id, {
+        itemLabel,
+        canonicalCode,
+        quantity,
+        sortOrder: currentItems.length,
+      });
+
+      setEstimateDataMap((prev) => {
+        const next = new Map(prev);
+        const data = next.get(currentEstimate.id);
+        if (data) {
+          next.set(currentEstimate.id, {
+            ...data,
+            lineItems: [...data.lineItems, { ...newItem, fields: [] }],
+          });
+        }
+        return next;
+      });
+
+      setAddItemDialogOpen(false);
+      resetAddItemDialog();
+    } catch {
+      toast({ title: 'Error', description: 'Failed to add line item.', variant: 'destructive' });
+    } finally {
+      setAddingItem(false);
+    }
+  };
+
+  const handleDeleteItem = (itemId: string) => {
+    if (!currentEstimate) return;
+
+    setEstimateDataMap((prev) => {
+      const next = new Map(prev);
+      const data = next.get(currentEstimate.id);
+      if (data) {
+        next.set(currentEstimate.id, {
+          ...data,
+          lineItems: data.lineItems.filter((item) => item.id !== itemId),
+        });
+      }
+      return next;
+    });
+
+    apiDeleteEstimateItem(itemId).catch(() => {
+      toast({ title: 'Error', description: 'Failed to delete line item.', variant: 'destructive' });
+    });
+  };
+
+  const handleMoveToOpening = (itemId: string, openingId: string | null) => {
+    if (!currentEstimate) return;
+
+    setEstimateDataMap((prev) => {
+      const next = new Map(prev);
+      const data = next.get(currentEstimate.id);
+      if (data) {
+        next.set(currentEstimate.id, {
+          ...data,
+          lineItems: data.lineItems.map((item) =>
+            item.id === itemId ? { ...item, openingId } : item
+          ),
+        });
+      }
+      return next;
+    });
+
+    apiUpdateEstimateItem(itemId, { openingId }).catch(() => {
+      toast({ title: 'Error', description: 'Failed to move item to opening.', variant: 'destructive' });
+    });
+  };
+
   const handleFinishCurrentEstimate = async () => {
     if (!currentEstimate || !currentData) return;
 
@@ -435,6 +610,11 @@ export default function EstimateWizardPage() {
     navigate('/app/estimates');
   };
 
+  const handleManageOpenings = () => {
+    if (!currentEstimate) return;
+    navigate(`/app/estimates/create?id=${currentEstimate.id}&step=1`);
+  };
+
   // Loading state
   if (loading) {
     return (
@@ -472,8 +652,195 @@ export default function EstimateWizardPage() {
   const isLastEstimate = currentEstimateIndex === estimates.length - 1;
   const previewLabel = currentEstimate.fileType === 'image' ? 'Image' : 'PDF';
 
+  const isConfirmDisabled =
+    addingItem ||
+    (addItemMode === 'existing' && !selectedItemType) ||
+    (addItemMode === 'new' && !newItemLabel.trim());
+
   return (
     <div className="flex h-full overflow-hidden">
+      {/* Add Line Item Dialog */}
+      <Dialog
+        open={addItemDialogOpen}
+        onOpenChange={(open) => {
+          setAddItemDialogOpen(open);
+          if (!open) resetAddItemDialog();
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="font-display text-2xl">Add Line Item</DialogTitle>
+            <DialogDescription>
+              Select an existing item from your catalog or create a new one from scratch.
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Mode toggle */}
+          <div className="flex gap-1 p-0.5 rounded-md bg-muted w-fit mt-1">
+            <button
+              type="button"
+              className={cn(
+                'px-3 py-1.5 rounded text-sm font-medium transition-colors',
+                addItemMode === 'existing'
+                  ? 'bg-background shadow-sm text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+              onClick={() => setAddItemMode('existing')}
+            >
+              Select existing
+            </button>
+            <button
+              type="button"
+              className={cn(
+                'px-3 py-1.5 rounded text-sm font-medium transition-colors',
+                addItemMode === 'new'
+                  ? 'bg-background shadow-sm text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+              onClick={() => setAddItemMode('new')}
+            >
+              Create new
+            </button>
+          </div>
+
+          {/* Existing item picker */}
+          {addItemMode === 'existing' && (
+            <div className="space-y-3 mt-2">
+              <div className="space-y-1.5">
+                <Label>Item</Label>
+                <Popover open={itemTypePopoverOpen} onOpenChange={setItemTypePopoverOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      className="w-full justify-between font-normal"
+                      disabled={itemTypesLoading}
+                    >
+                      <span className="truncate">
+                        {itemTypesLoading
+                          ? 'Loading items…'
+                          : selectedItemType
+                          ? selectedItemType.itemLabel
+                          : 'Search items…'}
+                      </span>
+                      {itemTypesLoading ? (
+                        <Loader2 className="ml-2 h-4 w-4 shrink-0 animate-spin opacity-50" />
+                      ) : (
+                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      )}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-full p-0" align="start">
+                    <Command>
+                      <CommandInput placeholder="Search items…" className="h-9" />
+                      <CommandList>
+                        <CommandEmpty>No items found.</CommandEmpty>
+                        <CommandGroup>
+                          {itemTypes.map((it) => (
+                            <CommandItem
+                              key={it.canonicalCode}
+                              value={`${it.itemLabel} ${it.canonicalCode}`}
+                              onSelect={() => {
+                                setSelectedItemType(it);
+                                setItemTypePopoverOpen(false);
+                              }}
+                            >
+                              <Check
+                                className={cn(
+                                  'mr-2 h-4 w-4',
+                                  selectedItemType?.canonicalCode === it.canonicalCode
+                                    ? 'opacity-100'
+                                    : 'opacity-0'
+                                )}
+                              />
+                              <div className="flex flex-col">
+                                <span className="text-sm">{it.itemLabel}</span>
+                                <span className="text-[11px] font-mono text-muted-foreground">
+                                  {it.canonicalCode}
+                                  <span className="ml-2 non-mono font-sans">
+                                    · {it.usageCount} {it.usageCount === 1 ? 'use' : 'uses'}
+                                  </span>
+                                </span>
+                              </div>
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+
+              {selectedItemType && (
+                <div className="rounded-md bg-muted/50 border px-3 py-2.5 text-sm space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Code</span>
+                    <span className="font-mono text-xs">{selectedItemType.canonicalCode}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Usage</span>
+                    <span>{selectedItemType.usageCount} {selectedItemType.usageCount === 1 ? 'time' : 'times'}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* New item form */}
+          {addItemMode === 'new' && (
+            <div className="space-y-3 mt-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="review-new-item-label">Item Label <span className="text-destructive">*</span></Label>
+                <Input
+                  id="review-new-item-label"
+                  placeholder="e.g. Hollow Metal Door"
+                  value={newItemLabel}
+                  onChange={(e) => setNewItemLabel(e.target.value)}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="review-new-item-code">Canonical Code</Label>
+                  <Input
+                    id="review-new-item-code"
+                    placeholder="e.g. HMD-3070"
+                    value={newItemCode}
+                    onChange={(e) => setNewItemCode(e.target.value)}
+                    className="font-mono"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="review-new-item-qty">Quantity</Label>
+                  <Input
+                    id="review-new-item-qty"
+                    type="number"
+                    min={1}
+                    value={newItemQuantity}
+                    onChange={(e) => setNewItemQuantity(parseInt(e.target.value) || 1)}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="mt-4">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setAddItemDialogOpen(false);
+                resetAddItemDialog();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleConfirmAddItem} disabled={isConfirmDisabled}>
+              {addingItem && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Add Item
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Main Content — independently scrollable left panel */}
       <div
         className={cn(
@@ -572,6 +939,12 @@ export default function EstimateWizardPage() {
                     ? `Save ${estimates.length > 1 ? 'All ' : ''}as Draft${estimates.length > 1 ? 's' : ''}`
                     : `Save & Next (${currentEstimateIndex + 2}/${estimates.length})`
                 }
+                onAddItem={handleAddItem}
+                onDeleteItem={handleDeleteItem}
+                fieldDefinitions={fieldDefinitions}
+                openings={currentEstimate ? openingsByEstimate.get(currentEstimate.id) : undefined}
+                onMoveToOpening={handleMoveToOpening}
+                onManageOpenings={handleManageOpenings}
               />
             </>
           )}

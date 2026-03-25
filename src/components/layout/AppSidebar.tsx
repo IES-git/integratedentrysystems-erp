@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft, Boxes } from 'lucide-react';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/sidebar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -32,6 +32,11 @@ const navigation = [
     title: 'Estimates',
     href: '/app/estimates',
     icon: FileText
+  },
+  {
+    title: 'Items',
+    href: '/app/items',
+    icon: Boxes
   },
   {
     title: 'Quotes',

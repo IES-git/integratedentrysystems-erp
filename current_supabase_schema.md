@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-03-09 (company_type, manufacturer_id, field_value_options)
+Last updated: 2026-03-25 (blocked_field_labels table; auto-blocking of pending_review fields on delete from Items page; edge function v22 with blocked field exclusion in Pass 2 prompts and post-extraction safety filter)
 
 ## Authentication Status
 
@@ -66,6 +66,68 @@ The "learning" table that grows as Gemini discovers new field types during estim
 
 **Triggers:**
 - `set_field_definitions_updated_at` - Automatically updates updated_at timestamp
+
+### public.blocked_field_labels
+
+Stores field labels that the AI (Gemini Edge Function) should never extract or add to estimates. Populated automatically when a `pending_review` field definition is deleted from the Items management page.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `field_label` (TEXT, NOT NULL, UNIQUE on lower(field_label)) - The display label to block (e.g., "Gauge", "Hinge Prep")
+- `field_key` (TEXT, NULLABLE) - The field_key from field_definitions if known
+- `field_definition_id` (UUID, NULLABLE, FK → field_definitions.id ON DELETE SET NULL) - Reference to the source field definition
+- `blocked_by_user_id` (UUID, NULLABLE, FK → auth.users.id ON DELETE SET NULL) - User who triggered the block
+- `notes` (TEXT, NULLABLE) - Optional notes about why this field was blocked
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - When the block was created
+
+**Indexes:**
+- `idx_blocked_field_labels_label` UNIQUE on lower(field_label) - Prevents duplicate blocks
+- `idx_blocked_field_labels_field_key` on field_key - Fast lookup by field key for the Edge Function
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read blocked field labels` - All authenticated users can SELECT
+- `Admins can insert blocked field labels` - Only admins can INSERT
+- `Admins can delete blocked field labels` - Only admins can DELETE (unblock)
+
+**Usage:**
+- The `process-estimate` Edge Function should query this table and exclude any matching labels from extraction output.
+- When a `pending_review` field is deleted from the Items page, the app automatically inserts a row here.
+- Users can remove entries from the blocked list (unblock) via the Items page UI.
+
+### public.manufacturer_field_labels
+
+Maps manufacturer-specific field terminology to master field definitions. Allows Gemini to normalize labels like "Width" → `opening_width` using manufacturer-specific aliases during extraction.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `field_definition_id` (UUID, NOT NULL, FK → field_definitions.id ON DELETE CASCADE) - The master field this alias maps to
+- `manufacturer_id` (UUID, NULLABLE, FK → companies.id ON DELETE CASCADE) - The manufacturer this alias applies to; NULL means generic alias (no specific manufacturer)
+- `manufacturer_field_label` (TEXT, NOT NULL) - The label as it appears in the manufacturer's document (e.g., "Width", "Ht")
+- `status` (TEXT, NOT NULL, DEFAULT 'pending') - Approval status: `'pending'` or `'approved'`. New aliases start as pending (shown in yellow). Approved aliases shown in green.
+- `notes` (TEXT) - Optional notes about this alias
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
+- `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
+
+**Check Constraint:**
+- `status IN ('pending', 'approved')`
+
+**Unique Constraint:**
+- `UNIQUE (field_definition_id, manufacturer_id, manufacturer_field_label)`
+
+**Indexes:**
+- `idx_manufacturer_field_labels_field_definition_id` on field_definition_id
+- `idx_manufacturer_field_labels_manufacturer_id` on manufacturer_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read manufacturer field labels` - All authenticated users can SELECT
+- `Authenticated users can insert manufacturer field labels` - All authenticated users can INSERT
+- `Authenticated users can update manufacturer field labels` - All authenticated users can UPDATE
+- `Authenticated users can delete manufacturer field labels` - All authenticated users can DELETE
+
+**Triggers:**
+- `set_manufacturer_field_labels_updated_at` - Automatically updates updated_at timestamp
 
 ### public.companies
 
@@ -188,6 +250,34 @@ Main estimate record from uploaded files.
 **Triggers:**
 - `set_estimates_updated_at` - Automatically updates updated_at timestamp
 
+### public.estimate_openings
+
+Groups of estimate items (doors/frames + hardware) within an estimate. Each opening has a name and a quantity multiplier.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `estimate_id` (UUID, NOT NULL) - FK to estimates.id, CASCADE on delete
+- `name` (TEXT, NOT NULL, DEFAULT 'Opening 1') - Display name for the opening
+- `quantity` (INTEGER, NOT NULL, DEFAULT 1) - How many times this opening repeats
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order within the estimate
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
+- `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
+
+**Indexes:**
+- `idx_estimate_openings_estimate_id` on estimate_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read estimate openings` - Users can SELECT openings they own via estimate ownership check (or admins)
+- `Users can insert openings for their own estimates` - Users can INSERT openings for their own estimates
+- `Users can update openings for their own estimates` - Users can UPDATE openings they own (or admins)
+- `Users can delete openings for their own estimates` - Users can DELETE openings they own (or admins)
+
+**Triggers:**
+- `set_estimate_openings_updated_at` - Automatically updates updated_at timestamp
+
+---
+
 ### public.estimate_items
 
 Line items extracted from estimates.
@@ -201,12 +291,16 @@ Line items extracted from estimates.
 - `unit_price` (NUMERIC, DEFAULT NULL) - Unit price per item extracted from document
 - `sort_order` (INTEGER, DEFAULT 0) - Display order
 - `manufacturer_id` (UUID, nullable) - FK to companies.id, SET NULL on delete — the manufacturer associated with this line item
+- `opening_id` (UUID, nullable) - FK to estimate_openings.id, SET NULL on delete — the opening this item belongs to
+- `parent_item_id` (UUID, nullable) - FK to estimate_items.id, CASCADE on delete — for hardware items, points to the parent door or frame item
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
 **Indexes:**
 - `idx_estimate_items_estimate_id` on estimate_id
 - `idx_estimate_items_sort_order` on (estimate_id, sort_order)
 - `idx_estimate_items_manufacturer_id` on manufacturer_id
+- `idx_estimate_items_opening_id` on opening_id
+- `idx_estimate_items_parent_item_id` on parent_item_id
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
@@ -514,6 +608,37 @@ Tracks previously used values for each field definition, enabling smart dropdown
 
 ---
 
+### public.item_type_fields
+
+Junction table that explicitly associates field definitions with item types (identified by `canonical_code`) and stores a required flag. Used by the Item Management page to manage per-item-type field associations and by the estimate wizard to auto-insert required fields.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `canonical_code` (TEXT, NOT NULL) - The standardized item code (e.g., 'frames', 'hinges') — groups estimate items into item types
+- `field_definition_id` (UUID, NOT NULL) - FK to field_definitions.id, CASCADE on delete
+- `is_required` (BOOLEAN, NOT NULL, DEFAULT false) - Whether this field is required for this item type
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
+
+**Constraints:**
+- `item_type_fields_canonical_code_field_definition_id_key` UNIQUE on `(canonical_code, field_definition_id)`
+
+**Indexes:**
+- `idx_item_type_fields_canonical_code` on canonical_code
+- `idx_item_type_fields_field_definition_id` on field_definition_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type fields` - All authenticated users can SELECT
+- `Authenticated users can insert item type fields` - All authenticated users can INSERT
+- `Authenticated users can update item type fields` - All authenticated users can UPDATE
+- `Authenticated users can delete item type fields` - All authenticated users can DELETE
+
+**Triggers:**
+- `set_item_type_fields_updated_at` - Automatically updates updated_at timestamp
+
+---
+
 ## Migrations Applied
 
 1. `create_users_table_with_rls` - Initial users table creation with RLS policies
@@ -537,6 +662,11 @@ Tracks previously used values for each field definition, enabling smart dropdown
 19. `add_company_type_and_manufacturer_id` - Added `company_type` column (TEXT CHECK 'customer'|'manufacturer'|'both') to companies; added `manufacturer_id` FK column to estimate_items referencing companies
 20. `create_field_value_options_table` - Created field_value_options table for tracking historical field values per field_definition with usage counts and RLS policies
 21. `create_upsert_field_value_option_rpc` - Created `upsert_field_value_option(p_field_definition_id, p_value)` RPC function used by the API layer to atomically increment usage counts
+22. `create_item_type_fields_table` - Created `item_type_fields` junction table linking canonical_code (item types) to field_definitions with is_required flag; indexes, updated_at trigger, and full authenticated RLS policies
+23. `create_estimate_openings_table` - Created `estimate_openings` table for grouping estimate items into named openings with a quantity multiplier; indexes, updated_at trigger, and RLS policies scoped via estimate ownership
+24. `add_opening_id_to_estimate_items` - Added `opening_id` FK column (nullable, SET NULL on delete) to `estimate_items` referencing `estimate_openings`; index on opening_id
+25. `add_parent_item_id_to_estimate_items` - Added `parent_item_id` FK column (nullable, CASCADE on delete) to `estimate_items` self-referencing for hardware child items under a door or frame; index on parent_item_id
+26. `create_manufacturer_field_labels_table` - Created `manufacturer_field_labels` table mapping manufacturer-specific field terminology (e.g., "Width" for CECO) to master `field_definitions`; FK to `field_definitions` (CASCADE) and nullable FK to `companies`; unique on `(field_definition_id, manufacturer_id, manufacturer_field_label)`; indexes, updated_at trigger, and full authenticated RLS policies
 
 ## Edge Functions
 
@@ -548,31 +678,51 @@ Serverless Edge Function that processes uploaded estimate files using Gemini 3 F
 - `slug`: process-estimate
 - `verify_jwt`: false (JWT verification disabled - function uses service role key internally)
 - `status`: ACTIVE
-- `version`: 3 (updated 2026-02-09 to extract pricing information)
+- `version`: 21 (updated 2026-03-24 — three-pass extraction: added manufacturer alias hints in Pass 2 and Pass 3 for AI-based opening grouping)
 
 **Request:**
 - Method: POST
 - Body: `{ "estimateId": "uuid" }`
 - Authorization: Handled by frontend Supabase client session
 
+**Three-Pass Architecture:**
+
+The function uses a three-pass strategy to extract all items with full field coverage and automatically group them into openings within the 150-second edge function timeout:
+
+- **Pass 1** (one call, `maxOutputTokens: 8192`): Identifies all line items — label, code, quantity, unit price, manufacturer only. Fast (~10s).
+- **Pass 2** (parallel calls, `maxOutputTokens: 12288` each): Splits items into batches of 10, runs all batches in parallel via `Promise.all`. Each batch extracts all spec fields for its 10 items. Includes **manufacturer alias hints** — aliases from `manufacturer_field_labels` are injected into the prompt so Gemini normalizes non-standard labels (e.g., "W" → `opening_width`) to the master field key. Runs concurrently (~70–90s for the slowest batch).
+- **Pass 3** (text-only call, `maxOutputTokens: 4096`, ~5s): Groups the merged item list into physical openings. Gemini receives all items categorized as `[door]`, `[frame]`, or `[hardware]` along with their dimension fields, and returns an opening grouping (door labels + frame labels + hardware labels per opening). Pass 3 failure is non-fatal — if it fails, extraction continues without opening assignments.
+- **Merge**: Pass 1 item metadata is merged with Pass 2 field arrays matched by item label (case-insensitive).
+- Both PDF passes include **partial JSON recovery** — if a batch response is truncated, completed item objects are salvaged from the partial JSON.
+
 **Flow:**
 1. Reads the estimate record from `estimates` table
 2. Updates `ocr_status` to `processing`
 3. Downloads the file from `estimate-files` storage bucket
-4. Queries all `field_definitions` (approved ones sent to Gemini as known fields)
-5. Calls Gemini 3 Flash (`gemini-3-flash-preview`) with:
-   - File as inline base64 data
-   - Code execution tool enabled (Agentic Vision for zooming/inspecting)
-   - Structured JSON output via `responseJsonSchema`
-   - Extraction prompt with known field definitions and pricing instructions
-6. Inserts extracted `estimate_items` (including `unit_price`) and `item_fields` rows
-7. Creates new `field_definitions` with `status = 'pending_review'` for discovered fields
-8. Updates estimate with `ocr_status = 'done'`, extracted customer info, `total_price`, and `extracted_at` timestamp
-9. On error: sets `ocr_status = 'error'` and `ocr_error` message
+4. Queries `field_definitions` and `manufacturer_field_labels` (with company joins) in parallel
+5. **Pass 1**: Gemini identifies all line items (labels, codes, quantities, prices, manufacturers)
+6. **Pass 2**: Parallel Gemini calls extract all spec fields for each batch of 10 items, using manufacturer alias hints to normalize terminology
+7. **Pass 3**: Text-only Gemini call groups doors/frames/hardware into physical openings
+8. Merges pass results into full `ExtractedItem[]` list
+9. **Batched DB inserts**:
+   - Manufacturers resolved in parallel via cache
+   - All new `field_definitions` batch-upserted in one call (on conflict: `field_key`)
+   - All `estimate_items` batch-inserted in a single call
+   - All `item_fields` batch-inserted in chunks of 200 rows
+   - `estimate_openings` records created from Pass 3 groupings
+   - `estimate_items.opening_id` and `parent_item_id` updated in batch via `.in()` queries
+10. Updates estimate with `ocr_status = 'done'`, extracted customer info, `total_price`, and `extracted_at` timestamp
+11. On error: sets `ocr_status = 'error'` and `ocr_error` message
+
+**Timing (37-item document):** ~120–145s total — within the 150s limit.
+- Pass 1: ~10s
+- Pass 2 (4 parallel batches): ~90s
+- Pass 3 (text-only, opening grouping): ~5s
+- Batch DB inserts (items + fields + openings): ~10s
 
 **Response:**
 ```json
-{ "success": true, "estimateId": "uuid", "itemCount": 5, "newFieldsDiscovered": 3 }
+{ "success": true, "estimateId": "uuid", "itemCount": 5, "newFieldsDiscovered": 3, "openingsCreated": 2 }
 ```
 
 **Required Secrets:**

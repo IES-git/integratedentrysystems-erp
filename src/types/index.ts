@@ -102,11 +102,33 @@ export interface EstimateItem {
   unitPrice: number | null;
   sortOrder?: number;
   manufacturerId: string | null;
+  openingId?: string | null;
+  parentItemId?: string | null;
   createdAt: string;
+}
+
+export interface EstimateItemWithHardware extends EstimateItem {
+  hardware: EstimateItem[];
+}
+
+export interface EstimateOpening {
+  id: string;
+  estimateId: string;
+  name: string;
+  quantity: number;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EstimateOpeningWithItems extends EstimateOpening {
+  items: EstimateItemWithHardware[];
 }
 
 export interface EstimateWithItems extends Estimate {
   items: Pick<EstimateItem, 'id' | 'canonicalCode' | 'itemLabel'>[];
+  createdByUserName?: string | null;
+  openingsCount?: number;
 }
 
 export interface FieldValueOption {
@@ -135,6 +157,21 @@ export interface ItemField {
 // Field Definition Types
 export type FieldDefinitionStatus = 'approved' | 'pending_review';
 
+export type ManufacturerFieldLabelStatus = 'pending' | 'approved';
+
+export interface ManufacturerFieldLabel {
+  id: string;
+  fieldDefinitionId: string;
+  manufacturerId: string | null;
+  manufacturerFieldLabel: string;
+  status: ManufacturerFieldLabelStatus;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  // joined
+  manufacturer?: Pick<Company, 'id' | 'name'>;
+}
+
 export interface FieldDefinition {
   id: string;
   fieldKey: string;
@@ -145,6 +182,45 @@ export interface FieldDefinition {
   usageCount: number;
   createdAt: string;
   updatedAt: string;
+  // joined
+  aliases?: ManufacturerFieldLabel[];
+}
+
+export interface BlockedFieldLabel {
+  id: string;
+  fieldLabel: string;
+  fieldKey: string | null;
+  fieldDefinitionId: string | null;
+  blockedByUserId: string | null;
+  notes: string | null;
+  createdAt: string;
+}
+
+// Item Management Types
+export type ItemCategory = 'doors' | 'frames' | 'hardware';
+
+export interface ItemType {
+  /** Primary (most-used) canonical code for this item group — used for field management */
+  canonicalCode: string;
+  /** All canonical codes that belong to this item group */
+  canonicalCodes: string[];
+  itemLabel: string;
+  usageCount: number;
+  category: ItemCategory;
+  series?: string;
+  material?: string;
+  openingWidth?: string;
+  openingHeight?: string;
+}
+
+export interface ItemTypeField {
+  id: string;
+  canonicalCode: string;
+  fieldDefinitionId: string;
+  isRequired: boolean;
+  createdAt: string;
+  updatedAt: string;
+  fieldDefinition?: FieldDefinition;
 }
 
 // Template Types

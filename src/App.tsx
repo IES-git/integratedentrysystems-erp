@@ -26,6 +26,7 @@ import TemplatesPage from "@/pages/TemplatesPage";
 import AdminUsersPage from "@/pages/AdminUsersPage";
 import AdminIntegrationsPage from "@/pages/AdminIntegrationsPage";
 import AdminFieldDefinitionsPage from "@/pages/AdminFieldDefinitionsPage";
+import ItemManagementPage from "@/pages/ItemManagementPage";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -73,8 +74,11 @@ const App = () => (
                 {/* Orders */}
                 <Route path="orders" element={<OrdersPage />} />
                 
-                {/* Templates */}
-                <Route path="templates" element={<TemplatesPage />} />
+                  {/* Items */}
+                  <Route path="items" element={<ItemManagementPage />} />
+
+                  {/* Templates */}
+                  <Route path="templates" element={<TemplatesPage />} />
                 
                 {/* Admin */}
                 <Route path="admin/users" element={<AdminUsersPage />} />
