@@ -284,7 +284,7 @@ Line items extracted from estimates.
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
-- `estimate_id` (UUID, NOT NULL) - FK to estimates.id, CASCADE on delete
+- `estimate_id` (UUID, nullable) - FK to estimates.id, SET NULL on delete
 - `item_label` (TEXT, NOT NULL) - Item description/label
 - `canonical_code` (TEXT) - Standardized product code
 - `quantity` (INTEGER, DEFAULT 1) - Item quantity

@@ -1525,20 +1525,31 @@ export async function addBlockedFieldLabel(input: {
 }): Promise<BlockedFieldLabel> {
   const { data, error } = await supabase
     .from('blocked_field_labels')
-    .upsert(
-      {
-        field_label: input.fieldLabel,
-        field_key: input.fieldKey ?? null,
-        field_definition_id: input.fieldDefinitionId ?? null,
-        blocked_by_user_id: input.blockedByUserId ?? null,
-        notes: input.notes ?? null,
-      },
-      { onConflict: 'field_label', ignoreDuplicates: false }
-    )
+    .insert({
+      field_label: input.fieldLabel,
+      field_key: input.fieldKey ?? null,
+      field_definition_id: input.fieldDefinitionId ?? null,
+      blocked_by_user_id: input.blockedByUserId ?? null,
+      notes: input.notes ?? null,
+    })
     .select()
     .single();
 
-  if (error) throw new Error(`Failed to block field label: ${error.message}`);
+  if (error) {
+    // Unique constraint violation (field_label already blocked) — fetch and return existing row
+    if (error.code === '23505') {
+      const { data: existing, error: fetchError } = await supabase
+        .from('blocked_field_labels')
+        .select()
+        .ilike('field_label', input.fieldLabel)
+        .single();
+      if (fetchError) throw new Error(`Failed to block field label: ${fetchError.message}`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return mapBlockedFieldLabelRow(existing as any);
+    }
+    throw new Error(`Failed to block field label: ${error.message}`);
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mapBlockedFieldLabelRow(data as any);
 }

@@ -95,7 +95,7 @@ export interface Estimate {
 
 export interface EstimateItem {
   id: string;
-  estimateId: string;
+  estimateId: string | null;
   itemLabel: string;
   canonicalCode: string;
   quantity: number;

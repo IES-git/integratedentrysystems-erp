@@ -284,7 +284,9 @@ export default function ItemManagementPage() {
         fieldLabel: alias.manufacturerFieldLabel,
         fieldDefinitionId: alias.fieldDefinitionId,
       });
-      setBlockedLabels((prev) => [blocked, ...prev]);
+      setBlockedLabels((prev) =>
+        prev.some((b) => b.id === blocked.id) ? prev : [blocked, ...prev]
+      );
       toast({
         title: 'Alias removed & blocked',
         description: `"${alias.manufacturerFieldLabel}" has been added to the blocked list.`,
@@ -526,7 +528,9 @@ export default function ItemManagementPage() {
           fieldKey: field.fieldDefinition.fieldKey,
           fieldDefinitionId: field.fieldDefinition.id,
         });
-        setBlockedLabels((prev) => [blocked, ...prev]);
+        setBlockedLabels((prev) =>
+          prev.some((b) => b.id === blocked.id) ? prev : [blocked, ...prev]
+        );
         toast({
           title: 'Field removed & blocked',
           description: `"${field.fieldDefinition.fieldLabel}" has been added to the blocked list. The AI will not extract this field in future estimates.`,

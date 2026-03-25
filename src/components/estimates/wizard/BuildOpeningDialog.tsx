@@ -695,10 +695,20 @@ export function BuildOpeningDialog({
               isRequired: rf.isRequired,
             }));
 
+          const descriptionCodeKey =
+            category === 'doors' ? 'door_description_code' : 'frame_description';
+          const descriptionField = fields.find((f) => f.fieldKey === descriptionCodeKey);
+          const derivedLabel = descriptionField?.fieldValue || undefined;
+
           const updater = (prev: LocalTopLevelItem[]) =>
             prev.map((i) =>
               i.localId === localId
-                ? { ...i, fields, loadingFields: false }
+                ? {
+                    ...i,
+                    fields,
+                    loadingFields: false,
+                    ...(derivedLabel ? { itemLabel: derivedLabel } : {}),
+                  }
                 : i
             );
 
@@ -835,12 +845,19 @@ export function BuildOpeningDialog({
   };
 
   const handleUpdateField = (itemLocalId: string, fieldLocalId: string, value: string) => {
-    updateItemInBoth(itemLocalId, (item) => ({
-      ...item,
-      fields: item.fields.map((f) =>
-        f.localId === fieldLocalId ? { ...f, fieldValue: value } : f
-      ),
-    }));
+    updateItemInBoth(itemLocalId, (item) => {
+      const descriptionCodeKey =
+        item.category === 'doors' ? 'door_description_code' : 'frame_description';
+      const changedField = item.fields.find((f) => f.localId === fieldLocalId);
+      const isDescriptionCodeField = changedField?.fieldKey === descriptionCodeKey;
+      return {
+        ...item,
+        ...(isDescriptionCodeField && value ? { itemLabel: value } : {}),
+        fields: item.fields.map((f) =>
+          f.localId === fieldLocalId ? { ...f, fieldValue: value } : f
+        ),
+      };
+    });
   };
 
   const handleDeleteField = (itemLocalId: string, fieldLocalId: string) => {
