@@ -116,7 +116,7 @@ export async function getQuote(id: string): Promise<Quote | null> {
  */
 export async function getQuoteWithItems(id: string): Promise<{
   quote: Quote;
-  items: (QuoteItem & { fields: ItemField[] })[];
+  items: (QuoteItem & { fields: ItemField[]; parentItemId: string | null; subcategory: string | null })[];
 } | null> {
   const { data: quoteRow, error: quoteError } = await supabase
     .from('quotes')
@@ -146,33 +146,48 @@ export async function getQuoteWithItems(id: string): Promise<{
     .filter(Boolean) as string[];
 
   let fieldsByEstimateItemId: Record<string, ItemField[]> = {};
+  let estimateItemMetaById: Record<string, { parentItemId: string | null; subcategory: string | null }> = {};
 
   if (estimateItemIds.length > 0) {
-    const { data: fieldRows, error: fieldsError } = await supabase
-      .from('item_fields')
-      .select('*')
-      .in('estimate_item_id', estimateItemIds);
+    const [fieldRes, metaRes] = await Promise.all([
+      supabase.from('item_fields').select('*').in('estimate_item_id', estimateItemIds),
+      supabase
+        .from('estimate_items')
+        .select('id, parent_item_id, subcategory')
+        .in('id', estimateItemIds),
+    ]);
 
-    if (fieldsError) {
-      throw new Error(`Failed to fetch item fields: ${fieldsError.message}`);
+    if (fieldRes.error) {
+      throw new Error(`Failed to fetch item fields: ${fieldRes.error.message}`);
     }
 
-    fieldsByEstimateItemId = (fieldRows ?? []).reduce<
-      Record<string, ItemField[]>
-    >((acc, row) => {
-      const key: string = row.estimate_item_id;
-      if (!acc[key]) acc[key] = [];
-      acc[key].push(mapItemFieldRow(row));
-      return acc;
-    }, {});
+    fieldsByEstimateItemId = (fieldRes.data ?? []).reduce<Record<string, ItemField[]>>(
+      (acc, row) => {
+        const key: string = row.estimate_item_id;
+        if (!acc[key]) acc[key] = [];
+        acc[key].push(mapItemFieldRow(row));
+        return acc;
+      },
+      {}
+    );
+
+    for (const r of metaRes.data ?? []) {
+      estimateItemMetaById[r.id] = {
+        parentItemId: r.parent_item_id ?? null,
+        subcategory: r.subcategory ?? null,
+      };
+    }
   }
 
-  const items = (itemRows ?? []).map((row) => ({
-    ...mapQuoteItemRow(row),
-    fields: row.estimate_item_id
-      ? (fieldsByEstimateItemId[row.estimate_item_id] ?? [])
-      : [],
-  }));
+  const items = (itemRows ?? []).map((row) => {
+    const meta = row.estimate_item_id ? (estimateItemMetaById[row.estimate_item_id] ?? null) : null;
+    return {
+      ...mapQuoteItemRow(row),
+      fields: row.estimate_item_id ? (fieldsByEstimateItemId[row.estimate_item_id] ?? []) : [],
+      parentItemId: meta?.parentItemId ?? null,
+      subcategory: meta?.subcategory ?? null,
+    };
+  });
 
   return { quote: mapQuoteRow(quoteRow), items };
 }

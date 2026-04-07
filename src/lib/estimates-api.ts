@@ -23,6 +23,8 @@ import type {
   ManufacturerFieldLabel,
   ManufacturerFieldLabelStatus,
   BlockedFieldLabel,
+  HardwareCatalogItem,
+  HardwareSubcategory,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -409,6 +411,7 @@ export async function addEstimateItem(
     sortOrder?: number;
     openingId?: string | null;
     parentItemId?: string | null;
+    subcategory?: string | null;
   }
 ): Promise<EstimateItem> {
   const { data, error } = await supabase
@@ -421,6 +424,7 @@ export async function addEstimateItem(
       sort_order: item.sortOrder ?? 0,
       opening_id: item.openingId ?? null,
       parent_item_id: item.parentItemId ?? null,
+      subcategory: item.subcategory ?? null,
     })
     .select()
     .single();
@@ -664,15 +668,35 @@ export async function getEstimateOpenings(
     fields: (row.item_fields ?? []).map(mapItemFieldRow),
   }));
 
-  return (openingsRes.data ?? []).map((openingRow) => {
-    const openingItems = allItems.filter((i) => i.openingId === openingRow.id);
-    const topLevel = openingItems.filter((i) => !i.parentItemId);
-    const itemsWithHardware: EstimateItemWithHardware[] = topLevel.map((item) => ({
-      ...item,
-      hardware: openingItems.filter((i) => i.parentItemId === item.id),
-    }));
-    return { ...mapEstimateOpeningRow(openingRow), items: itemsWithHardware };
-  });
+  return (openingsRes.data ?? []).map((openingRow) => buildOpeningWithItems(openingRow, allItems));
+}
+
+/**
+ * Assemble an EstimateOpeningWithItems from a raw opening row and a flat item list.
+ *
+ * Items with parent_item_id set → legacy hardware nested under their parent door/frame.
+ * Items with parent_item_id = null and subcategory set → opening-level hardware (new style).
+ * Items with parent_item_id = null and subcategory null → door / frame items.
+ */
+function buildOpeningWithItems(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  openingRow: any,
+  allItems: (EstimateItem & { fields: ReturnType<typeof mapItemFieldRow>[] })[]
+): EstimateOpeningWithItems {
+  const openingItems = allItems.filter((i) => i.openingId === openingRow.id);
+
+  // Split top-level items by whether they carry a subcategory (hardware) or not (door/frame)
+  const topLevelItems = openingItems.filter((i) => !i.parentItemId);
+  const doorFrameItems = topLevelItems.filter((i) => !i.subcategory);
+  const openingHardware: EstimateItem[] = topLevelItems.filter((i) => !!i.subcategory);
+
+  // Legacy: hardware stored under a door/frame parent
+  const itemsWithHardware: EstimateItemWithHardware[] = doorFrameItems.map((item) => ({
+    ...item,
+    hardware: openingItems.filter((i) => i.parentItemId === item.id),
+  }));
+
+  return { ...mapEstimateOpeningRow(openingRow), items: itemsWithHardware, hardware: openingHardware };
 }
 
 /**
@@ -702,15 +726,7 @@ export async function listReusableOpenings(): Promise<EstimateOpeningWithItems[]
     fields: (row.item_fields ?? []).map(mapItemFieldRow),
   }));
 
-  return (openingsRes.data ?? []).map((openingRow) => {
-    const openingItems = allItems.filter((i) => i.openingId === openingRow.id);
-    const topLevel = openingItems.filter((i) => !i.parentItemId);
-    const itemsWithHardware: EstimateItemWithHardware[] = topLevel.map((item) => ({
-      ...item,
-      hardware: openingItems.filter((i) => i.parentItemId === item.id),
-    }));
-    return { ...mapEstimateOpeningRow(openingRow), items: itemsWithHardware };
-  });
+  return (openingsRes.data ?? []).map((openingRow) => buildOpeningWithItems(openingRow, allItems));
 }
 
 /**
@@ -786,6 +802,7 @@ export async function copyOpeningToEstimate(
         unit_price: item.unit_price,
         sort_order: item.sort_order,
         manufacturer_id: item.manufacturer_id,
+        subcategory: item.subcategory ?? null,
       })
       .select('id')
       .single();
@@ -827,6 +844,7 @@ export async function copyOpeningToEstimate(
         unit_price: item.unit_price,
         sort_order: item.sort_order,
         manufacturer_id: item.manufacturer_id,
+        subcategory: item.subcategory ?? null,
       })
       .select('id')
       .single();
@@ -1107,12 +1125,17 @@ export async function recordFieldValueUsage(
 export async function getItemTypes(): Promise<ItemType[]> {
   const KEY_FIELDS = ['series', 'material', 'opening_width', 'opening_height'] as const;
 
-  const [itemsResult, keyFieldsResult] = await Promise.all([
+  const [itemsResult, keyFieldsResult, catalogResult] = await Promise.all([
     supabase.from('estimate_items').select('canonical_code, item_label'),
     supabase
       .from('item_fields')
       .select('field_value, field_key, estimate_items!inner(canonical_code)')
       .in('field_key', [...KEY_FIELDS]),
+    supabase
+      .from('hardware_catalog')
+      .select('*')
+      .eq('active', true)
+      .order('sort_order', { ascending: true }),
   ]);
 
   if (itemsResult.error) throw new Error(`Failed to fetch item types: ${itemsResult.error.message}`);
@@ -1207,7 +1230,7 @@ export async function getItemTypes(): Promise<ItemType[]> {
     group.totalUsage += info.usageCount;
   }
 
-  return Array.from(groups.values())
+  const discoveredItems = Array.from(groups.values())
     .map(({ items, totalUsage }) => {
       // Elect the most-used code as the representative for field management
       const primary = items.reduce((a, b) => (b.usageCount > a.usageCount ? b : a));
@@ -1221,9 +1244,27 @@ export async function getItemTypes(): Promise<ItemType[]> {
         material: primary.material,
         openingWidth: primary.openingWidth,
         openingHeight: primary.openingHeight,
-      };
+      } as ItemType;
     })
     .sort((a, b) => b.usageCount - a.usageCount);
+
+  // Merge hardware catalog items into the hardware category, de-duped by canonical_code.
+  // Catalog items that already appear as discovered items are skipped to avoid duplication.
+  const discoveredCodes = new Set(
+    discoveredItems.flatMap((i) => i.canonicalCodes)
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const catalogItems: ItemType[] = (catalogResult.data ?? []).map((row: any) => ({
+    canonicalCode: row.canonical_code,
+    canonicalCodes: [row.canonical_code],
+    itemLabel: row.name,
+    usageCount: 0,
+    category: 'hardware' as ItemCategory,
+    subcategory: row.subcategory as HardwareSubcategory,
+  })).filter((item) => !discoveredCodes.has(item.canonicalCode));
+
+  return [...discoveredItems, ...catalogItems];
 }
 
 /**
@@ -1565,6 +1606,93 @@ export async function removeBlockedFieldLabel(id: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Hardware Catalog
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch hardware catalog items, optionally filtered by subcategory,
+ * ordered by sort_order ascending.
+ * By default only active items are returned; pass `{ includeInactive: true }`
+ * to fetch all items regardless of active status (e.g. for admin management).
+ */
+export async function getHardwareCatalog(
+  subcategory?: HardwareSubcategory,
+  options?: { includeInactive?: boolean }
+): Promise<HardwareCatalogItem[]> {
+  let query = supabase
+    .from('hardware_catalog')
+    .select('*')
+    .order('sort_order', { ascending: true });
+
+  if (!options?.includeInactive) {
+    query = query.eq('active', true);
+  }
+
+  if (subcategory) {
+    query = query.eq('subcategory', subcategory);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Failed to fetch hardware catalog: ${error.message}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (data ?? []).map(mapHardwareCatalogRow);
+}
+
+/** Admin: create a new hardware catalog item. */
+export async function createHardwareCatalogItem(
+  item: Omit<HardwareCatalogItem, 'id'>
+): Promise<HardwareCatalogItem> {
+  const { data, error } = await supabase
+    .from('hardware_catalog')
+    .insert({
+      name: item.name,
+      canonical_code: item.canonicalCode,
+      subcategory: item.subcategory,
+      description: item.description ?? null,
+      active: item.active,
+      sort_order: item.sortOrder,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to create hardware catalog item: ${error.message}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return mapHardwareCatalogRow(data as any);
+}
+
+/** Admin: update fields on an existing hardware catalog item. */
+export async function updateHardwareCatalogItem(
+  id: string,
+  updates: Partial<Omit<HardwareCatalogItem, 'id'>>
+): Promise<HardwareCatalogItem> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const row: Record<string, any> = {};
+  if (updates.name !== undefined) row.name = updates.name;
+  if (updates.canonicalCode !== undefined) row.canonical_code = updates.canonicalCode;
+  if (updates.subcategory !== undefined) row.subcategory = updates.subcategory;
+  if (updates.description !== undefined) row.description = updates.description;
+  if (updates.active !== undefined) row.active = updates.active;
+  if (updates.sortOrder !== undefined) row.sort_order = updates.sortOrder;
+
+  const { data, error } = await supabase
+    .from('hardware_catalog')
+    .update(row)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to update hardware catalog item: ${error.message}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return mapHardwareCatalogRow(data as any);
+}
+
+/** Admin: permanently delete a hardware catalog item. */
+export async function deleteHardwareCatalogItem(id: string): Promise<void> {
+  const { error } = await supabase.from('hardware_catalog').delete().eq('id', id);
+  if (error) throw new Error(`Failed to delete hardware catalog item: ${error.message}`);
+}
+
+// ---------------------------------------------------------------------------
 // Row Mappers  (snake_case DB rows  ->  camelCase TypeScript types)
 // ---------------------------------------------------------------------------
 
@@ -1605,6 +1733,7 @@ function mapEstimateItemRow(row: any): EstimateItem {
     manufacturerId: row.manufacturer_id ?? null,
     openingId: row.opening_id ?? null,
     parentItemId: row.parent_item_id ?? null,
+    subcategory: row.subcategory ?? null,
     createdAt: row.created_at,
   };
 }
@@ -1695,5 +1824,18 @@ function mapBlockedFieldLabelRow(row: any): BlockedFieldLabel {
     blockedByUserId: row.blocked_by_user_id ?? null,
     notes: row.notes ?? null,
     createdAt: row.created_at,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapHardwareCatalogRow(row: any): HardwareCatalogItem {
+  return {
+    id: row.id,
+    name: row.name,
+    canonicalCode: row.canonical_code,
+    subcategory: row.subcategory as HardwareSubcategory,
+    description: row.description ?? undefined,
+    active: row.active,
+    sortOrder: row.sort_order,
   };
 }

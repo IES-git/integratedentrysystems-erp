@@ -11,6 +11,7 @@ import {
   Copy,
   ChevronDown,
   Minus,
+  Pencil,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -21,6 +22,7 @@ import {
   deleteEstimateOpening,
   updateEstimateOpening,
 } from '@/lib/estimates-api';
+import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import { BuildOpeningDialog } from './BuildOpeningDialog';
 import { ChooseExistingOpeningDialog } from './ChooseExistingOpeningDialog';
 import type { EstimateOpeningWithItems } from '@/types';
@@ -37,6 +39,7 @@ interface OpeningsStepProps {
 interface OpeningCardProps {
   opening: EstimateOpeningWithItems;
   onDelete: (id: string) => void;
+  onEdit: (opening: EstimateOpeningWithItems) => void;
   onQuantityChange: (id: string, quantity: number) => Promise<void>;
   deleting: boolean;
 }
@@ -53,11 +56,13 @@ function getItemCategory(label: string): 'door' | 'frame' | 'item' {
 
 function countItems(opening: EstimateOpeningWithItems) {
   const topLevel = opening.items.length;
-  const hardware = opening.items.reduce((acc, i) => acc + i.hardware.length, 0);
-  return { topLevel, hardware };
+  // Count opening-level hardware (new style) + legacy nested hardware
+  const openingHardware = opening.hardware?.length ?? 0;
+  const nestedHardware = opening.items.reduce((acc, i) => acc + i.hardware.length, 0);
+  return { topLevel, hardware: openingHardware + nestedHardware };
 }
 
-function OpeningCard({ opening, onDelete, onQuantityChange, deleting }: OpeningCardProps) {
+function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting }: OpeningCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [updatingQty, setUpdatingQty] = useState(false);
 
@@ -110,7 +115,7 @@ function OpeningCard({ opening, onDelete, onQuantityChange, deleting }: OpeningC
                       {hardware} hardware
                     </Badge>
                   )}
-                  {opening.items.length === 0 && (
+                  {opening.items.length === 0 && hardware === 0 && (
                     <span className="text-xs text-muted-foreground italic">No items yet</span>
                   )}
                 </div>
@@ -152,6 +157,17 @@ function OpeningCard({ opening, onDelete, onQuantityChange, deleting }: OpeningC
             <Button
               variant="ghost"
               size="icon"
+              className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={(e) => { e.stopPropagation(); onEdit(opening); }}
+              disabled={deleting}
+              title="Edit opening"
+            >
+              <Pencil className="h-4 w-4" />
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="icon"
               className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
               onClick={(e) => { e.stopPropagation(); onDelete(opening.id); }}
               disabled={deleting}
@@ -171,46 +187,94 @@ function OpeningCard({ opening, onDelete, onQuantityChange, deleting }: OpeningC
 
       {/* Expanded items detail */}
       {expanded && (
-        <div className="border-t px-4 pb-4 pt-3 space-y-2 bg-muted/20">
-          {opening.items.length === 0 ? (
+        <div className="border-t px-4 pb-4 pt-3 space-y-3 bg-muted/20">
+          {/* Door / Frame items */}
+          {opening.items.length === 0 && (hardware === 0) ? (
             <p className="text-sm text-muted-foreground italic text-center py-2">
               No items in this opening.
             </p>
           ) : (
-            opening.items.map((item) => {
-              const cat = getItemCategory(item.itemLabel);
-              const Icon =
-                cat === 'door' ? DoorOpen : cat === 'frame' ? Square : Layers;
-              return (
-                <div key={item.id} className="space-y-1">
-                  <div className="flex items-center gap-2 rounded-md bg-background border px-3 py-2">
-                    <Icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                    <span className="text-sm flex-1 truncate">{item.itemLabel}</span>
-                    <Badge variant="secondary" className="font-mono text-[10px] shrink-0">
-                      {item.canonicalCode}
-                    </Badge>
-                  </div>
-                  {item.hardware.length > 0 && (
-                    <div className="ml-5 space-y-1">
-                      {item.hardware.map((hw) => (
-                        <div
-                          key={hw.id}
-                          className="flex items-center gap-2 rounded-md border border-dashed px-3 py-1.5"
-                        >
-                          <Wrench className="h-3 w-3 text-muted-foreground shrink-0" />
-                          <span className="text-xs flex-1 truncate text-muted-foreground">
-                            {hw.itemLabel}
-                          </span>
-                          <Badge variant="outline" className="font-mono text-[10px] shrink-0">
-                            {hw.canonicalCode}
-                          </Badge>
-                        </div>
-                      ))}
+            <>
+              {opening.items.map((item) => {
+                const cat = getItemCategory(item.itemLabel);
+                const Icon =
+                  cat === 'door' ? DoorOpen : cat === 'frame' ? Square : Layers;
+                return (
+                  <div key={item.id} className="space-y-1">
+                    <div className="flex items-center gap-2 rounded-md bg-background border px-3 py-2">
+                      <Icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <span className="text-sm flex-1 truncate">{item.itemLabel}</span>
+                      <Badge variant="secondary" className="font-mono text-[10px] shrink-0">
+                        {item.canonicalCode}
+                      </Badge>
                     </div>
-                  )}
+                    {/* Legacy nested hardware (backward compat) */}
+                    {item.hardware.length > 0 && (
+                      <div className="ml-5 space-y-2 mt-1">
+                        {groupHardwareBySubcategory(item.hardware).map((group) => (
+                          <div key={group.key}>
+                            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                              {group.label}
+                            </p>
+                            <div className="space-y-1">
+                              {group.items.map((hw) => (
+                                <div
+                                  key={hw.id}
+                                  className="flex items-center gap-2 rounded-md border border-dashed px-3 py-1.5"
+                                >
+                                  <Wrench className="h-3 w-3 text-muted-foreground shrink-0" />
+                                  <span className="text-xs flex-1 truncate text-muted-foreground">
+                                    {hw.itemLabel}
+                                  </span>
+                                  <Badge variant="outline" className="font-mono text-[10px] shrink-0">
+                                    {hw.canonicalCode}
+                                  </Badge>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Opening-level hardware grouped by subcategory */}
+              {(opening.hardware?.length ?? 0) > 0 && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center gap-1.5">
+                    <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                      Hardware
+                    </span>
+                  </div>
+                  {groupHardwareBySubcategory(opening.hardware!).map((group) => (
+                    <div key={group.key}>
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1 ml-5">
+                        {group.label}
+                      </p>
+                      <div className="ml-5 space-y-1">
+                        {group.items.map((hw) => (
+                          <div
+                            key={hw.id}
+                            className="flex items-center gap-2 rounded-md border border-dashed px-3 py-1.5"
+                          >
+                            <Wrench className="h-3 w-3 text-muted-foreground shrink-0" />
+                            <span className="text-xs flex-1 truncate text-muted-foreground">
+                              {hw.itemLabel}
+                            </span>
+                            <Badge variant="outline" className="font-mono text-[10px] shrink-0">
+                              {hw.canonicalCode}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              );
-            })
+              )}
+            </>
           )}
         </div>
       )}
@@ -232,6 +296,7 @@ export function OpeningsStep({
   const [buildDialogOpen, setBuildDialogOpen] = useState(false);
   const [chooseDialogOpen, setChooseDialogOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [editingOpening, setEditingOpening] = useState<EstimateOpeningWithItems | null>(null);
 
   useEffect(() => {
     setLoadingOpenings(true);
@@ -245,6 +310,20 @@ export function OpeningsStep({
 
   const handleOpeningSaved = (newOpening: EstimateOpeningWithItems) => {
     setOpenings((prev) => [...prev, newOpening]);
+  };
+
+  const handleOpeningUpdated = (updated: EstimateOpeningWithItems) => {
+    setOpenings((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+  };
+
+  const handleEditOpening = (opening: EstimateOpeningWithItems) => {
+    setEditingOpening(opening);
+    setBuildDialogOpen(true);
+  };
+
+  const handleBuildDialogOpenChange = (open: boolean) => {
+    setBuildDialogOpen(open);
+    if (!open) setEditingOpening(null);
   };
 
   const handleOpeningsCopied = (updatedOpenings: EstimateOpeningWithItems[]) => {
@@ -275,9 +354,11 @@ export function OpeningsStep({
       <BuildOpeningDialog
         estimateId={estimateId}
         open={buildDialogOpen}
-        onOpenChange={setBuildDialogOpen}
+        onOpenChange={handleBuildDialogOpenChange}
         onSaved={handleOpeningSaved}
+        onUpdated={handleOpeningUpdated}
         openingCount={openings.length}
+        editingOpening={editingOpening ?? undefined}
       />
 
       <ChooseExistingOpeningDialog
@@ -323,6 +404,7 @@ export function OpeningsStep({
                     key={opening.id}
                     opening={opening}
                     onDelete={handleDeleteOpening}
+                    onEdit={handleEditOpening}
                     onQuantityChange={handleQuantityChange}
                     deleting={deletingId === opening.id}
                   />

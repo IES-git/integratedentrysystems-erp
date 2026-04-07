@@ -8,8 +8,6 @@ import {
   Wrench,
   ChevronsUpDown,
   AlertCircle,
-  ChevronDown,
-  ChevronUp,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -47,15 +45,24 @@ import {
   getMostRecentFieldValuesForItem,
   getFieldValueOptions,
   recordFieldValueUsage,
+  updateEstimateOpening,
+  deleteEstimateItem,
 } from '@/lib/estimates-api';
+import {
+  groupHardwareBySubcategory,
+  HARDWARE_SUBCATEGORY_ORDER,
+  HARDWARE_SUBCATEGORY_LABEL,
+} from '@/lib/hardware-utils';
 import type {
   ItemType,
   ItemCategory,
+  EstimateOpening,
   EstimateOpeningWithItems,
   EstimateItemWithHardware,
   FieldValueType,
   FieldValueOption,
   ItemField,
+  HardwareSubcategory,
 } from '@/types';
 
 const newLocalId = () =>
@@ -75,6 +82,7 @@ interface LocalHardwareItem {
   localId: string;
   itemLabel: string;
   canonicalCode: string;
+  subcategory: HardwareSubcategory | null;
   loadingFields: boolean;
   fields: LocalField[];
 }
@@ -86,9 +94,6 @@ interface LocalTopLevelItem {
   category: 'doors' | 'frames';
   loadingFields: boolean;
   fields: LocalField[];
-  hardware: LocalHardwareItem[];
-  hardwarePickerOpen: boolean;
-  showHardware: boolean;
 }
 
 interface BuildOpeningDialogProps {
@@ -96,7 +101,9 @@ interface BuildOpeningDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: (opening: EstimateOpeningWithItems) => void;
+  onUpdated?: (opening: EstimateOpeningWithItems) => void;
   openingCount?: number;
+  editingOpening?: EstimateOpeningWithItems;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +121,43 @@ interface ItemCatalogPickerProps {
   children: React.ReactNode;
 }
 
+function CatalogCommandItem({
+  it,
+  onSelect,
+  onOpenChange,
+}: {
+  it: ItemType;
+  onSelect: (item: ItemType) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <CommandItem
+      key={it.canonicalCode}
+      value={`${it.itemLabel} ${it.canonicalCode} ${it.series ?? ''} ${it.material ?? ''} ${it.subcategory ?? ''}`}
+      onSelect={() => {
+        onSelect(it);
+        onOpenChange(false);
+      }}
+    >
+      <div className="flex flex-col flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium truncate">{it.itemLabel}</span>
+          <Badge variant="secondary" className="font-mono text-[10px] shrink-0">
+            {it.canonicalCode}
+          </Badge>
+        </div>
+        {(it.usageCount > 0 || it.series || it.material) && (
+          <span className="text-[11px] text-muted-foreground">
+            {it.usageCount > 0 && `${it.usageCount} use${it.usageCount !== 1 ? 's' : ''}`}
+            {it.series ? ` · ${it.series}` : ''}
+            {it.material ? ` · ${it.material}` : ''}
+          </span>
+        )}
+      </div>
+    </CommandItem>
+  );
+}
+
 function ItemCatalogPicker({
   itemTypes,
   loading,
@@ -125,6 +169,18 @@ function ItemCatalogPicker({
   children,
 }: ItemCatalogPickerProps) {
   const filtered = itemTypes.filter((it) => it.category === category);
+
+  const hardwareGroups =
+    category === 'hardware'
+      ? HARDWARE_SUBCATEGORY_ORDER.map((sub) => ({
+          key: sub,
+          label: HARDWARE_SUBCATEGORY_LABEL[sub],
+          items: filtered.filter((it) => it.subcategory === sub),
+        })).filter((g) => g.items.length > 0)
+      : [];
+
+  const discoveredHardware =
+    category === 'hardware' ? filtered.filter((it) => !it.subcategory) : [];
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
@@ -141,38 +197,45 @@ function ItemCatalogPicker({
               <div className="flex items-center justify-center py-6">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               </div>
+            ) : category === 'hardware' ? (
+              <>
+                <CommandEmpty>No hardware found.</CommandEmpty>
+                {hardwareGroups.map((group) => (
+                  <CommandGroup key={group.key} heading={group.label}>
+                    {group.items.map((it) => (
+                      <CatalogCommandItem
+                        key={it.canonicalCode}
+                        it={it}
+                        onSelect={onSelect}
+                        onOpenChange={onOpenChange}
+                      />
+                    ))}
+                  </CommandGroup>
+                ))}
+                {discoveredHardware.length > 0 && (
+                  <CommandGroup heading="Discovered">
+                    {discoveredHardware.map((it) => (
+                      <CatalogCommandItem
+                        key={it.canonicalCode}
+                        it={it}
+                        onSelect={onSelect}
+                        onOpenChange={onOpenChange}
+                      />
+                    ))}
+                  </CommandGroup>
+                )}
+              </>
             ) : (
               <>
                 <CommandEmpty>No items found.</CommandEmpty>
                 <CommandGroup>
                   {filtered.map((it) => (
-                    <CommandItem
+                    <CatalogCommandItem
                       key={it.canonicalCode}
-                      value={`${it.itemLabel} ${it.canonicalCode} ${it.series ?? ''} ${it.material ?? ''}`}
-                      onSelect={() => {
-                        onSelect(it);
-                        onOpenChange(false);
-                      }}
-                    >
-                      <div className="flex flex-col flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium truncate">
-                            {it.itemLabel}
-                          </span>
-                          <Badge
-                            variant="secondary"
-                            className="font-mono text-[10px] shrink-0"
-                          >
-                            {it.canonicalCode}
-                          </Badge>
-                        </div>
-                        <span className="text-[11px] text-muted-foreground">
-                          {it.usageCount} use{it.usageCount !== 1 ? 's' : ''}
-                          {it.series ? ` · ${it.series}` : ''}
-                          {it.material ? ` · ${it.material}` : ''}
-                        </span>
-                      </div>
-                    </CommandItem>
+                      it={it}
+                      onSelect={onSelect}
+                      onOpenChange={onOpenChange}
+                    />
                   ))}
                 </CommandGroup>
               </>
@@ -395,66 +458,30 @@ function FieldsList({ fields, onUpdateField, onDeleteField }: FieldsListProps) {
 }
 
 // ---------------------------------------------------------------------------
-// ItemCard — card for a top-level door or frame item
+// ItemCard — card for a top-level door or frame item (no hardware section)
 // ---------------------------------------------------------------------------
 
 interface ItemCardProps {
   item: LocalTopLevelItem;
-  itemTypes: ItemType[];
-  itemTypesLoading: boolean;
   addFieldFormOpenForId: string | null;
-  addHwFieldFormOpenForId: string | null;
   onDelete: (localId: string) => void;
   onUpdateField: (itemLocalId: string, fieldLocalId: string, value: string) => void;
   onDeleteField: (itemLocalId: string, fieldLocalId: string) => void;
   onAddField: (itemLocalId: string, field: Omit<LocalField, 'localId'>) => void;
   onToggleAddFieldForm: (itemLocalId: string | null) => void;
-  onToggleHardware: (itemLocalId: string) => void;
-  onToggleHardwarePicker: (itemLocalId: string, open: boolean) => void;
-  onSelectHardware: (parentLocalId: string, hwType: ItemType) => void;
-  onDeleteHardware: (parentLocalId: string, hwLocalId: string) => void;
-  onUpdateHwField: (
-    parentLocalId: string,
-    hwLocalId: string,
-    fieldLocalId: string,
-    value: string
-  ) => void;
-  onDeleteHwField: (
-    parentLocalId: string,
-    hwLocalId: string,
-    fieldLocalId: string
-  ) => void;
-  onAddHwField: (
-    parentLocalId: string,
-    hwLocalId: string,
-    field: Omit<LocalField, 'localId'>
-  ) => void;
-  onToggleAddHwFieldForm: (hwLocalId: string | null) => void;
 }
 
 function ItemCard({
   item,
-  itemTypes,
-  itemTypesLoading,
   addFieldFormOpenForId,
-  addHwFieldFormOpenForId,
   onDelete,
   onUpdateField,
   onDeleteField,
   onAddField,
   onToggleAddFieldForm,
-  onToggleHardware,
-  onToggleHardwarePicker,
-  onSelectHardware,
-  onDeleteHardware,
-  onUpdateHwField,
-  onDeleteHwField,
-  onAddHwField,
-  onToggleAddHwFieldForm,
 }: ItemCardProps) {
   return (
     <div className="rounded-lg border bg-background">
-      {/* Item header */}
       <div className="flex items-center gap-2 px-3 py-2.5">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
@@ -479,7 +506,6 @@ function ItemCard({
         </Button>
       </div>
 
-      {/* Fields */}
       <div className="px-3 pb-2">
         <FieldsList
           fields={item.fields}
@@ -507,113 +533,82 @@ function ItemCard({
           </Button>
         )}
       </div>
+    </div>
+  );
+}
 
-      {/* Hardware section */}
-      <div className="border-t bg-muted/20 rounded-b-lg">
-        <button
-          type="button"
-          className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          onClick={() => onToggleHardware(item.localId)}
-        >
-          <Wrench className="h-3.5 w-3.5" />
-          <span className="font-medium">
-            Hardware
-            {item.hardware.length > 0 && (
-              <span className="ml-1 text-muted-foreground">
-                ({item.hardware.length})
-              </span>
-            )}
-          </span>
-          {item.showHardware ? (
-            <ChevronUp className="h-3.5 w-3.5 ml-auto" />
-          ) : (
-            <ChevronDown className="h-3.5 w-3.5 ml-auto" />
-          )}
-        </button>
+// ---------------------------------------------------------------------------
+// HardwareItemCard — card for a single hardware item in the opening-level section
+// ---------------------------------------------------------------------------
 
-        {item.showHardware && (
-          <div className="px-3 pb-3 space-y-2">
-            {item.hardware.map((hw) => (
-              <div
-                key={hw.localId}
-                className="ml-4 rounded-md border bg-background"
-              >
-                <div className="flex items-center gap-2 px-3 py-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium truncate">{hw.itemLabel}</span>
-                      <Badge variant="outline" className="font-mono text-[10px] shrink-0">
-                        {hw.canonicalCode}
-                      </Badge>
-                    </div>
-                  </div>
-                  {hw.loadingFields && (
-                    <Loader2 className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />
-                  )}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
-                    onClick={() => onDeleteHardware(item.localId, hw.localId)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
+interface HardwareItemCardProps {
+  hw: LocalHardwareItem;
+  addFieldFormOpenForId: string | null;
+  onDelete: (localId: string) => void;
+  onUpdateField: (hwLocalId: string, fieldLocalId: string, value: string) => void;
+  onDeleteField: (hwLocalId: string, fieldLocalId: string) => void;
+  onAddField: (hwLocalId: string, field: Omit<LocalField, 'localId'>) => void;
+  onToggleAddFieldForm: (hwLocalId: string | null) => void;
+}
 
-                <div className="px-3 pb-2">
-                  <FieldsList
-                    fields={hw.fields}
-                    onUpdateField={(fid, val) =>
-                      onUpdateHwField(item.localId, hw.localId, fid, val)
-                    }
-                    onDeleteField={(fid) =>
-                      onDeleteHwField(item.localId, hw.localId, fid)
-                    }
-                  />
-
-                  {addHwFieldFormOpenForId === hw.localId ? (
-                    <AddFieldForm
-                      onAdd={(field) => {
-                        onAddHwField(item.localId, hw.localId, field);
-                        onToggleAddHwFieldForm(null);
-                      }}
-                      onCancel={() => onToggleAddHwFieldForm(null)}
-                    />
-                  ) : (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-[11px] mt-1 text-muted-foreground"
-                      onClick={() => onToggleAddHwFieldForm(hw.localId)}
-                    >
-                      <Plus className="h-3 w-3 mr-1" />
-                      Add Field
-                    </Button>
-                  )}
-                </div>
-              </div>
-            ))}
-
-            <ItemCatalogPicker
-              itemTypes={itemTypes}
-              loading={itemTypesLoading}
-              category="hardware"
-              placeholder="Search hardware…"
-              open={item.hardwarePickerOpen}
-              onOpenChange={(o) => onToggleHardwarePicker(item.localId, o)}
-              onSelect={(hwType) => onSelectHardware(item.localId, hwType)}
-            >
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-xs w-full ml-4 border-dashed"
-              >
-                <Plus className="h-3 w-3 mr-1.5" />
-                Add Hardware
-                <ChevronsUpDown className="h-3 w-3 ml-auto opacity-50" />
-              </Button>
-            </ItemCatalogPicker>
+function HardwareItemCard({
+  hw,
+  addFieldFormOpenForId,
+  onDelete,
+  onUpdateField,
+  onDeleteField,
+  onAddField,
+  onToggleAddFieldForm,
+}: HardwareItemCardProps) {
+  return (
+    <div className="ml-0 rounded-md border bg-background">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium truncate">{hw.itemLabel}</span>
+            <Badge variant="outline" className="font-mono text-[10px] shrink-0">
+              {hw.canonicalCode}
+            </Badge>
           </div>
+        </div>
+        {hw.loadingFields && (
+          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
+          onClick={() => onDelete(hw.localId)}
+        >
+          <Trash2 className="h-3 w-3" />
+        </Button>
+      </div>
+
+      <div className="px-3 pb-2">
+        <FieldsList
+          fields={hw.fields}
+          onUpdateField={(fid, val) => onUpdateField(hw.localId, fid, val)}
+          onDeleteField={(fid) => onDeleteField(hw.localId, fid)}
+        />
+
+        {addFieldFormOpenForId === hw.localId ? (
+          <AddFieldForm
+            onAdd={(field) => {
+              onAddField(hw.localId, field);
+              onToggleAddFieldForm(null);
+            }}
+            onCancel={() => onToggleAddFieldForm(null)}
+          />
+        ) : (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 text-[11px] mt-1 text-muted-foreground"
+            onClick={() => onToggleAddFieldForm(hw.localId)}
+          >
+            <Plus className="h-3 w-3 mr-1" />
+            Add Field
+          </Button>
         )}
       </div>
     </div>
@@ -629,16 +624,20 @@ export function BuildOpeningDialog({
   open,
   onOpenChange,
   onSaved,
+  onUpdated,
   openingCount = 0,
+  editingOpening,
 }: BuildOpeningDialogProps) {
   const [name, setName] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [doorItems, setDoorItems] = useState<LocalTopLevelItem[]>([]);
   const [frameItems, setFrameItems] = useState<LocalTopLevelItem[]>([]);
+  const [hardwareItems, setHardwareItems] = useState<LocalHardwareItem[]>([]);
   const [itemTypes, setItemTypes] = useState<ItemType[]>([]);
   const [itemTypesLoading, setItemTypesLoading] = useState(false);
   const [doorPickerOpen, setDoorPickerOpen] = useState(false);
   const [framePickerOpen, setFramePickerOpen] = useState(false);
+  const [hardwarePickerOpen, setHardwarePickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addFieldFormOpenForId, setAddFieldFormOpenForId] = useState<string | null>(null);
@@ -647,21 +646,130 @@ export function BuildOpeningDialog({
   // Load item types and reset state when dialog opens
   useEffect(() => {
     if (!open) return;
-    setName(`Opening ${openingCount + 1}`);
-    setQuantity(1);
+
+    if (editingOpening) {
+      setName(editingOpening.name);
+      setQuantity(editingOpening.quantity);
+    } else {
+      setName(`Opening ${openingCount + 1}`);
+      setQuantity(1);
+    }
     setDoorItems([]);
     setFrameItems([]);
+    setHardwareItems([]);
     setSaveError(null);
     setAddFieldFormOpenForId(null);
     setAddHwFieldFormOpenForId(null);
     setItemTypesLoading(true);
     getItemTypes()
-      .then(setItemTypes)
+      .then((types) => {
+        setItemTypes(types);
+        if (editingOpening) {
+          populateFromExistingOpening(editingOpening, types);
+        }
+      })
       .catch((err) => console.error('Failed to load item types:', err))
       .finally(() => setItemTypesLoading(false));
-  }, [open, openingCount]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, openingCount, editingOpening?.id]);
 
-  // Build a LocalTopLevelItem from a selected ItemType and auto-inject required fields
+  // Convert a saved opening's items back into local draft state for editing
+  const populateFromExistingOpening = (
+    opening: EstimateOpeningWithItems,
+    types: ItemType[]
+  ) => {
+    const doors: LocalTopLevelItem[] = [];
+    const frames: LocalTopLevelItem[] = [];
+
+    for (const item of opening.items) {
+      const matchedType = types.find((t) => t.canonicalCode === item.canonicalCode);
+      let category: 'doors' | 'frames' = 'doors';
+      if (matchedType?.category === 'frames') {
+        category = 'frames';
+      } else if (matchedType?.category !== 'doors') {
+        if (item.itemLabel.toLowerCase().includes('frame')) category = 'frames';
+      }
+
+      const existingFields = (item as unknown as { fields: ItemField[] }).fields ?? [];
+      const fields: LocalField[] = existingFields.map((f) => ({
+        localId: newLocalId(),
+        fieldKey: f.fieldKey,
+        fieldLabel: f.fieldLabel,
+        fieldValue: f.fieldValue,
+        valueType: f.valueType,
+        fieldDefinitionId: f.fieldDefinitionId ?? undefined,
+        isRequired: false,
+      }));
+
+      const localItem: LocalTopLevelItem = {
+        localId: newLocalId(),
+        itemLabel: item.itemLabel,
+        canonicalCode: item.canonicalCode,
+        category,
+        loadingFields: false,
+        fields,
+      };
+
+      if (category === 'doors') {
+        doors.push(localItem);
+      } else {
+        frames.push(localItem);
+      }
+    }
+
+    setDoorItems(doors);
+    setFrameItems(frames);
+
+    // Collect all hardware: opening-level (new style) + nested under door/frame (legacy)
+    const allHardware: LocalHardwareItem[] = [];
+
+    for (const hw of opening.hardware ?? []) {
+      const hwFields = (hw as unknown as { fields: ItemField[] }).fields ?? [];
+      allHardware.push({
+        localId: newLocalId(),
+        itemLabel: hw.itemLabel,
+        canonicalCode: hw.canonicalCode,
+        subcategory: hw.subcategory ?? null,
+        loadingFields: false,
+        fields: hwFields.map((f) => ({
+          localId: newLocalId(),
+          fieldKey: f.fieldKey,
+          fieldLabel: f.fieldLabel,
+          fieldValue: f.fieldValue,
+          valueType: f.valueType,
+          fieldDefinitionId: f.fieldDefinitionId ?? undefined,
+          isRequired: false,
+        })),
+      });
+    }
+
+    // Legacy: hardware nested under door/frame items
+    for (const item of opening.items) {
+      for (const hw of item.hardware) {
+        const hwFields = (hw as unknown as { fields: ItemField[] }).fields ?? [];
+        allHardware.push({
+          localId: newLocalId(),
+          itemLabel: hw.itemLabel,
+          canonicalCode: hw.canonicalCode,
+          subcategory: hw.subcategory ?? null,
+          loadingFields: false,
+          fields: hwFields.map((f) => ({
+            localId: newLocalId(),
+            fieldKey: f.fieldKey,
+            fieldLabel: f.fieldLabel,
+            fieldValue: f.fieldValue,
+            valueType: f.valueType,
+            fieldDefinitionId: f.fieldDefinitionId ?? undefined,
+            isRequired: false,
+          })),
+        });
+      }
+    }
+
+    setHardwareItems(allHardware);
+  };
+
+  // Build a LocalTopLevelItem from a selected ItemType
   const buildLocalItem = useCallback(
     async (itemType: ItemType, category: 'doors' | 'frames'): Promise<LocalTopLevelItem> => {
       const localId = newLocalId();
@@ -672,12 +780,8 @@ export function BuildOpeningDialog({
         category,
         loadingFields: true,
         fields: [],
-        hardware: [],
-        hardwarePickerOpen: false,
-        showHardware: false,
       };
 
-      // Kick off all fields load and recent values in parallel — we update state asynchronously
       Promise.all([
         getItemTypeFields(itemType.canonicalCodes ?? [itemType.canonicalCode]),
         getMostRecentFieldValuesForItem(itemType.canonicalCodes ?? [itemType.canonicalCode]),
@@ -732,13 +836,15 @@ export function BuildOpeningDialog({
     []
   );
 
+  // Build a LocalHardwareItem from a selected ItemType
   const buildLocalHardware = useCallback(
-    async (hwType: ItemType, parentLocalId: string) => {
+    async (hwType: ItemType): Promise<LocalHardwareItem> => {
       const hwLocalId = newLocalId();
       const hw: LocalHardwareItem = {
         localId: hwLocalId,
         itemLabel: hwType.itemLabel,
         canonicalCode: hwType.canonicalCode,
+        subcategory: (hwType.subcategory as HardwareSubcategory) ?? null,
         loadingFields: true,
         fields: [],
       };
@@ -760,36 +866,14 @@ export function BuildOpeningDialog({
               isRequired: rf.isRequired,
             }));
 
-          const updater = (prev: LocalTopLevelItem[]) =>
-            prev.map((item) =>
-              item.localId === parentLocalId
-                ? {
-                    ...item,
-                    hardware: item.hardware.map((h) =>
-                      h.localId === hwLocalId
-                        ? { ...h, fields, loadingFields: false }
-                        : h
-                    ),
-                  }
-                : item
-            );
-          setDoorItems(updater);
-          setFrameItems(updater);
+          setHardwareItems((prev) =>
+            prev.map((h) => (h.localId === hwLocalId ? { ...h, fields, loadingFields: false } : h))
+          );
         })
         .catch(() => {
-          const updater = (prev: LocalTopLevelItem[]) =>
-            prev.map((item) =>
-              item.localId === parentLocalId
-                ? {
-                    ...item,
-                    hardware: item.hardware.map((h) =>
-                      h.localId === hwLocalId ? { ...h, loadingFields: false } : h
-                    ),
-                  }
-                : item
-            );
-          setDoorItems(updater);
-          setFrameItems(updater);
+          setHardwareItems((prev) =>
+            prev.map((h) => (h.localId === hwLocalId ? { ...h, loadingFields: false } : h))
+          );
         });
 
       return hw;
@@ -807,21 +891,9 @@ export function BuildOpeningDialog({
     setFrameItems((prev) => [...prev, item]);
   };
 
-  const handleSelectHardware = async (parentLocalId: string, hwType: ItemType) => {
-    const hw = await buildLocalHardware(hwType, parentLocalId);
-    const updater = (prev: LocalTopLevelItem[]) =>
-      prev.map((item) =>
-        item.localId === parentLocalId
-          ? {
-              ...item,
-              hardware: [...item.hardware, hw],
-              showHardware: true,
-              hardwarePickerOpen: false,
-            }
-          : item
-      );
-    setDoorItems(updater);
-    setFrameItems(updater);
+  const handleSelectHardware = async (hwType: ItemType) => {
+    const hw = await buildLocalHardware(hwType);
+    setHardwareItems((prev) => [...prev, hw]);
   };
 
   const handleDeleteItem = (category: 'doors' | 'frames', localId: string) => {
@@ -830,6 +902,10 @@ export function BuildOpeningDialog({
     } else {
       setFrameItems((prev) => prev.filter((i) => i.localId !== localId));
     }
+  };
+
+  const handleDeleteHardware = (hwLocalId: string) => {
+    setHardwareItems((prev) => prev.filter((h) => h.localId !== hwLocalId));
   };
 
   const updateItemInBoth = (
@@ -874,76 +950,34 @@ export function BuildOpeningDialog({
     }));
   };
 
-  const handleToggleHardware = (itemLocalId: string) => {
-    updateItemInBoth(itemLocalId, (item) => ({
-      ...item,
-      showHardware: !item.showHardware,
-    }));
-  };
-
-  const handleToggleHardwarePicker = (itemLocalId: string, pickerOpen: boolean) => {
-    updateItemInBoth(itemLocalId, (item) => ({
-      ...item,
-      hardwarePickerOpen: pickerOpen,
-    }));
-  };
-
-  const handleDeleteHardware = (parentLocalId: string, hwLocalId: string) => {
-    updateItemInBoth(parentLocalId, (item) => ({
-      ...item,
-      hardware: item.hardware.filter((h) => h.localId !== hwLocalId),
-    }));
-  };
-
-  const handleUpdateHwField = (
-    parentLocalId: string,
-    hwLocalId: string,
-    fieldLocalId: string,
-    value: string
-  ) => {
-    updateItemInBoth(parentLocalId, (item) => ({
-      ...item,
-      hardware: item.hardware.map((h) =>
+  const handleUpdateHwField = (hwLocalId: string, fieldLocalId: string, value: string) => {
+    setHardwareItems((prev) =>
+      prev.map((h) =>
         h.localId === hwLocalId
-          ? {
-              ...h,
-              fields: h.fields.map((f) =>
-                f.localId === fieldLocalId ? { ...f, fieldValue: value } : f
-              ),
-            }
+          ? { ...h, fields: h.fields.map((f) => (f.localId === fieldLocalId ? { ...f, fieldValue: value } : f)) }
           : h
-      ),
-    }));
+      )
+    );
   };
 
-  const handleDeleteHwField = (
-    parentLocalId: string,
-    hwLocalId: string,
-    fieldLocalId: string
-  ) => {
-    updateItemInBoth(parentLocalId, (item) => ({
-      ...item,
-      hardware: item.hardware.map((h) =>
+  const handleDeleteHwField = (hwLocalId: string, fieldLocalId: string) => {
+    setHardwareItems((prev) =>
+      prev.map((h) =>
         h.localId === hwLocalId
           ? { ...h, fields: h.fields.filter((f) => f.localId !== fieldLocalId) }
           : h
-      ),
-    }));
+      )
+    );
   };
 
-  const handleAddHwField = (
-    parentLocalId: string,
-    hwLocalId: string,
-    field: Omit<LocalField, 'localId'>
-  ) => {
-    updateItemInBoth(parentLocalId, (item) => ({
-      ...item,
-      hardware: item.hardware.map((h) =>
+  const handleAddHwField = (hwLocalId: string, field: Omit<LocalField, 'localId'>) => {
+    setHardwareItems((prev) =>
+      prev.map((h) =>
         h.localId === hwLocalId
           ? { ...h, fields: [...h.fields, { ...field, localId: newLocalId() }] }
           : h
-      ),
-    }));
+      )
+    );
   };
 
   // ---------------------------------------------------------------------------
@@ -956,7 +990,29 @@ export function BuildOpeningDialog({
     setSaveError(null);
 
     try {
-      const opening = await createEstimateOpening(estimateId, name.trim(), quantity);
+      let openingData: EstimateOpening;
+
+      if (editingOpening) {
+        // Update name/quantity, then replace all items
+        openingData = await updateEstimateOpening(editingOpening.id, {
+          name: name.trim(),
+          quantity,
+        });
+
+        // Delete opening-level hardware (new style)
+        for (const hw of editingOpening.hardware ?? []) {
+          await deleteEstimateItem(hw.id);
+        }
+        // Delete legacy nested hardware first (FK constraint), then top-level items
+        for (const item of editingOpening.items) {
+          for (const hw of item.hardware) {
+            await deleteEstimateItem(hw.id);
+          }
+          await deleteEstimateItem(item.id);
+        }
+      } else {
+        openingData = await createEstimateOpening(estimateId, name.trim(), quantity);
+      }
 
       const saveLocalFields = async (
         itemId: string,
@@ -980,6 +1036,7 @@ export function BuildOpeningDialog({
         return saved;
       };
 
+      // Save door and frame items (no hardware children)
       const allItems = [...doorItems, ...frameItems];
       const itemsWithHardware: EstimateItemWithHardware[] = [];
 
@@ -989,30 +1046,41 @@ export function BuildOpeningDialog({
           canonicalCode: localItem.canonicalCode,
           quantity: 1,
           sortOrder: itemsWithHardware.length,
-          openingId: opening.id,
+          openingId: openingData.id,
           parentItemId: null,
         });
-
         await saveLocalFields(created.id, localItem.fields);
-
-        const hardware = [];
-        for (const hw of localItem.hardware) {
-          const createdHw = await addEstimateItem(estimateId, {
-            itemLabel: hw.itemLabel,
-            canonicalCode: hw.canonicalCode,
-            quantity: 1,
-            sortOrder: hardware.length,
-            openingId: opening.id,
-            parentItemId: created.id,
-          });
-          await saveLocalFields(createdHw.id, hw.fields);
-          hardware.push({ ...createdHw, hardware: [] });
-        }
-
-        itemsWithHardware.push({ ...created, hardware });
+        itemsWithHardware.push({ ...created, hardware: [] });
       }
 
-      onSaved({ ...opening, items: itemsWithHardware });
+      // Save opening-level hardware items (parent_item_id = null, subcategory set)
+      const savedHardware = [];
+      for (let i = 0; i < hardwareItems.length; i++) {
+        const hw = hardwareItems[i];
+        const created = await addEstimateItem(estimateId, {
+          itemLabel: hw.itemLabel,
+          canonicalCode: hw.canonicalCode,
+          quantity: 1,
+          sortOrder: i,
+          openingId: openingData.id,
+          parentItemId: null,
+          subcategory: hw.subcategory,
+        });
+        await saveLocalFields(created.id, hw.fields);
+        savedHardware.push(created);
+      }
+
+      const result: EstimateOpeningWithItems = {
+        ...openingData,
+        items: itemsWithHardware,
+        hardware: savedHardware,
+      };
+
+      if (editingOpening) {
+        onUpdated?.(result);
+      } else {
+        onSaved(result);
+      }
       onOpenChange(false);
     } catch (err) {
       setSaveError(
@@ -1026,32 +1094,20 @@ export function BuildOpeningDialog({
   const totalItems = doorItems.length + frameItems.length;
   const canSave = name.trim().length > 0;
 
-  const sharedItemCardProps = {
-    itemTypes,
-    itemTypesLoading,
-    addFieldFormOpenForId,
-    addHwFieldFormOpenForId,
-    onUpdateField: handleUpdateField,
-    onDeleteField: handleDeleteField,
-    onAddField: handleAddField,
-    onToggleAddFieldForm: setAddFieldFormOpenForId,
-    onToggleHardware: handleToggleHardware,
-    onToggleHardwarePicker: handleToggleHardwarePicker,
-    onSelectHardware: handleSelectHardware,
-    onDeleteHardware: handleDeleteHardware,
-    onUpdateHwField: handleUpdateHwField,
-    onDeleteHwField: handleDeleteHwField,
-    onAddHwField: handleAddHwField,
-    onToggleAddHwFieldForm: setAddHwFieldFormOpenForId,
-  };
+  // Group hardware by subcategory for display
+  const hardwareGroups = groupHardwareBySubcategory(hardwareItems);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle className="font-display text-2xl">Build Opening</DialogTitle>
+          <DialogTitle className="font-display text-2xl">
+            {editingOpening ? 'Edit Opening' : 'Build Opening'}
+          </DialogTitle>
           <DialogDescription>
-            Add doors and frames to this opening, then attach hardware to each.
+            {editingOpening
+              ? 'Update the name, quantity, doors, frames, and hardware for this opening.'
+              : 'Add doors and frames to this opening, then attach hardware to each.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -1083,7 +1139,8 @@ export function BuildOpeningDialog({
         {/* Scrollable body */}
         <div className="flex-1 min-h-0 overflow-y-auto -mx-6 px-6">
           <div className="space-y-5 py-2">
-            {/* Doors */}
+
+            {/* ── Doors ── */}
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <DoorOpen className="h-4 w-4 text-muted-foreground" />
@@ -1099,8 +1156,12 @@ export function BuildOpeningDialog({
                 <ItemCard
                   key={item.localId}
                   item={item}
+                  addFieldFormOpenForId={addFieldFormOpenForId}
                   onDelete={(lid) => handleDeleteItem('doors', lid)}
-                  {...sharedItemCardProps}
+                  onUpdateField={handleUpdateField}
+                  onDeleteField={handleDeleteField}
+                  onAddField={handleAddField}
+                  onToggleAddFieldForm={setAddFieldFormOpenForId}
                 />
               ))}
 
@@ -1126,7 +1187,7 @@ export function BuildOpeningDialog({
 
             <Separator />
 
-            {/* Frame */}
+            {/* ── Frame ── */}
             <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Square className="h-4 w-4 text-muted-foreground" />
@@ -1142,8 +1203,12 @@ export function BuildOpeningDialog({
                 <ItemCard
                   key={item.localId}
                   item={item}
+                  addFieldFormOpenForId={addFieldFormOpenForId}
                   onDelete={(lid) => handleDeleteItem('frames', lid)}
-                  {...sharedItemCardProps}
+                  onUpdateField={handleUpdateField}
+                  onDeleteField={handleDeleteField}
+                  onAddField={handleAddField}
+                  onToggleAddFieldForm={setAddFieldFormOpenForId}
                 />
               ))}
 
@@ -1175,6 +1240,67 @@ export function BuildOpeningDialog({
                 </p>
               </div>
             )}
+
+            <Separator />
+
+            {/* ── Hardware (opening-level, grouped by subcategory) ── */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Wrench className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-semibold">Hardware</span>
+                {hardwareItems.length > 0 && (
+                  <Badge variant="secondary" className="text-xs">
+                    {hardwareItems.length}
+                  </Badge>
+                )}
+              </div>
+
+              {hardwareGroups.map((group) => (
+                <div key={group.key} className="space-y-2">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide px-0.5">
+                    {group.label}
+                  </p>
+                  {group.items.map((hw) => (
+                    <HardwareItemCard
+                      key={hw.localId}
+                      hw={hw}
+                      addFieldFormOpenForId={addHwFieldFormOpenForId}
+                      onDelete={handleDeleteHardware}
+                      onUpdateField={handleUpdateHwField}
+                      onDeleteField={handleDeleteHwField}
+                      onAddField={handleAddHwField}
+                      onToggleAddFieldForm={setAddHwFieldFormOpenForId}
+                    />
+                  ))}
+                </div>
+              ))}
+
+              {hardwareItems.length === 0 && (
+                <p className="text-xs text-muted-foreground italic px-0.5">
+                  No hardware added yet.
+                </p>
+              )}
+
+              <ItemCatalogPicker
+                itemTypes={itemTypes}
+                loading={itemTypesLoading}
+                category="hardware"
+                placeholder="Search hardware…"
+                open={hardwarePickerOpen}
+                onOpenChange={setHardwarePickerOpen}
+                onSelect={handleSelectHardware}
+              >
+                <Button
+                  variant="outline"
+                  className="w-full border-dashed text-muted-foreground hover:text-foreground"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add Hardware
+                  <ChevronsUpDown className="h-4 w-4 ml-auto opacity-50" />
+                </Button>
+              </ItemCatalogPicker>
+            </div>
+
           </div>
         </div>
 
@@ -1195,7 +1321,7 @@ export function BuildOpeningDialog({
           </Button>
           <Button onClick={handleSave} disabled={!canSave || saving}>
             {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Save Opening
+            {editingOpening ? 'Update Opening' : 'Save Opening'}
           </Button>
         </DialogFooter>
       </DialogContent>

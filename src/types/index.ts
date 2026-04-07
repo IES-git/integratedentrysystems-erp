@@ -104,6 +104,7 @@ export interface EstimateItem {
   manufacturerId: string | null;
   openingId?: string | null;
   parentItemId?: string | null;
+  subcategory?: HardwareSubcategory | null;
   createdAt: string;
 }
 
@@ -122,7 +123,10 @@ export interface EstimateOpening {
 }
 
 export interface EstimateOpeningWithItems extends EstimateOpening {
+  /** Door and frame items (top-level, no parent). */
   items: EstimateItemWithHardware[];
+  /** Opening-level hardware items (parent_item_id = null, subcategory set). */
+  hardware: EstimateItem[];
 }
 
 export interface EstimateWithItems extends Estimate {
@@ -199,6 +203,18 @@ export interface BlockedFieldLabel {
 // Item Management Types
 export type ItemCategory = 'doors' | 'frames' | 'hardware';
 
+export type HardwareSubcategory = 'swing_it' | 'close_it' | 'latch_it' | 'protect_it';
+
+export interface HardwareCatalogItem {
+  id: string;
+  name: string;
+  canonicalCode: string;
+  subcategory: HardwareSubcategory;
+  description?: string;
+  active: boolean;
+  sortOrder: number;
+}
+
 export interface ItemType {
   /** Primary (most-used) canonical code for this item group — used for field management */
   canonicalCode: string;
@@ -211,6 +227,7 @@ export interface ItemType {
   material?: string;
   openingWidth?: string;
   openingHeight?: string;
+  subcategory?: HardwareSubcategory;
 }
 
 export interface ItemTypeField {

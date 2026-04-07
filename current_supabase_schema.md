@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-03-25 (blocked_field_labels table; auto-blocking of pending_review fields on delete from Items page; edge function v22 with blocked field exclusion in Pass 2 prompts and post-extraction safety filter)
+Last updated: 2026-04-07 (hardware_catalog table with RLS, indexes, updated_at trigger, and seeded items for swing_it / close_it / latch_it / protect_it subcategories)
 
 ## Authentication Status
 
@@ -293,6 +293,7 @@ Line items extracted from estimates.
 - `manufacturer_id` (UUID, nullable) - FK to companies.id, SET NULL on delete — the manufacturer associated with this line item
 - `opening_id` (UUID, nullable) - FK to estimate_openings.id, SET NULL on delete — the opening this item belongs to
 - `parent_item_id` (UUID, nullable) - FK to estimate_items.id, CASCADE on delete — for hardware items, points to the parent door or frame item
+- `subcategory` (TEXT, nullable) - CHECK IN ('swing_it','close_it','latch_it','protect_it') — hardware subcategory for display grouping; NULL for non-hardware items
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
 **Indexes:**
@@ -667,6 +668,7 @@ Junction table that explicitly associates field definitions with item types (ide
 24. `add_opening_id_to_estimate_items` - Added `opening_id` FK column (nullable, SET NULL on delete) to `estimate_items` referencing `estimate_openings`; index on opening_id
 25. `add_parent_item_id_to_estimate_items` - Added `parent_item_id` FK column (nullable, CASCADE on delete) to `estimate_items` self-referencing for hardware child items under a door or frame; index on parent_item_id
 26. `create_manufacturer_field_labels_table` - Created `manufacturer_field_labels` table mapping manufacturer-specific field terminology (e.g., "Width" for CECO) to master `field_definitions`; FK to `field_definitions` (CASCADE) and nullable FK to `companies`; unique on `(field_definition_id, manufacturer_id, manufacturer_field_label)`; indexes, updated_at trigger, and full authenticated RLS policies
+27. `add_subcategory_to_estimate_items` - Added `subcategory` TEXT column (nullable, CHECK IN swing_it/close_it/latch_it/protect_it) to `estimate_items` for hardware display grouping; backfilled existing hardware rows via join to `hardware_catalog` by `canonical_code`
 
 ## Edge Functions
 
@@ -770,6 +772,44 @@ Admin page for managing AI-discovered field definitions used in estimate extract
 - `getEstimateFileUrl(filePath)` - Generate temporary signed URL for file preview
 
 **Access:** Admin users only (enforced by sidebar visibility and Supabase RLS policies)
+
+### public.hardware_catalog
+
+Pre-defined hardware catalog seeded from the DOOR_FRAME SHORTCUT_LOOKUP spreadsheet, organized into four subcategories used by the Items page and estimate wizard.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `name` (TEXT, NOT NULL) - Display name of the hardware item
+- `canonical_code` (TEXT, NOT NULL, UNIQUE) - Unique item code (e.g., 'HINGE-MECH-SS-45X45-NRP-134')
+- `subcategory` (TEXT, NOT NULL) - CHECK IN ('swing_it','close_it','latch_it','protect_it')
+- `description` (TEXT) - Optional description of the item
+- `active` (BOOLEAN, NOT NULL, DEFAULT true) - Whether the item appears in pickers
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display ordering within subcategory
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:**
+- `idx_hardware_catalog_subcategory` on subcategory
+- `idx_hardware_catalog_active` on active
+- `idx_hardware_catalog_sort_order` on (subcategory, active, sort_order)
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read hardware catalog` - All authenticated users can SELECT
+- `Admins can insert hardware catalog items` - Only admins can INSERT
+- `Admins can update hardware catalog items` - Only admins can UPDATE
+- `Admins can delete hardware catalog items` - Only admins can DELETE
+
+**Triggers:**
+- `set_hardware_catalog_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+**Seed data (66 rows total):**
+- **swing_it** (25 rows): Mechanical SS hinges (4.5×4.5 and 5×4.5 NRP .134"/.180"), Spring SS 4.5×4.5", Electrified SS variants, Continuous Aluminum and SS 630 Full Mortise/Half Mortise/Full Surface × 80"/84"/96"
+- **close_it** (21 rows): Header Mount and Door Mount closers × Cast Iron/Aluminum × Cushioned/Hold Open Stop/Hold Open Spring/Fusible Link/Parallel Arm; plus Slide Track Hold Open
+- **latch_it** (11 rows): Active — Deadbolt KOS/KBS, Lockset Cylindrical/Mortise, Panic Bar Rim/Mortise/SVR/CVR; Inactive (active=false) — Surface Bolt, Flush Bolt, Surface Vertical Rod
+- **protect_it** (9 rows): Weatherstrip Adhesive/Kerf/Screw-On/Aluminum, Threshold Flat/Panic/Notched, Drip Cap, Door Sweep
+
+**Migration:** `create_hardware_catalog_table` (applied 2026-04-07)
 
 ## Security Status
 

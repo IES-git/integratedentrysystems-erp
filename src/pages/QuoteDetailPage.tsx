@@ -14,6 +14,7 @@ import {
   Send,
   Tag,
   TrendingUp,
+  Wrench,
   XCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -43,11 +44,16 @@ import { getQuoteWithItems, updateQuoteStatus } from '@/lib/quotes-api';
 import { getCompany } from '@/lib/companies-api';
 import { getEstimateWithItems, getEstimateFileUrl } from '@/lib/estimates-api';
 import { generateQuoteSummary } from '@/lib/gemini-api';
-import type { Company, Estimate, ItemField, Quote, QuoteItem, QuoteStatus, QuoteType } from '@/types';
+import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
+import type { Company, Estimate, HardwareSubcategory, ItemField, Quote, QuoteItem, QuoteStatus, QuoteType } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type QuoteItemWithFields = QuoteItem & { fields: ItemField[] };
+type QuoteItemWithFields = QuoteItem & {
+  fields: ItemField[];
+  parentItemId: string | null;
+  subcategory: HardwareSubcategory | null;
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -501,49 +507,102 @@ export default function QuoteDetailPage() {
                   <FileText className="mb-3 h-10 w-10 opacity-40" />
                   <p className="text-sm">No line items found</p>
                 </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Item</TableHead>
-                        <TableHead className="text-center w-16">Qty</TableHead>
-                        <TableHead className="text-right">Unit Cost</TableHead>
-                        <TableHead className="text-right">Unit Price</TableHead>
-                        <TableHead className="text-right">Line Total</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {items.map((item) => (
-                        <TableRow key={item.id}>
-                          <TableCell>
-                            <div>
-                              <p className="font-medium">{item.itemLabel}</p>
-                              {item.canonicalCode && (
-                                <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                                  {item.canonicalCode}
-                                </p>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-center text-muted-foreground">
-                            {item.quantity}
-                          </TableCell>
-                          <TableCell className="text-right text-muted-foreground">
-                            {fmt(item.unitCost, quote.currency)}
-                          </TableCell>
-                          <TableCell className="text-right font-medium">
-                            {fmt(item.unitPrice, quote.currency)}
-                          </TableCell>
-                          <TableCell className="text-right font-semibold">
-                            {fmt(item.lineTotal, quote.currency)}
-                          </TableCell>
+              ) : (() => {
+                // Build parent→children map so hardware renders grouped under each door/frame
+                const topLevel = items.filter((i) => !i.parentItemId);
+                const hwByParent = new Map<string, QuoteItemWithFields[]>();
+                for (const i of items) {
+                  if (!i.parentItemId || !i.estimateItemId) continue;
+                  const parentQuoteItem = items.find(
+                    (x) => x.estimateItemId === i.parentItemId
+                  );
+                  const parentKey = parentQuoteItem?.id ?? i.parentItemId;
+                  const list = hwByParent.get(parentKey) ?? [];
+                  list.push(i);
+                  hwByParent.set(parentKey, list);
+                }
+
+                return (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Item</TableHead>
+                          <TableHead className="text-center w-16">Qty</TableHead>
+                          <TableHead className="text-right">Unit Cost</TableHead>
+                          <TableHead className="text-right">Unit Price</TableHead>
+                          <TableHead className="text-right">Line Total</TableHead>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
+                      </TableHeader>
+                      <TableBody>
+                        {topLevel.map((item) => {
+                          const hwItems = hwByParent.get(item.id) ?? [];
+                          const hwGroups = groupHardwareBySubcategory(hwItems);
+                          return (
+                            <>
+                              <TableRow key={item.id}>
+                                <TableCell>
+                                  <div>
+                                    <p className="font-medium">{item.itemLabel}</p>
+                                    {item.canonicalCode && (
+                                      <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                                        {item.canonicalCode}
+                                      </p>
+                                    )}
+                                  </div>
+                                </TableCell>
+                                <TableCell className="text-center text-muted-foreground">
+                                  {item.quantity}
+                                </TableCell>
+                                <TableCell className="text-right text-muted-foreground">
+                                  {fmt(item.unitCost, quote.currency)}
+                                </TableCell>
+                                <TableCell className="text-right font-medium">
+                                  {fmt(item.unitPrice, quote.currency)}
+                                </TableCell>
+                                <TableCell className="text-right font-semibold">
+                                  {fmt(item.lineTotal, quote.currency)}
+                                </TableCell>
+                              </TableRow>
+                              {hwGroups.map((group) => (
+                                <>
+                                  <TableRow key={`hdr-${item.id}-${group.key}`} className="bg-muted/5 hover:bg-muted/5">
+                                    <TableCell
+                                      colSpan={5}
+                                      className="py-1 pl-8 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-dashed"
+                                    >
+                                      <Wrench className="inline h-2.5 w-2.5 mr-1 opacity-60" />
+                                      {group.label}
+                                    </TableCell>
+                                  </TableRow>
+                                  {group.items.map((hw) => (
+                                    <TableRow key={hw.id} className="text-muted-foreground">
+                                      <TableCell className="pl-10">
+                                        <div>
+                                          <p className="text-sm">{hw.itemLabel}</p>
+                                          {hw.canonicalCode && (
+                                            <p className="text-xs font-mono mt-0.5 opacity-70">
+                                              {hw.canonicalCode}
+                                            </p>
+                                          )}
+                                        </div>
+                                      </TableCell>
+                                      <TableCell className="text-center text-sm">{hw.quantity}</TableCell>
+                                      <TableCell className="text-right text-sm">{fmt(hw.unitCost, quote.currency)}</TableCell>
+                                      <TableCell className="text-right text-sm font-medium">{fmt(hw.unitPrice, quote.currency)}</TableCell>
+                                      <TableCell className="text-right text-sm font-medium">{fmt(hw.lineTotal, quote.currency)}</TableCell>
+                                    </TableRow>
+                                  ))}
+                                </>
+                              ))}
+                            </>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                );
+              })()}
             </CardContent>
           </Card>
 

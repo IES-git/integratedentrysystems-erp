@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { Package, Plus, Trash2, Edit2, Check, X, ChevronDown, ChevronUp, AlertCircle, ChevronsUpDown, Loader2, Layers, MoveRight, DoorOpen } from 'lucide-react';
+import { Package, Plus, Trash2, Edit2, Check, X, ChevronDown, ChevronUp, AlertCircle, ChevronsUpDown, Loader2, Layers, MoveRight, DoorOpen, Wrench } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import { getFieldDefinitionsForItemType, getFieldValueOptions, recordFieldValueUsage, createOrApproveFieldDefinition, getRequiredFieldsForItem } from '@/lib/estimates-api';
+import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import type { EstimateItem, ItemField, FieldDefinition, FieldValueOption, EstimateOpeningWithItems } from '@/types';
 
 interface LineItemWithFields extends EstimateItem {
@@ -958,6 +959,10 @@ export function LineItemsStep({
           {/* Grouped by opening */}
           {openings!.map((opening) => {
             const openingItems = itemsByOpeningId.get(opening.id) ?? [];
+            // Separate door/frame items from opening-level hardware items
+            const doorFrameItems = openingItems.filter((i) => !i.subcategory);
+            const hwItems = openingItems.filter((i) => !!i.subcategory);
+            const hwGroups = groupHardwareBySubcategory(hwItems);
             return (
               <div key={opening.id} className="space-y-3">
                 <div className="flex items-center gap-2 pb-1 border-b">
@@ -973,7 +978,27 @@ export function LineItemsStep({
                 {openingItems.length === 0 ? (
                   <p className="text-sm text-muted-foreground pl-6 italic">No items in this opening</p>
                 ) : (
-                  openingItems.map((item, index) => renderItemCard(item, index))
+                  <>
+                    {doorFrameItems.map((item, index) => renderItemCard(item, index))}
+                    {hwGroups.length > 0 && (
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center gap-1.5 pb-0.5">
+                          <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
+                          <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                            Hardware
+                          </span>
+                        </div>
+                        {hwGroups.map((group) => (
+                          <div key={group.key} className="space-y-1">
+                            <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground pl-5">
+                              {group.label}
+                            </p>
+                            {group.items.map((item, index) => renderItemCard(item, index))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             );

@@ -21,6 +21,7 @@ import {
   Ban,
   ShieldOff,
   ArrowLeftRight,
+  ToggleLeft,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -60,6 +61,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   Tooltip,
   TooltipContent,
@@ -85,17 +87,26 @@ import {
   addBlockedFieldLabel,
   removeBlockedFieldLabel,
   renameItemType,
+  createOrApproveFieldDefinition,
+  getHardwareCatalog,
+  createHardwareCatalogItem,
+  updateHardwareCatalogItem,
+  deleteHardwareCatalogItem,
 } from '@/lib/estimates-api';
 import { listCompanies, createCompany } from '@/lib/companies-api';
+import { useAuth } from '@/contexts/AuthContext';
 import type {
   ItemType,
   ItemCategory,
   ItemTypeField,
   FieldDefinition,
   FieldDefinitionStatus,
+  FieldValueType,
   ManufacturerFieldLabel,
   BlockedFieldLabel,
   Company,
+  HardwareCatalogItem,
+  HardwareSubcategory,
 } from '@/types';
 
 const CATEGORIES: { key: ItemCategory; label: string; icon: typeof DoorOpen }[] = [
@@ -104,7 +115,26 @@ const CATEGORIES: { key: ItemCategory; label: string; icon: typeof DoorOpen }[] 
   { key: 'hardware', label: 'Hardware', icon: Wrench },
 ];
 
+type HardwareSubtab = HardwareSubcategory | 'discovered';
+
+const HARDWARE_SUBCATEGORIES: { key: HardwareSubcategory; label: string }[] = [
+  { key: 'swing_it', label: 'Swing It' },
+  { key: 'close_it', label: 'Close It' },
+  { key: 'latch_it', label: 'Latch It' },
+  { key: 'protect_it', label: 'Protect It' },
+];
+
+const SUBCATEGORY_LABEL: Record<HardwareSubcategory, string> = {
+  swing_it: 'Swing It',
+  close_it: 'Close It',
+  latch_it: 'Latch It',
+  protect_it: 'Protect It',
+};
+
 export default function ItemManagementPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
   const [itemTypes, setItemTypes] = useState<ItemType[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +165,10 @@ export default function ItemManagementPage() {
 
   const [addFieldTarget, setAddFieldTarget] = useState<string | null>(null);
   const [selectedFieldDefId, setSelectedFieldDefId] = useState<string>('');
+  const [addFieldMode, setAddFieldMode] = useState<'select' | 'create'>('select');
+  const [newFieldLabel, setNewFieldLabel] = useState('');
+  const [newFieldKey, setNewFieldKey] = useState('');
+  const [newFieldValueType, setNewFieldValueType] = useState<FieldValueType>('string');
 
   const [deleteTarget, setDeleteTarget] = useState<{
     field: ItemTypeField;
@@ -154,6 +188,24 @@ export default function ItemManagementPage() {
   const [blockedLabels, setBlockedLabels] = useState<BlockedFieldLabel[]>([]);
   const [blockedLabelsLoading, setBlockedLabelsLoading] = useState(false);
   const [unblockLoading, setUnblockLoading] = useState<string | null>(null);
+
+  // Hardware catalog management state
+  const [catalogItems, setCatalogItems] = useState<HardwareCatalogItem[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [hardwareSubtab, setHardwareSubtab] = useState<HardwareSubtab>('swing_it');
+  const [catalogDialogMode, setCatalogDialogMode] = useState<'add' | 'edit' | null>(null);
+  const [catalogEditTarget, setCatalogEditTarget] = useState<HardwareCatalogItem | null>(null);
+  const [catalogForm, setCatalogForm] = useState({
+    name: '',
+    canonicalCode: '',
+    subcategory: 'swing_it' as HardwareSubcategory,
+    description: '',
+    active: true,
+    sortOrder: 0,
+  });
+  const [catalogFormLoading, setCatalogFormLoading] = useState(false);
+  const [catalogDeleteTarget, setCatalogDeleteTarget] = useState<HardwareCatalogItem | null>(null);
+  const [catalogDeleteLoading, setCatalogDeleteLoading] = useState(false);
 
   const loadingCodesRef = useRef(new Set<string>());
   const { toast } = useToast();
@@ -185,9 +237,116 @@ export default function ItemManagementPage() {
     }
   }, []);
 
+  const fetchCatalog = useCallback(async () => {
+    setCatalogLoading(true);
+    try {
+      const data = await getHardwareCatalog(undefined, { includeInactive: true });
+      setCatalogItems(data);
+    } catch {
+      // best-effort
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, []);
+
+  const openAddCatalogDialog = (defaultSubcategory: HardwareSubcategory) => {
+    const nextOrder = catalogItems.filter((i) => i.subcategory === defaultSubcategory).length;
+    setCatalogEditTarget(null);
+    setCatalogForm({
+      name: '',
+      canonicalCode: '',
+      subcategory: defaultSubcategory,
+      description: '',
+      active: true,
+      sortOrder: nextOrder,
+    });
+    setCatalogDialogMode('add');
+  };
+
+  const openEditCatalogDialog = (item: HardwareCatalogItem) => {
+    setCatalogEditTarget(item);
+    setCatalogForm({
+      name: item.name,
+      canonicalCode: item.canonicalCode,
+      subcategory: item.subcategory,
+      description: item.description ?? '',
+      active: item.active,
+      sortOrder: item.sortOrder,
+    });
+    setCatalogDialogMode('edit');
+  };
+
+  const handleCatalogSave = async () => {
+    if (!catalogForm.name.trim() || !catalogForm.canonicalCode.trim()) return;
+    try {
+      setCatalogFormLoading(true);
+      if (catalogDialogMode === 'add') {
+        const created = await createHardwareCatalogItem({
+          name: catalogForm.name.trim(),
+          canonicalCode: catalogForm.canonicalCode.trim(),
+          subcategory: catalogForm.subcategory,
+          description: catalogForm.description.trim() || undefined,
+          active: catalogForm.active,
+          sortOrder: catalogForm.sortOrder,
+        });
+        setCatalogItems((prev) =>
+          [...prev, created].sort((a, b) => a.sortOrder - b.sortOrder)
+        );
+      } else if (catalogEditTarget) {
+        const updated = await updateHardwareCatalogItem(catalogEditTarget.id, {
+          name: catalogForm.name.trim(),
+          canonicalCode: catalogForm.canonicalCode.trim(),
+          subcategory: catalogForm.subcategory,
+          description: catalogForm.description.trim() || undefined,
+          active: catalogForm.active,
+          sortOrder: catalogForm.sortOrder,
+        });
+        setCatalogItems((prev) =>
+          prev.map((i) => (i.id === updated.id ? updated : i))
+        );
+      }
+      toast({
+        title: catalogDialogMode === 'add' ? 'Item added' : 'Item updated',
+        description: `"${catalogForm.name.trim()}" has been ${catalogDialogMode === 'add' ? 'added to' : 'updated in'} the catalog.`,
+      });
+      setCatalogDialogMode(null);
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'Failed to save catalog item',
+        variant: 'destructive',
+      });
+    } finally {
+      setCatalogFormLoading(false);
+    }
+  };
+
+  const handleCatalogDelete = async () => {
+    if (!catalogDeleteTarget) return;
+    try {
+      setCatalogDeleteLoading(true);
+      await deleteHardwareCatalogItem(catalogDeleteTarget.id);
+      setCatalogItems((prev) => prev.filter((i) => i.id !== catalogDeleteTarget.id));
+      toast({
+        title: 'Item deleted',
+        description: `"${catalogDeleteTarget.name}" has been removed from the catalog.`,
+      });
+      setCatalogDeleteTarget(null);
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'Failed to delete catalog item',
+        variant: 'destructive',
+      });
+    } finally {
+      setCatalogDeleteLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchItemTypes();
     fetchBlockedLabels();
+    fetchCatalog();
     getFieldDefinitions()
       .then(setAllFieldDefs)
       .catch(() => {/* best-effort */});
@@ -200,7 +359,7 @@ export default function ItemManagementPage() {
         )
       )
       .catch(() => {/* best-effort */});
-  }, [fetchItemTypes, fetchBlockedLabels]);
+  }, [fetchItemTypes, fetchBlockedLabels, fetchCatalog]);
 
   const loadFieldsForCode = useCallback(async (canonicalCode: string, allCodes: string[]) => {
     if (loadingCodesRef.current.has(canonicalCode)) return;
@@ -672,13 +831,34 @@ export default function ItemManagementPage() {
   const openAddField = (canonicalCode: string) => {
     setAddFieldTarget(canonicalCode);
     setSelectedFieldDefId('');
+    setAddFieldMode('select');
+    setNewFieldLabel('');
+    setNewFieldKey('');
+    setNewFieldValueType('string');
   };
 
   const handleAddField = async () => {
-    if (!addFieldTarget || !selectedFieldDefId) return;
+    if (!addFieldTarget) return;
     try {
       setActionLoading('add-field');
-      const newField = await upsertItemTypeField(addFieldTarget, selectedFieldDefId, false);
+      let fieldDefId = selectedFieldDefId;
+
+      if (addFieldMode === 'create') {
+        if (!newFieldLabel.trim() || !newFieldKey.trim()) return;
+        const created = await createOrApproveFieldDefinition({
+          fieldKey: newFieldKey.trim(),
+          fieldLabel: newFieldLabel.trim(),
+          valueType: newFieldValueType,
+        });
+        setAllFieldDefs((prev) => {
+          if (prev.some((fd) => fd.id === created.id)) return prev;
+          return [created, ...prev];
+        });
+        fieldDefId = created.id;
+      }
+
+      if (!fieldDefId) return;
+      const newField = await upsertItemTypeField(addFieldTarget, fieldDefId, false);
       setItemTypeFieldsMap((prev) => {
         const existing = prev.get(addFieldTarget) ?? [];
         if (existing.some((f) => f.id === newField.id)) return prev;
@@ -818,25 +998,192 @@ export default function ItemManagementPage() {
         </div>
       )}
 
-      {/* Item List */}
+      {/* Hardware catalog sub-tabs — only shown when hardware category is active */}
+      {!loading && activeCategory === 'hardware' && (
+        <div className="mb-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-1 rounded-lg border bg-muted/30 p-1">
+              {HARDWARE_SUBCATEGORIES.map(({ key, label }) => {
+                const count = catalogItems.filter((i) => i.subcategory === key).length;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setHardwareSubtab(key)}
+                    className={[
+                      'flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all',
+                      hardwareSubtab === key
+                        ? 'bg-background text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    ].join(' ')}
+                  >
+                    {label}
+                    <span
+                      className={[
+                        'rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums',
+                        hardwareSubtab === key
+                          ? 'bg-primary/10 text-primary'
+                          : 'bg-muted text-muted-foreground',
+                      ].join(' ')}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setHardwareSubtab('discovered')}
+                className={[
+                  'flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all',
+                  hardwareSubtab === 'discovered'
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                ].join(' ')}
+              >
+                <Search className="h-3.5 w-3.5" />
+                Discovered
+                <span
+                  className={[
+                    'rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums',
+                    hardwareSubtab === 'discovered'
+                      ? 'bg-primary/10 text-primary'
+                      : 'bg-muted text-muted-foreground',
+                  ].join(' ')}
+                >
+                  {categoryCounts.hardware}
+                </span>
+              </button>
+            </div>
+            {isAdmin && hardwareSubtab !== 'discovered' && (
+              <Button
+                size="sm"
+                onClick={() => openAddCatalogDialog(hardwareSubtab as HardwareSubcategory)}
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Add Item
+              </Button>
+            )}
+          </div>
+
+          {/* Catalog sub-tab content (hidden for 'discovered' — item list below handles that) */}
+          {hardwareSubtab !== 'discovered' && (
+            <div className="mt-4">
+              {catalogLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground/50" />
+                </div>
+              ) : (() => {
+                const items = catalogItems.filter((i) => i.subcategory === hardwareSubtab);
+                return items.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16 text-center">
+                    <Wrench className="mb-4 h-10 w-10 text-muted-foreground/30" />
+                    <p className="text-sm font-medium text-muted-foreground">
+                      No items in {SUBCATEGORY_LABEL[hardwareSubtab as HardwareSubcategory]}
+                    </p>
+                    {isAdmin && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-4"
+                        onClick={() => openAddCatalogDialog(hardwareSubtab as HardwareSubcategory)}
+                      >
+                        <Plus className="mr-2 h-4 w-4" />
+                        Add First Item
+                      </Button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="overflow-hidden rounded-lg border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Name</TableHead>
+                          <TableHead>Description</TableHead>
+                          <TableHead>Active</TableHead>
+                          {isAdmin && <TableHead className="w-24 text-right">Actions</TableHead>}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {items.map((item) => (
+                          <TableRow key={item.id}>
+                            <TableCell className="font-medium">{item.name}</TableCell>
+                            <TableCell className="text-sm text-muted-foreground max-w-xs truncate">
+                              {item.description ?? <span className="text-muted-foreground/50">—</span>}
+                            </TableCell>
+                            <TableCell>
+                              {item.active ? (
+                                <Badge variant="outline" className="flex w-fit items-center gap-1 text-emerald-700 border-emerald-200 bg-emerald-50 dark:text-emerald-400 dark:border-emerald-800/40 dark:bg-emerald-900/20">
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  Active
+                                </Badge>
+                              ) : (
+                                <Badge variant="secondary" className="flex w-fit items-center gap-1 text-muted-foreground">
+                                  <ToggleLeft className="h-3 w-3" />
+                                  Inactive
+                                </Badge>
+                              )}
+                            </TableCell>
+                            {isAdmin && (
+                              <TableCell>
+                                <div className="flex items-center justify-end gap-1">
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-8 w-8"
+                                        onClick={() => openEditCatalogDialog(item)}
+                                      >
+                                        <Pencil className="h-4 w-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Edit item</TooltipContent>
+                                  </Tooltip>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                                        onClick={() => setCatalogDeleteTarget(item)}
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Delete item</TooltipContent>
+                                  </Tooltip>
+                                </div>
+                              </TableCell>
+                            )}
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Item List — shown for non-hardware categories OR hardware 'discovered' sub-tab */}
       {loading ? (
         <div className="flex flex-col items-center justify-center py-16">
           <RefreshCw className="mb-4 h-8 w-8 animate-spin text-muted-foreground/50" />
           <p className="text-muted-foreground">Loading item types...</p>
         </div>
-      ) : activeCategory === 'hardware' && categoryCounts.hardware === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16">
-          <Wrench className="mb-4 h-12 w-12 text-muted-foreground/30" />
-          <p className="text-lg font-medium text-muted-foreground">No hardware items yet</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Hardware items will appear here as they are added to estimates.
-          </p>
-        </div>
-      ) : filteredItemTypes.length === 0 ? (
+      ) : activeCategory === 'hardware' && hardwareSubtab !== 'discovered' ? null
+      : filteredItemTypes.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16">
           <Boxes className="mb-4 h-12 w-12 text-muted-foreground/50" />
           <p className="text-muted-foreground">
-            {searchQuery ? 'No item types match your search' : 'No item types found'}
+            {searchQuery
+              ? 'No item types match your search'
+              : activeCategory === 'hardware'
+              ? 'No discovered hardware items yet — hardware items appear here as they are added to estimates'
+              : 'No item types found'}
           </p>
         </div>
       ) : (
@@ -867,35 +1214,48 @@ export default function ItemManagementPage() {
                   </span>
 
                   <div className="min-w-0 flex-1">
-                    {hasKeyFields ? (
-                      <>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold">
-                            {item.series ?? item.itemLabel}
-                          </span>
-                          {hasVariants && (
-                            <Badge variant="outline" className="font-mono text-xs">
-                              {item.canonicalCodes.length} variants
-                            </Badge>
-                          )}
-                        </div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-                          {item.material && <span>{item.material}</span>}
-                          {(item.openingWidth || item.openingHeight) && (
-                            <span>
-                              {item.openingWidth ?? '?'} × {item.openingHeight ?? '?'}
-                            </span>
-                          )}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-semibold">{item.itemLabel}</span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold">
+                        {item.series ?? item.itemLabel}
+                      </span>
+                      {hasVariants && (
                         <Badge variant="outline" className="font-mono text-xs">
-                          {item.canonicalCode}
+                          {item.canonicalCodes.length} variants
                         </Badge>
-                      </div>
-                    )}
+                      )}
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
+                        <span className="text-muted-foreground/70">Code</span>
+                        <span className="font-mono font-medium text-foreground/80">
+                          {hasVariants ? item.canonicalCodes[0] : item.canonicalCode}
+                        </span>
+                      </span>
+                      {item.series && item.series !== item.itemLabel && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
+                          <span className="text-muted-foreground/70">Series</span>
+                          <span className="font-medium text-foreground/80">{item.series}</span>
+                        </span>
+                      )}
+                      {item.material && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
+                          <span className="text-muted-foreground/70">Material</span>
+                          <span className="font-medium text-foreground/80">{item.material}</span>
+                        </span>
+                      )}
+                      {item.openingWidth && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
+                          <span className="text-muted-foreground/70">W</span>
+                          <span className="font-medium text-foreground/80">{item.openingWidth}</span>
+                        </span>
+                      )}
+                      {item.openingHeight && (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
+                          <span className="text-muted-foreground/70">H</span>
+                          <span className="font-medium text-foreground/80">{item.openingHeight}</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <div className="flex shrink-0 items-center gap-2">
@@ -1526,20 +1886,29 @@ export default function ItemManagementPage() {
           <DialogHeader>
             <DialogTitle className="font-display text-2xl">Add Field</DialogTitle>
             <DialogDescription>
-              Associate a field definition with this item type. Required fields will be
-              auto-inserted when this item is added to an estimate.
+              Associate a field with this item type. Required fields are auto-inserted when
+              the item is added to an estimate.
             </DialogDescription>
           </DialogHeader>
-          <div className="mt-4 space-y-4">
-            <div className="space-y-2">
+
+          <Tabs
+            value={addFieldMode}
+            onValueChange={(v) => setAddFieldMode(v as 'select' | 'create')}
+            className="mt-4"
+          >
+            <TabsList className="w-full">
+              <TabsTrigger value="select" className="flex-1">Select existing</TabsTrigger>
+              <TabsTrigger value="create" className="flex-1">Create new</TabsTrigger>
+            </TabsList>
+
+            {/* ── Select existing ── */}
+            <TabsContent value="select" className="mt-4 space-y-2">
               <Label htmlFor="field-select">Field Definition</Label>
               {(() => {
                 const alreadyLinked = addFieldTarget
                   ? (itemTypeFieldsMap.get(addFieldTarget) ?? []).map((f) => f.fieldDefinitionId)
                   : [];
-                const available = allFieldDefs.filter(
-                  (fd) => !alreadyLinked.includes(fd.id)
-                );
+                const available = allFieldDefs.filter((fd) => !alreadyLinked.includes(fd.id));
                 return available.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
                     All available field definitions are already linked to this item type.
@@ -1562,17 +1931,76 @@ export default function ItemManagementPage() {
                   </Select>
                 );
               })()}
-            </div>
-          </div>
+            </TabsContent>
+
+            {/* ── Create new ── */}
+            <TabsContent value="create" className="mt-4 space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="new-field-label">Field Label</Label>
+                <Input
+                  id="new-field-label"
+                  placeholder="e.g. Glass Type"
+                  value={newFieldLabel}
+                  onChange={(e) => {
+                    const label = e.target.value;
+                    setNewFieldLabel(label);
+                    setNewFieldKey(
+                      label
+                        .toLowerCase()
+                        .trim()
+                        .replace(/[^a-z0-9]+/g, '_')
+                        .replace(/^_+|_+$/g, '')
+                    );
+                  }}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="new-field-key">Field Key</Label>
+                <Input
+                  id="new-field-key"
+                  placeholder="e.g. glass_type"
+                  value={newFieldKey}
+                  onChange={(e) => setNewFieldKey(e.target.value)}
+                  className="font-mono text-sm"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Unique machine-readable identifier. Auto-filled from the label.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="new-field-value-type">Value Type</Label>
+                <Select
+                  value={newFieldValueType}
+                  onValueChange={(v) => setNewFieldValueType(v as FieldValueType)}
+                >
+                  <SelectTrigger id="new-field-value-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="string">Text</SelectItem>
+                    <SelectItem value="number">Number</SelectItem>
+                    <SelectItem value="bool">Yes / No</SelectItem>
+                    <SelectItem value="date">Date</SelectItem>
+                    <SelectItem value="code">Code</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </TabsContent>
+          </Tabs>
+
           <DialogFooter className="mt-6">
             <Button variant="outline" onClick={() => setAddFieldTarget(null)}>
               Cancel
             </Button>
             <Button
               onClick={handleAddField}
-              disabled={!selectedFieldDefId || actionLoading === 'add-field'}
+              disabled={
+                actionLoading === 'add-field' ||
+                (addFieldMode === 'select' && !selectedFieldDefId) ||
+                (addFieldMode === 'create' && (!newFieldLabel.trim() || !newFieldKey.trim()))
+              }
             >
-              Add Field
+              {addFieldMode === 'create' ? 'Create & Add Field' : 'Add Field'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1749,6 +2177,158 @@ export default function ItemManagementPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Add / Edit Hardware Catalog Item Dialog */}
+      <Dialog
+        open={catalogDialogMode !== null}
+        onOpenChange={(open) => !open && setCatalogDialogMode(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="font-display text-2xl">
+              {catalogDialogMode === 'add' ? 'Add Catalog Item' : 'Edit Catalog Item'}
+            </DialogTitle>
+            <DialogDescription>
+              {catalogDialogMode === 'add'
+                ? 'Add a new hardware item to the catalog.'
+                : `Editing "${catalogEditTarget?.name}".`}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="catalog-name">Name</Label>
+              <Input
+                id="catalog-name"
+                placeholder="e.g. Hinge - Mechanical SS 4.5×4.5 NRP"
+                value={catalogForm.name}
+                onChange={(e) => setCatalogForm((f) => ({ ...f, name: e.target.value }))}
+                autoFocus
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="catalog-code">Canonical Code</Label>
+              <Input
+                id="catalog-code"
+                placeholder="e.g. HW-HINGE-MECH-SS-4545"
+                value={catalogForm.canonicalCode}
+                onChange={(e) => setCatalogForm((f) => ({ ...f, canonicalCode: e.target.value }))}
+                className="font-mono text-sm"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="catalog-subcategory">Subcategory</Label>
+              <Select
+                value={catalogForm.subcategory}
+                onValueChange={(v) =>
+                  setCatalogForm((f) => ({ ...f, subcategory: v as HardwareSubcategory }))
+                }
+              >
+                <SelectTrigger id="catalog-subcategory">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {HARDWARE_SUBCATEGORIES.map(({ key, label }) => (
+                    <SelectItem key={key} value={key}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="catalog-description">Description</Label>
+              <Input
+                id="catalog-description"
+                placeholder="Optional description…"
+                value={catalogForm.description}
+                onChange={(e) => setCatalogForm((f) => ({ ...f, description: e.target.value }))}
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="catalog-sort-order">Sort Order</Label>
+                <Input
+                  id="catalog-sort-order"
+                  type="number"
+                  min={0}
+                  value={catalogForm.sortOrder}
+                  onChange={(e) =>
+                    setCatalogForm((f) => ({ ...f, sortOrder: parseInt(e.target.value) || 0 }))
+                  }
+                />
+              </div>
+              <div className="flex flex-col justify-end space-y-2">
+                <Label>Active</Label>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={catalogForm.active}
+                    onCheckedChange={(checked) =>
+                      setCatalogForm((f) => ({ ...f, active: checked }))
+                    }
+                  />
+                  <span className="text-sm text-muted-foreground">
+                    {catalogForm.active ? 'Visible in picker' : 'Hidden from picker'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="mt-6">
+            <Button variant="outline" onClick={() => setCatalogDialogMode(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCatalogSave}
+              disabled={
+                catalogFormLoading ||
+                !catalogForm.name.trim() ||
+                !catalogForm.canonicalCode.trim()
+              }
+            >
+              {catalogFormLoading
+                ? 'Saving…'
+                : catalogDialogMode === 'add'
+                ? 'Add Item'
+                : 'Save Changes'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Hardware Catalog Item Confirmation */}
+      <AlertDialog
+        open={!!catalogDeleteTarget}
+        onOpenChange={() => setCatalogDeleteTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete catalog item?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove{' '}
+              <span className="font-semibold">
+                &ldquo;{catalogDeleteTarget?.name}&rdquo;
+              </span>{' '}
+              from the hardware catalog. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={catalogDeleteLoading}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleCatalogDelete}
+              disabled={catalogDeleteLoading}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {catalogDeleteLoading ? 'Deleting…' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

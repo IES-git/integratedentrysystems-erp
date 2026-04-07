@@ -30,6 +30,7 @@ import { createQuote } from '@/lib/quotes-api';
 import { generateQuoteSummary } from '@/lib/gemini-api';
 import { CustomerQuotePdf } from '@/components/quotes/CustomerQuotePdf';
 import { ManufacturerQuotePdf } from '@/components/quotes/ManufacturerQuotePdf';
+import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import type { Company, EstimateItem, ItemField, Quote, QuoteItem, QuoteType } from '@/types';
 
 // ─── Local types ──────────────────────────────────────────────────────────────
@@ -111,6 +112,170 @@ function CustomerLineItemsTable({
   bulkOverrides,
   onUpdateMultiplier,
 }: CustomerLineItemsTableProps) {
+  // Separate top-level items (doors/frames) from hardware children
+  const topLevel = items.filter((i) => !i.estimateItem.parentItemId);
+  const hwByParent = new Map<string, LineItem[]>();
+  for (const i of items) {
+    if (!i.estimateItem.parentItemId) continue;
+    const list = hwByParent.get(i.estimateItem.parentItemId) ?? [];
+    list.push(i);
+    hwByParent.set(i.estimateItem.parentItemId, list);
+  }
+  // Items without a parent that also have no opening assignment (ungrouped)
+  const ungrouped = items.filter(
+    (i) => !i.estimateItem.parentItemId && !hwByParent.has(i.estimateItem.id)
+  );
+
+  let rowIdx = 0;
+
+  const renderItemRow = (item: LineItem) => {
+    const bulkOverride = findItemOverride(bulkOverrides, item.estimateItem);
+    const isOverriddenFromDefault = item.multiplier !== companyDefaultMultiplier;
+    const hasBulkOverride = bulkOverride !== undefined;
+    const stripe = rowIdx++ % 2 === 0 ? 'bg-background' : 'bg-muted/20';
+
+    return (
+      <tr key={item.estimateItem.id} className={stripe}>
+        <td className="px-4 py-3">
+          <span className="font-medium">{item.estimateItem.itemLabel}</span>
+        </td>
+        <td className="px-4 py-3 text-center text-muted-foreground">
+          {item.estimateItem.quantity}
+        </td>
+        <td className="px-4 py-3 text-right text-muted-foreground">
+          {fmt(item.unitCost, currency)}
+        </td>
+        <td className="px-4 py-3 text-center">
+          <div className="flex flex-col items-center gap-0.5">
+            <div className="flex items-center gap-1">
+              <input
+                type="number"
+                min="0.01"
+                step="0.05"
+                value={item.multiplier}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v) && v > 0) {
+                    onUpdateMultiplier(item.estimateItem.id, parseFloat(v.toFixed(2)));
+                  }
+                }}
+                className={`w-16 rounded border px-1.5 py-0.5 text-center text-xs font-semibold focus:outline-none focus:ring-1 ${
+                  isOverriddenFromDefault
+                    ? 'border-amber-300 bg-amber-50 text-amber-900 focus:ring-amber-400'
+                    : 'border-border bg-background text-foreground focus:ring-ring'
+                }`}
+              />
+              <span className="text-xs text-muted-foreground">×</span>
+            </div>
+            {hasBulkOverride && (
+              <span className="text-[10px] text-blue-600 font-medium">bulk</span>
+            )}
+            {!hasBulkOverride && isOverriddenFromDefault && (
+              <button
+                type="button"
+                onClick={() => onUpdateMultiplier(item.estimateItem.id, companyDefaultMultiplier)}
+                className="text-[10px] text-muted-foreground underline hover:text-foreground"
+              >
+                reset
+              </button>
+            )}
+          </div>
+        </td>
+        <td className="px-4 py-3 text-right">
+          <span className="font-semibold text-foreground">
+            {fmt(item.unitPrice, currency)}
+          </span>
+        </td>
+        <td className="px-4 py-3 text-right font-semibold">
+          {fmt(item.lineTotal, currency)}
+        </td>
+      </tr>
+    );
+  };
+
+  const renderHardwareRows = (parentId: string) => {
+    const hwItems = hwByParent.get(parentId) ?? [];
+    if (!hwItems.length) return null;
+    const groups = groupHardwareBySubcategory(
+      hwItems.map((i) => ({ ...i, subcategory: i.estimateItem.subcategory }))
+    );
+    return groups.map((group) => (
+      <>
+        <tr key={`hdr-${parentId}-${group.key}`} className="bg-muted/5">
+          <td
+            colSpan={6}
+            className="pl-8 pr-4 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-dashed"
+          >
+            <Wrench className="inline h-2.5 w-2.5 mr-1 opacity-60" />
+            {group.label}
+          </td>
+        </tr>
+        {group.items.map((groupItem) => {
+          const item = groupItem as LineItem & { subcategory: LineItem['estimateItem']['subcategory'] };
+          const bulkOverride = findItemOverride(bulkOverrides, item.estimateItem);
+          const isOverriddenFromDefault = item.multiplier !== companyDefaultMultiplier;
+          const hasBulkOverride = bulkOverride !== undefined;
+          const stripe = rowIdx++ % 2 === 0 ? 'bg-background' : 'bg-muted/20';
+          return (
+            <tr key={item.estimateItem.id} className={stripe}>
+              <td className="pl-10 pr-4 py-2.5">
+                <span className="text-sm text-muted-foreground">{item.estimateItem.itemLabel}</span>
+              </td>
+              <td className="px-4 py-2.5 text-center text-muted-foreground text-sm">
+                {item.estimateItem.quantity}
+              </td>
+              <td className="px-4 py-2.5 text-right text-muted-foreground text-sm">
+                {fmt(item.unitCost, currency)}
+              </td>
+              <td className="px-4 py-2.5 text-center">
+                <div className="flex flex-col items-center gap-0.5">
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.05"
+                      value={item.multiplier}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value);
+                        if (!isNaN(v) && v > 0) {
+                          onUpdateMultiplier(item.estimateItem.id, parseFloat(v.toFixed(2)));
+                        }
+                      }}
+                      className={`w-16 rounded border px-1.5 py-0.5 text-center text-xs font-semibold focus:outline-none focus:ring-1 ${
+                        isOverriddenFromDefault
+                          ? 'border-amber-300 bg-amber-50 text-amber-900 focus:ring-amber-400'
+                          : 'border-border bg-background text-foreground focus:ring-ring'
+                      }`}
+                    />
+                    <span className="text-xs text-muted-foreground">×</span>
+                  </div>
+                  {hasBulkOverride && (
+                    <span className="text-[10px] text-blue-600 font-medium">bulk</span>
+                  )}
+                  {!hasBulkOverride && isOverriddenFromDefault && (
+                    <button
+                      type="button"
+                      onClick={() => onUpdateMultiplier(item.estimateItem.id, companyDefaultMultiplier)}
+                      className="text-[10px] text-muted-foreground underline hover:text-foreground"
+                    >
+                      reset
+                    </button>
+                  )}
+                </div>
+              </td>
+              <td className="px-4 py-2.5 text-right text-sm">
+                <span className="font-medium text-foreground">{fmt(item.unitPrice, currency)}</span>
+              </td>
+              <td className="px-4 py-2.5 text-right text-sm font-medium">
+                {fmt(item.lineTotal, currency)}
+              </td>
+            </tr>
+          );
+        })}
+      </>
+    ));
+  };
+
   return (
     <div className="overflow-x-auto rounded-lg border">
       <table className="w-full text-sm">
@@ -125,72 +290,13 @@ function CustomerLineItemsTable({
           </tr>
         </thead>
         <tbody>
-          {items.map((item, idx) => {
-            const bulkOverride = findItemOverride(bulkOverrides, item.estimateItem);
-            const isOverriddenFromDefault = item.multiplier !== companyDefaultMultiplier;
-            const hasBulkOverride = bulkOverride !== undefined;
-
-            return (
-              <tr
-                key={item.estimateItem.id}
-                className={idx % 2 === 0 ? 'bg-background' : 'bg-muted/20'}
-              >
-                <td className="px-4 py-3">
-                  <span className="font-medium">{item.estimateItem.itemLabel}</span>
-                </td>
-                <td className="px-4 py-3 text-center text-muted-foreground">
-                  {item.estimateItem.quantity}
-                </td>
-                <td className="px-4 py-3 text-right text-muted-foreground">
-                  {fmt(item.unitCost, currency)}
-                </td>
-                <td className="px-4 py-3 text-center">
-                  <div className="flex flex-col items-center gap-0.5">
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        min="0.01"
-                        step="0.05"
-                        value={item.multiplier}
-                        onChange={(e) => {
-                          const v = parseFloat(e.target.value);
-                          if (!isNaN(v) && v > 0) {
-                            onUpdateMultiplier(item.estimateItem.id, parseFloat(v.toFixed(2)));
-                          }
-                        }}
-                        className={`w-16 rounded border px-1.5 py-0.5 text-center text-xs font-semibold focus:outline-none focus:ring-1 ${
-                          isOverriddenFromDefault
-                            ? 'border-amber-300 bg-amber-50 text-amber-900 focus:ring-amber-400'
-                            : 'border-border bg-background text-foreground focus:ring-ring'
-                        }`}
-                      />
-                      <span className="text-xs text-muted-foreground">×</span>
-                    </div>
-                    {hasBulkOverride && (
-                      <span className="text-[10px] text-blue-600 font-medium">bulk</span>
-                    )}
-                    {!hasBulkOverride && isOverriddenFromDefault && (
-                      <button
-                        type="button"
-                        onClick={() => onUpdateMultiplier(item.estimateItem.id, companyDefaultMultiplier)}
-                        className="text-[10px] text-muted-foreground underline hover:text-foreground"
-                      >
-                        reset
-                      </button>
-                    )}
-                  </div>
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <span className="font-semibold text-foreground">
-                    {fmt(item.unitPrice, currency)}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-right font-semibold">
-                  {fmt(item.lineTotal, currency)}
-                </td>
-              </tr>
-            );
-          })}
+          {topLevel.map((item) => (
+            <>
+              {renderItemRow(item)}
+              {renderHardwareRows(item.estimateItem.id)}
+            </>
+          ))}
+          {ungrouped.map((item) => renderItemRow(item))}
         </tbody>
       </table>
     </div>
@@ -202,90 +308,122 @@ interface ManufacturerLineItemsTableProps {
   currency: string;
 }
 
-function ManufacturerLineItemsTable({ items, currency }: ManufacturerLineItemsTableProps) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-
-  const toggle = useCallback((id: string) => {
-    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
-  }, []);
+function ManufacturerItemCard({
+  item,
+  currency,
+  isHardware = false,
+}: {
+  item: LineItem;
+  currency: string;
+  isHardware?: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const hasFields = item.estimateItem.fields.length > 0;
+  const lineCost = item.estimateItem.quantity * item.unitCost;
 
   return (
-    <div className="space-y-2">
-      {items.map((item, idx) => {
-        const isOpen = expanded[item.estimateItem.id] ?? false;
-        const hasFields = item.estimateItem.fields.length > 0;
-        const lineCost = item.estimateItem.quantity * item.unitCost;
+    <div className={`rounded-lg border overflow-hidden ${isHardware ? 'ml-6 border-dashed' : ''}`}>
+      <div
+        className={`flex items-center gap-3 px-4 py-3 bg-background ${hasFields ? 'cursor-pointer hover:bg-muted/30' : ''}`}
+        onClick={() => hasFields && setIsOpen((v) => !v)}
+      >
+        <button
+          type="button"
+          className={`flex-none text-muted-foreground transition-transform ${!hasFields ? 'opacity-20 cursor-default' : ''}`}
+          tabIndex={-1}
+        >
+          {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        </button>
+
+        <div className="flex-1 min-w-0">
+          <div className={`font-medium truncate ${isHardware ? 'text-sm text-muted-foreground' : ''}`}>
+            {item.estimateItem.itemLabel}
+          </div>
+          {item.estimateItem.canonicalCode && (
+            <div className="text-xs text-muted-foreground font-mono mt-0.5">
+              {item.estimateItem.canonicalCode}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-6 text-sm shrink-0">
+          <div className="text-right">
+            <div className="text-xs text-muted-foreground">Qty</div>
+            <div className="font-medium">{item.estimateItem.quantity}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-xs text-muted-foreground">Unit Cost</div>
+            <div className="font-medium">{fmt(item.unitCost, currency)}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-xs text-muted-foreground">Line Total</div>
+            <div className="font-semibold">{fmt(lineCost, currency)}</div>
+          </div>
+          {hasFields && (
+            <Badge variant="outline" className="text-xs">
+              <Wrench className="mr-1 h-3 w-3" />
+              {item.estimateItem.fields.length} spec{item.estimateItem.fields.length !== 1 ? 's' : ''}
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {isOpen && hasFields && (
+        <div className="border-t bg-muted/5 px-4 py-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            {item.estimateItem.fields.map((field) => (
+              <div key={field.id} className="rounded-md bg-background border px-3 py-2">
+                <div className="text-xs text-muted-foreground">{field.fieldLabel}</div>
+                <div className="mt-0.5 text-sm font-medium truncate">{field.fieldValue}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ManufacturerLineItemsTable({ items, currency }: ManufacturerLineItemsTableProps) {
+  const topLevel = items.filter((i) => !i.estimateItem.parentItemId);
+  const hwByParent = new Map<string, LineItem[]>();
+  for (const i of items) {
+    if (!i.estimateItem.parentItemId) continue;
+    const list = hwByParent.get(i.estimateItem.parentItemId) ?? [];
+    list.push(i);
+    hwByParent.set(i.estimateItem.parentItemId, list);
+  }
+
+  return (
+    <div className="space-y-3">
+      {topLevel.map((item) => {
+        const hwItems = hwByParent.get(item.estimateItem.id) ?? [];
+        const hwGroups = groupHardwareBySubcategory(
+          hwItems.map((i) => ({ ...i, subcategory: i.estimateItem.subcategory }))
+        );
 
         return (
-          <div key={item.estimateItem.id} className="rounded-lg border overflow-hidden">
-            {/* Row header */}
-            <div
-              className={`flex items-center gap-3 px-4 py-3 ${
-                idx % 2 === 0 ? 'bg-background' : 'bg-muted/20'
-              } ${hasFields ? 'cursor-pointer hover:bg-muted/30' : ''}`}
-              onClick={() => hasFields && toggle(item.estimateItem.id)}
-            >
-              {/* Expand toggle */}
-              <button
-                type="button"
-                className={`flex-none text-muted-foreground transition-transform ${
-                  !hasFields ? 'opacity-20 cursor-default' : ''
-                }`}
-                tabIndex={-1}
-              >
-                {isOpen ? (
-                  <ChevronDown className="h-4 w-4" />
-                ) : (
-                  <ChevronRight className="h-4 w-4" />
-                )}
-              </button>
-
-              {/* Item label + code */}
-              <div className="flex-1 min-w-0">
-                <div className="font-medium truncate">{item.estimateItem.itemLabel}</div>
-                {item.estimateItem.canonicalCode && (
-                  <div className="text-xs text-muted-foreground font-mono mt-0.5">
-                    {item.estimateItem.canonicalCode}
-                  </div>
-                )}
+          <div key={item.estimateItem.id} className="space-y-1">
+            <ManufacturerItemCard item={item} currency={currency} />
+            {hwGroups.map((group) => (
+              <div key={group.key} className="ml-6 space-y-1">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-1 pt-1 flex items-center gap-1">
+                  <Wrench className="h-2.5 w-2.5 opacity-60" />
+                  {group.label}
+                </p>
+                {group.items.map((groupItem) => {
+                  const hwItem = groupItem as LineItem & { subcategory: LineItem['estimateItem']['subcategory'] };
+                  return (
+                    <ManufacturerItemCard
+                      key={hwItem.estimateItem.id}
+                      item={hwItem}
+                      currency={currency}
+                      isHardware
+                    />
+                  );
+                })}
               </div>
-
-              {/* Meta columns */}
-              <div className="flex items-center gap-6 text-sm shrink-0">
-                <div className="text-right">
-                  <div className="text-xs text-muted-foreground">Qty</div>
-                  <div className="font-medium">{item.estimateItem.quantity}</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-xs text-muted-foreground">Unit Cost</div>
-                  <div className="font-medium">{fmt(item.unitCost, currency)}</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-xs text-muted-foreground">Line Total</div>
-                  <div className="font-semibold">{fmt(lineCost, currency)}</div>
-                </div>
-                {hasFields && (
-                  <Badge variant="outline" className="text-xs">
-                    <Wrench className="mr-1 h-3 w-3" />
-                    {item.estimateItem.fields.length} spec{item.estimateItem.fields.length !== 1 ? 's' : ''}
-                  </Badge>
-                )}
-              </div>
-            </div>
-
-            {/* Expandable spec grid */}
-            {isOpen && hasFields && (
-              <div className="border-t bg-muted/5 px-4 py-3">
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-                  {item.estimateItem.fields.map((field) => (
-                    <div key={field.id} className="rounded-md bg-background border px-3 py-2">
-                      <div className="text-xs text-muted-foreground">{field.fieldLabel}</div>
-                      <div className="mt-0.5 text-sm font-medium truncate">{field.fieldValue}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            ))}
           </div>
         );
       })}
