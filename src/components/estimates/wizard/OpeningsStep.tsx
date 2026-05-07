@@ -16,6 +16,12 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import {
   getEstimateOpenings,
@@ -25,10 +31,14 @@ import {
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import { BuildOpeningDialog } from './BuildOpeningDialog';
 import { ChooseExistingOpeningDialog } from './ChooseExistingOpeningDialog';
-import type { EstimateOpeningWithItems } from '@/types';
+import { TemplateOpeningDialog } from './TemplateOpeningDialog';
+import type { EstimateOpeningWithItems, OpeningTemplateType } from '@/types';
 
 interface OpeningsStepProps {
-  estimateId: string;
+  estimateId: string | null;
+  /** Provided for new (unsaved) estimates — lazily creates the DB record the
+   *  first time the user actually opens an add-opening dialog. */
+  createEstimate?: () => Promise<string>;
   onBack: () => void;
   onFinish: () => void;
   finishLabel?: string;
@@ -284,6 +294,7 @@ function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting }: 
 
 export function OpeningsStep({
   estimateId,
+  createEstimate,
   onBack,
   onFinish,
   finishLabel = 'Save & Finish',
@@ -291,22 +302,69 @@ export function OpeningsStep({
   backLabel = 'Back to Customer',
 }: OpeningsStepProps) {
   const [openings, setOpenings] = useState<EstimateOpeningWithItems[]>([]);
-  const [loadingOpenings, setLoadingOpenings] = useState(true);
+  // resolvedId tracks the actual DB estimate ID once it exists. It starts from
+  // the prop (real for existing estimates, null for new ones) and is updated
+  // when createEstimate() resolves the first time.
+  const [resolvedId, setResolvedId] = useState<string | null>(estimateId);
+  const [loadingOpenings, setLoadingOpenings] = useState(!!estimateId);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [buildDialogOpen, setBuildDialogOpen] = useState(false);
   const [chooseDialogOpen, setChooseDialogOpen] = useState(false);
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+  const [selectedTemplateType, setSelectedTemplateType] = useState<OpeningTemplateType>('single');
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editingOpening, setEditingOpening] = useState<EstimateOpeningWithItems | null>(null);
+  const [creatingEstimate, setCreatingEstimate] = useState(false);
 
+  // Sync resolvedId if the parent provides a real ID after mount (editing flow).
   useEffect(() => {
+    if (estimateId && !resolvedId) setResolvedId(estimateId);
+  }, [estimateId, resolvedId]);
+
+  // Load existing openings only when a real estimate ID is available.
+  useEffect(() => {
+    if (!resolvedId) return;
     setLoadingOpenings(true);
-    getEstimateOpenings(estimateId)
+    getEstimateOpenings(resolvedId)
       .then(setOpenings)
       .catch((err) => {
         setLoadError(err instanceof Error ? err.message : 'Failed to load openings.');
       })
       .finally(() => setLoadingOpenings(false));
-  }, [estimateId]);
+  }, [resolvedId]);
+
+  // Helper: returns existing resolvedId or calls createEstimate() to get one.
+  const getOrCreateId = async (): Promise<string | null> => {
+    if (resolvedId) return resolvedId;
+    if (!createEstimate) return null;
+    setCreatingEstimate(true);
+    try {
+      const id = await createEstimate();
+      setResolvedId(id);
+      return id;
+    } catch {
+      return null;
+    } finally {
+      setCreatingEstimate(false);
+    }
+  };
+
+  // Open a dialog, lazily creating the estimate first if needed.
+  const openDialog = async (
+    type: 'template' | 'build' | 'choose',
+    templateType?: OpeningTemplateType
+  ) => {
+    const id = await getOrCreateId();
+    if (!id) return;
+    if (type === 'template') {
+      setSelectedTemplateType(templateType ?? 'single');
+      setTemplateDialogOpen(true);
+    } else if (type === 'build') {
+      setBuildDialogOpen(true);
+    } else {
+      setChooseDialogOpen(true);
+    }
+  };
 
   const handleOpeningSaved = (newOpening: EstimateOpeningWithItems) => {
     setOpenings((prev) => [...prev, newOpening]);
@@ -317,6 +375,7 @@ export function OpeningsStep({
   };
 
   const handleEditOpening = (opening: EstimateOpeningWithItems) => {
+    // Editing always requires a real estimate (opening exists means estimate exists).
     setEditingOpening(opening);
     setBuildDialogOpen(true);
   };
@@ -351,22 +410,35 @@ export function OpeningsStep({
 
   return (
     <>
-      <BuildOpeningDialog
-        estimateId={estimateId}
-        open={buildDialogOpen}
-        onOpenChange={handleBuildDialogOpenChange}
-        onSaved={handleOpeningSaved}
-        onUpdated={handleOpeningUpdated}
-        openingCount={openings.length}
-        editingOpening={editingOpening ?? undefined}
-      />
+      {resolvedId && (
+        <>
+          <BuildOpeningDialog
+            estimateId={resolvedId}
+            open={buildDialogOpen}
+            onOpenChange={handleBuildDialogOpenChange}
+            onSaved={handleOpeningSaved}
+            onUpdated={handleOpeningUpdated}
+            openingCount={openings.length}
+            editingOpening={editingOpening ?? undefined}
+          />
 
-      <ChooseExistingOpeningDialog
-        estimateId={estimateId}
-        open={chooseDialogOpen}
-        onOpenChange={setChooseDialogOpen}
-        onCopied={handleOpeningsCopied}
-      />
+          <TemplateOpeningDialog
+            estimateId={resolvedId}
+            open={templateDialogOpen}
+            onOpenChange={setTemplateDialogOpen}
+            onSaved={handleOpeningSaved}
+            openingCount={openings.length}
+            initialTemplateType={selectedTemplateType}
+          />
+
+          <ChooseExistingOpeningDialog
+            estimateId={resolvedId}
+            open={chooseDialogOpen}
+            onOpenChange={setChooseDialogOpen}
+            onCopied={handleOpeningsCopied}
+          />
+        </>
+      )}
 
       <div className="space-y-6">
         {/* Header */}
@@ -434,18 +506,43 @@ export function OpeningsStep({
 
             {/* Add / Choose buttons */}
             <div className="flex gap-3">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="flex-1 justify-between"
+                    disabled={creatingEstimate}
+                  >
+                    {creatingEstimate ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Creating…</>
+                    ) : (
+                      <>Select Opening Type<ChevronDown className="h-4 w-4 ml-2" /></>
+                    )}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-[--radix-dropdown-menu-trigger-width]">
+                  <DropdownMenuItem onSelect={() => { openDialog('template', 'single'); }}>
+                    Single
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => { openDialog('template', 'pair'); }}>
+                    Pair
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => { openDialog('template', 'single_with_panel'); }}>
+                    Single w/ Panel
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => { openDialog('template', 'pair_with_panel'); }}>
+                    Pair w/ Panel
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => { openDialog('build'); }}>
+                    Custom
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button
                 variant="outline"
                 className="flex-1"
-                onClick={() => setBuildDialogOpen(true)}
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Add New Opening
-              </Button>
-              <Button
-                variant="outline"
-                className="flex-1"
-                onClick={() => setChooseDialogOpen(true)}
+                disabled={creatingEstimate}
+                onClick={() => openDialog('choose')}
               >
                 <Copy className="h-4 w-4 mr-2" />
                 Choose Existing Opening

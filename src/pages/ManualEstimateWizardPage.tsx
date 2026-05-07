@@ -96,13 +96,14 @@ export default function ManualEstimateWizardPage() {
             setCompanies(companiesResult.data.map(mapCompanyRow));
           }
         } else {
-          // Create a brand-new manual estimate
-          const [{ estimateId: id }, companiesResult] = await Promise.all([
-            createManualEstimate(user.id),
-            supabase.from('companies').select('*').eq('active', true).order('name'),
-          ]);
-
-          setEstimateId(id);
+          // New estimate — just load companies. The estimate record will be
+          // created lazily when the user advances to the Openings step so
+          // that abandoning the Customer step does not leave orphan records.
+          const companiesResult = await supabase
+            .from('companies')
+            .select('*')
+            .eq('active', true)
+            .order('name');
 
           if (companiesResult.data) {
             setCompanies(companiesResult.data.map(mapCompanyRow));
@@ -127,6 +128,8 @@ export default function ManualEstimateWizardPage() {
   }, []);
 
   const handleNextStep = () => {
+    // No DB write here — estimate is created lazily the first time the user
+    // opens an add-opening dialog (inside OpeningsStep via createEstimate).
     if (currentStepIndex < WIZARD_STEPS.length - 1) {
       setCurrentStepIndex((prev) => prev + 1);
     }
@@ -138,21 +141,48 @@ export default function ManualEstimateWizardPage() {
     }
   };
 
+  // Passed to OpeningsStep so it can lazily create the estimate the first time
+  // the user actually opens an add-opening dialog. Cached via useCallback so
+  // OpeningsStep's useEffect deps stay stable.
+  const createEstimate = useCallback(async (): Promise<string> => {
+    if (estimateId) return estimateId;
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) { navigate('/login'); throw new Error('Not authenticated'); }
+    const { estimateId: id } = await createManualEstimate(user.id);
+    setEstimateId(id);
+    return id;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estimateId]);
+
   const handleFinish = async () => {
-    if (!estimateId) return;
     setSaving(true);
     try {
-      await apiUpdateEstimate(estimateId, {
+      // If user never opened an add-opening dialog, no estimate exists yet.
+      // Create one now before saving the customer assignment.
+      let finalId = estimateId;
+      if (!finalId && !existingId) {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) { navigate('/login'); return; }
+        const { estimateId: id } = await createManualEstimate(user.id);
+        finalId = id;
+        setEstimateId(id);
+      }
+
+      if (!finalId) return;
+
+      await apiUpdateEstimate(finalId, {
         companyId: noCustomer ? null : selectedCustomerId,
       });
       toast({ title: 'Estimate saved', description: 'Your estimate has been saved as a draft.' });
 
       if (existingId) {
-        // Came here from the estimates list to manage openings — return there
         navigate('/app/estimates');
       } else {
-        // Brand-new estimate — open the full review wizard on the Line Items step
-        navigate(`/app/estimates/wizard?id=${estimateId}&step=1`);
+        navigate(`/app/estimates/wizard?id=${finalId}&step=1`);
       }
     } catch (err) {
       toast({
@@ -170,7 +200,7 @@ export default function ManualEstimateWizardPage() {
       <div className="flex h-full items-center justify-center">
         <div className="flex flex-col items-center gap-4 text-muted-foreground">
           <Loader2 className="h-8 w-8 animate-spin" />
-          <p className="text-sm">{existingId ? 'Loading estimate…' : 'Creating estimate…'}</p>
+          <p className="text-sm">{existingId ? 'Loading estimate…' : 'Loading…'}</p>
         </div>
       </div>
     );
@@ -238,9 +268,10 @@ export default function ManualEstimateWizardPage() {
             />
           )}
 
-          {currentStepIndex === 1 && estimateId && (
+          {currentStepIndex === 1 && (
             <OpeningsStep
               estimateId={estimateId}
+              createEstimate={!existingId ? createEstimate : undefined}
               onBack={existingId ? () => navigate('/app/estimates') : handlePrevStep}
               backLabel={existingId ? 'Back to Estimates' : 'Back to Customer'}
               onFinish={handleFinish}

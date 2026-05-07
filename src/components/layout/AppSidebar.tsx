@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft, Boxes } from 'lucide-react';
+import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft, Boxes, Layers, DollarSign, LucideIcon } from 'lucide-react';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/sidebar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -34,11 +34,6 @@ const navigation = [
     icon: FileText
   },
   {
-    title: 'Items',
-    href: '/app/items',
-    icon: Boxes
-  },
-  {
     title: 'Quotes',
     href: '/app/quotes',
     icon: FileCheck
@@ -55,18 +50,31 @@ const navigation = [
   }
 ];
 
-const adminNavigation = [
+const adminNavigation: { title: string; href: string; icon: LucideIcon }[] = [
   {
     title: 'Users',
-    href: '/app/admin/users'
+    href: '/app/admin/users',
+    icon: Users
   },
   {
-    title: 'Field Definitions',
-    href: '/app/admin/field-definitions'
+    title: 'Pricing',
+    href: '/app/pricing',
+    icon: DollarSign
+  },
+  {
+    title: 'Items',
+    href: '/app/items',
+    icon: Boxes
+  },
+  {
+    title: 'Item Fields',
+    href: '/app/item-management',
+    icon: Layers
   },
   {
     title: 'Integrations',
-    href: '/app/admin/settings/integrations'
+    href: '/app/admin/settings/integrations',
+    icon: Settings
   }
 ];
 
@@ -151,7 +159,7 @@ export function AppSidebar() {
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild tooltip={item.title} isActive={isActive(item.href)}>
                       <a href={item.href}>
-                        <Settings className="h-4 w-4" />
+                        <item.icon className="h-4 w-4" />
                         <span>{item.title}</span>
                       </a>
                     </SidebarMenuButton>

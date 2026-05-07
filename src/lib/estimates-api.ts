@@ -25,6 +25,7 @@ import type {
   BlockedFieldLabel,
   HardwareCatalogItem,
   HardwareSubcategory,
+  OpeningTemplateType,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -590,7 +591,8 @@ export async function deleteEstimate(id: string): Promise<void> {
 export async function createEstimateOpening(
   estimateId: string,
   name: string,
-  quantity: number = 1
+  quantity: number = 1,
+  templateType?: OpeningTemplateType | null
 ): Promise<EstimateOpening> {
   // Determine next sort_order
   const { count } = await supabase
@@ -605,6 +607,7 @@ export async function createEstimateOpening(
       name,
       quantity,
       sort_order: count ?? 0,
+      ...(templateType !== undefined ? { template_type: templateType } : {}),
     })
     .select()
     .single();
@@ -1048,7 +1051,20 @@ export async function createOrApproveFieldDefinition(input: {
 // Field Value Options
 // ---------------------------------------------------------------------------
 
-/** Fetch previously used values for a field definition, ordered by usage frequency. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapFieldValueOptionRow(row: any): FieldValueOption {
+  return {
+    id: row.id,
+    fieldDefinitionId: row.field_definition_id,
+    value: row.value,
+    usageCount: row.usage_count ?? 0,
+    sortOrder: row.sort_order ?? 0,
+    isDefault: row.is_default ?? false,
+    createdAt: row.created_at,
+  };
+}
+
+/** Fetch options for a field definition, ordered by sort_order then alphabetically. */
 export async function getFieldValueOptions(
   fieldDefinitionId: string
 ): Promise<FieldValueOption[]> {
@@ -1056,17 +1072,11 @@ export async function getFieldValueOptions(
     .from('field_value_options')
     .select('*')
     .eq('field_definition_id', fieldDefinitionId)
-    .order('usage_count', { ascending: false });
+    .order('sort_order', { ascending: true })
+    .order('value', { ascending: true });
 
   if (error) throw new Error(`Failed to fetch field value options: ${error.message}`);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (data || []).map((row: any) => ({
-    id: row.id,
-    fieldDefinitionId: row.field_definition_id,
-    value: row.value,
-    usageCount: row.usage_count,
-    createdAt: row.created_at,
-  }));
+  return (data || []).map(mapFieldValueOptionRow);
 }
 
 /**
@@ -1105,6 +1115,229 @@ export async function recordFieldValueUsage(
   }
 }
 
+/** Add a brand-new option for a field definition (sort_order defaults to 0; user can reorder). */
+export async function addFieldValueOption(
+  fieldDefinitionId: string,
+  value: string
+): Promise<FieldValueOption> {
+  const { data, error } = await supabase
+    .from('field_value_options')
+    .insert({ field_definition_id: fieldDefinitionId, value, usage_count: 0, sort_order: 0, is_default: false })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to add field value option: ${error.message}`);
+  return mapFieldValueOptionRow(data);
+}
+
+/** Update the display value of an existing field value option. */
+export async function updateFieldValueOption(
+  id: string,
+  value: string
+): Promise<FieldValueOption> {
+  const { data, error } = await supabase
+    .from('field_value_options')
+    .update({ value })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to update field value option: ${error.message}`);
+  return mapFieldValueOptionRow(data);
+}
+
+/** Permanently remove a field value option. */
+export async function deleteFieldValueOption(id: string): Promise<void> {
+  const { error } = await supabase
+    .from('field_value_options')
+    .delete()
+    .eq('id', id);
+
+  if (error) throw new Error(`Failed to delete field value option: ${error.message}`);
+}
+
+/**
+ * Set a single default option for a field definition. Clears any previous default
+ * for that field first, then marks the given option (or no option if null).
+ */
+export async function setDefaultFieldValueOption(
+  fieldDefinitionId: string,
+  optionId: string | null
+): Promise<void> {
+  // Clear current default
+  const { error: clearErr } = await supabase
+    .from('field_value_options')
+    .update({ is_default: false })
+    .eq('field_definition_id', fieldDefinitionId)
+    .eq('is_default', true);
+  if (clearErr) throw new Error(`Failed to clear default option: ${clearErr.message}`);
+
+  if (optionId) {
+    const { error: setErr } = await supabase
+      .from('field_value_options')
+      .update({ is_default: true })
+      .eq('id', optionId);
+    if (setErr) throw new Error(`Failed to set default option: ${setErr.message}`);
+  }
+}
+
+/** Persist a new sort_order for a batch of options (after drag-and-drop). */
+export async function reorderFieldValueOptions(
+  orderedIds: string[]
+): Promise<void> {
+  const updates = orderedIds.map((id, idx) =>
+    supabase.from('field_value_options').update({ sort_order: idx }).eq('id', id)
+  );
+  const results = await Promise.all(updates);
+  for (const { error } of results) {
+    if (error) throw new Error(`Failed to reorder options: ${error.message}`);
+  }
+}
+
+/** Persist sort_order for "other" field definitions after drag-and-drop. */
+export async function reorderFieldDefinitions(
+  orderedIds: string[]
+): Promise<void> {
+  const updates = orderedIds.map((id, idx) =>
+    supabase.from('field_definitions').update({ sort_order: idx }).eq('id', id)
+  );
+  const results = await Promise.all(updates);
+  for (const { error } of results) {
+    if (error) throw new Error(`Failed to reorder field definitions: ${error.message}`);
+  }
+}
+
+const DOOR_BIG_FIVE = new Set(['material', 'series', 'gauge', 'opening_width', 'opening_height']);
+
+/**
+ * Returns all field definitions that are associated (via item_type_fields) with
+ * any canonical code tagged as item_type = 'doors'. The big-five structural
+ * keys (material, series, gauge, opening_width, opening_height) are excluded
+ * because they are handled by dedicated wizard steps.
+ */
+export async function getDoorFieldDefinitions(): Promise<FieldDefinition[]> {
+  return getCategoryFieldDefinitions('doors');
+}
+
+/**
+ * Returns all field definitions associated (via item_type_fields) with any
+ * canonical code tagged as `item_type = slug`.  Base fields for the given
+ * slug (from item_type_base_fields) are excluded since they are handled
+ * by dedicated wizard sections.
+ */
+export async function getCategoryFieldDefinitions(slug: string): Promise<FieldDefinition[]> {
+  // 1. Get all distinct canonical codes that belong to this item type.
+  const { data: itemRows, error: itemsError } = await supabase
+    .from('estimate_items')
+    .select('canonical_code, item_type');
+
+  if (itemsError) throw new Error(`Failed to fetch estimate_items: ${itemsError.message}`);
+
+  const categoryCodes = Array.from(
+    new Set(
+      (itemRows ?? [])
+        .filter((r) => r.item_type === slug)
+        .map((r) => r.canonical_code as string)
+        .filter(Boolean)
+    )
+  );
+
+  if (categoryCodes.length === 0) return [];
+
+  // 2. Fetch the base field keys for this slug so we can exclude them.
+  const { data: baseFieldRows, error: baseFieldsError } = await supabase
+    .from('item_type_base_fields')
+    .select('field_definitions(field_key)')
+    .eq('item_type_slug', slug);
+
+  if (baseFieldsError) throw new Error(`Failed to fetch base fields: ${baseFieldsError.message}`);
+
+  const baseFieldKeySet = new Set<string>(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (baseFieldRows ?? []).map((r: any) => (r.field_definitions as any)?.field_key).filter(Boolean)
+  );
+
+  // Fall back to the legacy DOOR_BIG_FIVE exclusion for doors if no base fields are seeded yet.
+  const excludeKeys =
+    baseFieldKeySet.size > 0 ? baseFieldKeySet : slug === 'doors' ? DOOR_BIG_FIVE : new Set<string>();
+
+  // 3. Fetch item_type_fields for those codes, joined with field_definitions.
+  const { data: typeFieldRows, error: tfError } = await supabase
+    .from('item_type_fields')
+    .select('field_definitions(*)')
+    .in('canonical_code', categoryCodes);
+
+  if (tfError) throw new Error(`Failed to fetch item_type_fields: ${tfError.message}`);
+
+  // 4. Deduplicate by field_definition_id and exclude base field keys.
+  const seen = new Set<string>();
+  const results: FieldDefinition[] = [];
+  for (const row of typeFieldRows ?? []) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fd = (row as any).field_definitions;
+    if (!fd || seen.has(fd.id)) continue;
+    if (excludeKeys.has(fd.field_key)) continue;
+    seen.add(fd.id);
+    results.push(mapFieldDefinitionRow(fd));
+  }
+
+  return results;
+}
+
+/**
+ * Creates a new manual (catalog) item without tying it to any estimate.
+ * Inserts one `estimate_items` row (estimate_id = null, item_type = itemTypeSlug)
+ * and one `item_fields` row per provided field value.
+ */
+export async function createManualItem(input: {
+  itemLabel: string;
+  canonicalCode: string;
+  itemTypeSlug: string;
+  fieldValues: Array<{
+    fieldKey: string;
+    fieldLabel: string;
+    fieldValue: string;
+    valueType: FieldValueType;
+    fieldDefinitionId?: string | null;
+  }>;
+}): Promise<EstimateItem> {
+  const { data: newItem, error: itemError } = await supabase
+    .from('estimate_items')
+    .insert({
+      item_label: input.itemLabel,
+      canonical_code: input.canonicalCode,
+      item_type: input.itemTypeSlug,
+      quantity: 1,
+      sort_order: 0,
+    })
+    .select()
+    .single();
+
+  if (itemError || !newItem) {
+    throw new Error(`Failed to create item: ${itemError?.message ?? 'unknown'}`);
+  }
+
+  if (input.fieldValues.length > 0) {
+    const { error: fieldsError } = await supabase.from('item_fields').insert(
+      input.fieldValues.map((fv) => ({
+        estimate_item_id: newItem.id,
+        field_key: fv.fieldKey,
+        field_label: fv.fieldLabel,
+        field_value: fv.fieldValue,
+        value_type: fv.valueType,
+        field_definition_id: fv.fieldDefinitionId ?? null,
+      }))
+    );
+
+    if (fieldsError) {
+      await supabase.from('estimate_items').delete().eq('id', newItem.id);
+      throw new Error(`Failed to create item fields: ${fieldsError.message}`);
+    }
+  }
+
+  return mapEstimateItemRow(newItem);
+}
+
 // ---------------------------------------------------------------------------
 // Item Types & Item Type Fields
 // ---------------------------------------------------------------------------
@@ -1113,9 +1346,9 @@ export async function recordFieldValueUsage(
  * Returns item types grouped by category (doors / frames / hardware).
  *
  * Within the Doors and Frames categories, items that share identical values for
- * series + material + opening_width + opening_height are collapsed into a single
+ * series + material + gauge + opening_width + opening_height are collapsed into a single
  * group (same physical product, different hardware/finish codes).  Items that
- * are missing any of those four key fields each remain their own group.
+ * are missing any of those five key fields each remain their own group.
  *
  * Hardware items always remain per-canonical-code.
  *
@@ -1123,10 +1356,10 @@ export async function recordFieldValueUsage(
  * management; `canonicalCodes` lists every code in the group.
  */
 export async function getItemTypes(): Promise<ItemType[]> {
-  const KEY_FIELDS = ['series', 'material', 'opening_width', 'opening_height'] as const;
+  const KEY_FIELDS = ['series', 'material', 'gauge', 'opening_width', 'opening_height'] as const;
 
   const [itemsResult, keyFieldsResult, catalogResult] = await Promise.all([
-    supabase.from('estimate_items').select('canonical_code, item_label'),
+    supabase.from('estimate_items').select('canonical_code, item_label, item_type'),
     supabase
       .from('item_fields')
       .select('field_value, field_key, estimate_items!inner(canonical_code)')
@@ -1139,6 +1372,13 @@ export async function getItemTypes(): Promise<ItemType[]> {
   ]);
 
   if (itemsResult.error) throw new Error(`Failed to fetch item types: ${itemsResult.error.message}`);
+
+  // Build a set of codes that exist in the hardware catalog so we can
+  // override the label-based category check for items like "Door Closer…"
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const hardwareCatalogCodes = new Set<string>(
+    (catalogResult.data ?? []).map((row: any) => row.canonical_code as string)
+  );
 
   // Build per-canonical-code value-count maps: code -> fieldKey -> value -> count
   const fieldValueCounts = new Map<string, Map<string, Map<string, number>>>();
@@ -1160,14 +1400,14 @@ export async function getItemTypes(): Promise<ItemType[]> {
   };
 
   // Aggregate estimate_items by canonical_code
-  const codeMap = new Map<string, { itemLabel: string; usageCount: number }>();
+  const codeMap = new Map<string, { itemLabel: string; usageCount: number; itemType: string | null }>();
   for (const row of itemsResult.data ?? []) {
     const code = row.canonical_code ?? '';
     const existing = codeMap.get(code);
     if (existing) {
       existing.usageCount += 1;
     } else {
-      codeMap.set(code, { itemLabel: row.item_label, usageCount: 1 });
+      codeMap.set(code, { itemLabel: row.item_label, usageCount: 1, itemType: row.item_type ?? null });
     }
   }
 
@@ -1178,33 +1418,47 @@ export async function getItemTypes(): Promise<ItemType[]> {
     category: ItemCategory;
     series?: string;
     material?: string;
+    gauge?: string;
     openingWidth?: string;
     openingHeight?: string;
     groupKey: string;
   };
 
   const codeInfos: CodeInfo[] = Array.from(codeMap.entries()).map(
-    ([code, { itemLabel, usageCount }]) => {
+    ([code, { itemLabel, usageCount, itemType }]) => {
       const series = getMostCommon(code, 'series');
       const material = getMostCommon(code, 'material');
+      const gauge = getMostCommon(code, 'gauge');
       const openingWidth = getMostCommon(code, 'opening_width');
       const openingHeight = getMostCommon(code, 'opening_height');
 
-      const labelLower = itemLabel.toLowerCase();
+      // Hardware catalog codes take precedence — items like "Door Closer…"
+      // contain "door" in their label but are hardware, not doors.
       let category: ItemCategory;
-      if (labelLower.includes('door')) {
-        category = 'doors';
-      } else if (labelLower.includes('frame')) {
-        category = 'frames';
-      } else {
+      if (hardwareCatalogCodes.has(code)) {
         category = 'hardware';
+      } else if (itemType) {
+        // Use the explicit item_type stored on the row (set when manually created)
+        category = itemType as ItemCategory;
+      } else if (gauge !== undefined) {
+        // Gauge is a door-specific field — if it's present this is always a door
+        // regardless of what the label says (e.g. after a rename to "Polystyrene").
+        category = 'doors';
+      } else {
+        const labelLower = itemLabel.toLowerCase();
+        if (labelLower.includes('door')) {
+          category = 'doors';
+        } else if (labelLower.includes('frame')) {
+          category = 'frames';
+        } else {
+          category = 'hardware';
+        }
       }
 
-      // Only collapse into a group when ALL four key fields are present;
-      // otherwise keep this code as its own singleton group.
-      const hasAllKeyFields = series && material && openingWidth && openingHeight;
-      const groupKey = hasAllKeyFields
-        ? `${category}::${series}::${material}::${openingWidth}::${openingHeight}`
+      // A different series constitutes a different item — group by series when
+      // one is present, otherwise keep this code as its own singleton group.
+      const groupKey = series
+        ? `${category}::${series}`
         : `${category}::${code}`;
 
       return {
@@ -1214,6 +1468,7 @@ export async function getItemTypes(): Promise<ItemType[]> {
         category,
         series,
         material,
+        gauge,
         openingWidth,
         openingHeight,
         groupKey,
@@ -1242,6 +1497,7 @@ export async function getItemTypes(): Promise<ItemType[]> {
         category: primary.category,
         series: primary.series,
         material: primary.material,
+        gauge: primary.gauge,
         openingWidth: primary.openingWidth,
         openingHeight: primary.openingHeight,
       } as ItemType;
@@ -1363,19 +1619,25 @@ export async function deleteItemType(canonicalCodes: string[]): Promise<void> {
 }
 
 /**
- * Rename an item type by updating item_label for all estimate_items rows that
- * share any of the given canonical codes.
+ * Rename an item type globally across estimate_items, quote_items, and
+ * hardware_catalog. For series-grouped items, also updates the series
+ * field value in item_fields so the new label is reflected on reload.
+ *
+ * Uses a SECURITY DEFINER RPC to bypass per-user RLS restrictions that
+ * would otherwise prevent renaming items belonging to other users' estimates.
  */
 export async function renameItemType(
   canonicalCodes: string[],
-  newLabel: string
+  newLabel: string,
+  series?: string
 ): Promise<void> {
   if (canonicalCodes.length === 0) return;
 
-  const { error } = await supabase
-    .from('estimate_items')
-    .update({ item_label: newLabel })
-    .in('canonical_code', canonicalCodes);
+  const { error } = await supabase.rpc('rename_item_type', {
+    p_canonical_codes: canonicalCodes,
+    p_new_label: newLabel,
+    p_series: series ?? null,
+  });
 
   if (error) throw new Error(`Failed to rename item type: ${error.message}`);
 }
@@ -1734,6 +1996,7 @@ function mapEstimateItemRow(row: any): EstimateItem {
     openingId: row.opening_id ?? null,
     parentItemId: row.parent_item_id ?? null,
     subcategory: row.subcategory ?? null,
+    itemType: row.item_type ?? null,
     createdAt: row.created_at,
   };
 }
@@ -1746,6 +2009,7 @@ function mapEstimateOpeningRow(row: any): EstimateOpening {
     name: row.name,
     quantity: row.quantity,
     sortOrder: row.sort_order,
+    templateType: row.template_type ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1777,6 +2041,7 @@ function mapFieldDefinitionRow(row: any): FieldDefinition {
     description: row.description,
     status: row.status,
     usageCount: row.usage_count,
+    sortOrder: row.sort_order ?? 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

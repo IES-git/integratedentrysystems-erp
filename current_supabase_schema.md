@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-04-07 (hardware_catalog table with RLS, indexes, updated_at trigger, and seeded items for swing_it / close_it / latch_it / protect_it subcategories)
+Last updated: 2026-05-06 (added item_type_registry and item_type_base_fields tables; relaxed estimate_items.item_type CHECK constraint to allow any registered slug)
 
 ## Authentication Status
 
@@ -50,6 +50,7 @@ The "learning" table that grows as Gemini discovers new field types during estim
 - `description` (TEXT) - AI-generated description of what this field represents
 - `status` (TEXT, NOT NULL, DEFAULT 'pending_review') - 'approved' or 'pending_review'
 - `usage_count` (INTEGER, DEFAULT 0) - How many times this field has been extracted
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - User-defined display order for "other" fields (drag-and-drop in Item Management)
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
 
@@ -260,6 +261,7 @@ Groups of estimate items (doors/frames + hardware) within an estimate. Each open
 - `name` (TEXT, NOT NULL, DEFAULT 'Opening 1') - Display name for the opening
 - `quantity` (INTEGER, NOT NULL, DEFAULT 1) - How many times this opening repeats
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order within the estimate
+- `template_type` (ENUM `opening_template_type`, NULLABLE) - Template type for the opening; NULL means custom. Values: `single`, `pair`, `single_with_panel`, `pair_with_panel`
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
 
@@ -294,6 +296,7 @@ Line items extracted from estimates.
 - `opening_id` (UUID, nullable) - FK to estimate_openings.id, SET NULL on delete — the opening this item belongs to
 - `parent_item_id` (UUID, nullable) - FK to estimate_items.id, CASCADE on delete — for hardware items, points to the parent door or frame item
 - `subcategory` (TEXT, nullable) - CHECK IN ('swing_it','close_it','latch_it','protect_it') — hardware subcategory for display grouping; NULL for non-hardware items
+- `item_type` (TEXT, nullable) - Top-level category tag matching a slug in `item_type_registry`; used by Item Fields to resolve which field definitions apply to this item. The original CHECK IN ('doors','frames','hardware') constraint has been dropped — app logic validates against `item_type_registry`.
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
 **Indexes:**
@@ -302,13 +305,14 @@ Line items extracted from estimates.
 - `idx_estimate_items_manufacturer_id` on manufacturer_id
 - `idx_estimate_items_opening_id` on opening_id
 - `idx_estimate_items_parent_item_id` on parent_item_id
+- `idx_estimate_items_item_type` on item_type
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
-- `Users can read estimate items they own` - Users can SELECT items for accessible estimates
-- `Users can insert items for their own estimates` - Users can INSERT items for their own estimates
+- `Users can read estimate items they own` - Users can SELECT items for accessible estimates, or standalone items where `estimate_id IS NULL` (manual catalog items)
+- `Users can insert items for their own estimates` - Users can INSERT items for their own estimates; admins can also INSERT standalone items (`estimate_id IS NULL`) for the item catalog
 - `Users can update items for their own estimates` - Users can UPDATE items for their own estimates
-- `Users can delete items for their own estimates` - Users can DELETE items for their own estimates
+- `Users can delete items for their own estimates` - Users can DELETE items for their own estimates; admins can also DELETE standalone items (`estimate_id IS NULL`) for the item catalog
 
 ### public.item_fields
 
@@ -402,6 +406,60 @@ END;
 $$ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public;
+```
+
+### public.rename_item_type(p_canonical_codes TEXT[], p_new_label TEXT, p_series TEXT DEFAULT NULL)
+
+Global item-type rename RPC used by the Items Management page. Updates `item_label` in `estimate_items` and `quote_items`, `name` in `hardware_catalog`, and (when `p_series` is provided) the `field_value` for `field_key = 'series'` in `item_fields`, `series_value` in `pricing_tables`, and `value` in `field_value_options` (for series field definitions). This keeps the pricing page and estimate wizard dropdown in sync with any series rename. Uses `SECURITY DEFINER` to bypass per-user RLS so the rename applies to all estimates, not only those owned by the current user. `GRANT EXECUTE … TO authenticated` allows any logged-in user to call it.
+
+```sql
+CREATE OR REPLACE FUNCTION public.rename_item_type(
+  p_canonical_codes text[],
+  p_new_label       text,
+  p_series          text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE estimate_items
+  SET item_label = p_new_label
+  WHERE canonical_code = ANY(p_canonical_codes);
+
+  UPDATE quote_items
+  SET item_label = p_new_label
+  WHERE canonical_code = ANY(p_canonical_codes);
+
+  UPDATE hardware_catalog
+  SET name = p_new_label, updated_at = now()
+  WHERE canonical_code = ANY(p_canonical_codes);
+
+  IF p_series IS NOT NULL THEN
+    UPDATE item_fields
+    SET field_value = p_new_label
+    WHERE field_key = 'series'
+      AND estimate_item_id IN (
+        SELECT id FROM estimate_items
+        WHERE canonical_code = ANY(p_canonical_codes)
+      );
+
+    -- Keep pricing_tables.series_value in sync
+    UPDATE pricing_tables
+    SET series_value = p_new_label
+    WHERE series_value = p_series;
+
+    -- Keep field_value_options.value in sync for the series dropdown
+    UPDATE field_value_options
+    SET value = p_new_label
+    WHERE value = p_series
+      AND field_definition_id IN (
+        SELECT id FROM field_definitions WHERE field_key = 'series'
+      );
+  END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.rename_item_type(text[], text, text) TO authenticated;
 ```
 
 ### public.upsert_field_value_option(p_field_definition_id UUID, p_value TEXT)
@@ -591,10 +649,13 @@ Tracks previously used values for each field definition, enabling smart dropdown
 - `field_definition_id` (UUID, NOT NULL) - FK to field_definitions.id, CASCADE on delete
 - `value` (TEXT, NOT NULL) - The stored field value
 - `usage_count` (INTEGER, NOT NULL, DEFAULT 1) - How many times this value has been used
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - User-defined display order within a field (drag-and-drop)
+- `is_default` (BOOLEAN, NOT NULL, DEFAULT false) - Whether this option is the default for the estimates wizard
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
 **Constraints:**
 - `field_value_options_field_definition_id_value_key` UNIQUE on `(field_definition_id, value)`
+- `field_value_options_single_default_per_field` UNIQUE INDEX on `(field_definition_id) WHERE is_default = true` — enforces at most one default per field
 
 **Indexes:**
 - `idx_field_value_options_field_definition_id` on field_definition_id
@@ -640,6 +701,379 @@ Junction table that explicitly associates field definitions with item types (ide
 
 ---
 
+---
+
+### public.pricing_tables
+
+One row per pricing series (e.g. "CH"). Category-scoped with a soft-link to `field_value_options` for traceability.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `category` (TEXT, NOT NULL) - CHECK IN ('doors','frames','hardware')
+- `series_value` (TEXT, NOT NULL) - e.g. `'CH'`, mirrors a value from `field_value_options` for the `series` field
+- `field_value_option_id` (UUID, NULLABLE, FK → field_value_options.id ON DELETE SET NULL) - Soft-link for traceability
+- `name` (TEXT, NOT NULL) - Display name (defaults to the series value)
+- `description` (TEXT, NULLABLE) - Optional description
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- ~~UNIQUE `(category, series_value)`~~ — removed to allow multiple pricing tables per series (one per manufacturer)
+
+**Indexes:**
+- `idx_pricing_tables_category` on category
+- `idx_pricing_tables_series_value` on series_value
+- `idx_pricing_tables_field_value_option_id` on field_value_option_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing tables` - All authenticated users can SELECT
+- `Admins can insert pricing tables` - Only admins can INSERT
+- `Admins can update pricing tables` - Only admins can UPDATE
+- `Admins can delete pricing tables` - Only admins can DELETE
+
+**Triggers:**
+- `set_pricing_tables_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+---
+
+### public.pricing_table_vendors
+
+Junction table: many-to-many between `pricing_tables` and `companies` (manufacturers).
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `pricing_table_id` (UUID, NOT NULL, FK → pricing_tables.id ON DELETE CASCADE)
+- `company_id` (UUID, NOT NULL, FK → companies.id ON DELETE CASCADE)
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(pricing_table_id, company_id)`
+
+**Indexes:**
+- `idx_pricing_table_vendors_pricing_table_id` on pricing_table_id
+- `idx_pricing_table_vendors_company_id` on company_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing table vendors` - All authenticated users can SELECT
+- `Admins can insert pricing table vendors` - Only admins can INSERT
+- `Admins can delete pricing table vendors` - Only admins can DELETE
+
+**Notes:** Vendor-eligibility (only manufacturers) is enforced at the UI/API layer by filtering `companies.company_type IN ('manufacturer','both')`.
+
+---
+
+### public.pricing_columns
+
+Column definitions for a pricing table (e.g. "18 Gauge / CRS").
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `pricing_table_id` (UUID, NOT NULL, FK → pricing_tables.id ON DELETE CASCADE)
+- `label` (TEXT, NOT NULL) - e.g. `'18 Gauge / CRS'`
+- `criteria` (JSONB, NOT NULL, DEFAULT `{}`) - Column criteria shape: `Record<string, string | { type: 'in'; values: string[] }>`
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:**
+- `idx_pricing_columns_table_sort` on (pricing_table_id, sort_order)
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing columns` - All authenticated users can SELECT
+- `Admins can insert pricing columns` - Only admins can INSERT
+- `Admins can update pricing columns` - Only admins can UPDATE
+- `Admins can delete pricing columns` - Only admins can DELETE
+
+**Triggers:**
+- `set_pricing_columns_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+---
+
+### public.pricing_rows
+
+Row definitions for a pricing table (e.g. "2-0, 2-4 × 6'8"").
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `pricing_table_id` (UUID, NOT NULL, FK → pricing_tables.id ON DELETE CASCADE)
+- `label` (TEXT, NOT NULL) - e.g. `'2-0, 2-4 × 6\'8"'`
+- `width_criteria` (JSONB, NOT NULL, DEFAULT `{}`) - DimensionCriteria shape for width matching
+- `height_criteria` (JSONB, NOT NULL, DEFAULT `{}`) - DimensionCriteria shape for height matching
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Criteria shape (DimensionCriteria):**
+```ts
+type DimensionCriteria =
+  | { type: 'in'; values: number[] }
+  | { type: 'between'; min: number; max: number }
+  | { type: 'gte'; value: number }
+  | { type: 'lte'; value: number };
+```
+
+**Indexes:**
+- `idx_pricing_rows_table_sort` on (pricing_table_id, sort_order)
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing rows` - All authenticated users can SELECT
+- `Admins can insert pricing rows` - Only admins can INSERT
+- `Admins can update pricing rows` - Only admins can UPDATE
+- `Admins can delete pricing rows` - Only admins can DELETE
+
+**Triggers:**
+- `set_pricing_rows_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+---
+
+### public.pricing_cells
+
+Individual price values at the intersection of a row and column.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `pricing_row_id` (UUID, NOT NULL, FK → pricing_rows.id ON DELETE CASCADE)
+- `pricing_column_id` (UUID, NOT NULL, FK → pricing_columns.id ON DELETE CASCADE)
+- `price` (NUMERIC(12,2), NULLABLE) - NULL = blank cell
+- `currency` (TEXT, NOT NULL, DEFAULT 'USD') - ISO currency code
+- `notes` (TEXT, NULLABLE) - Optional cell notes
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(pricing_row_id, pricing_column_id)`
+
+**Indexes:**
+- `idx_pricing_cells_row_id` on pricing_row_id
+- `idx_pricing_cells_column_id` on pricing_column_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing cells` - All authenticated users can SELECT
+- `Admins can insert pricing cells` - Only admins can INSERT
+- `Admins can update pricing cells` - Only admins can UPDATE
+- `Admins can delete pricing cells` - Only admins can DELETE
+
+**Triggers:**
+- `set_pricing_cells_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+**Migration:** `create_pricing_tables` (applied 2026-04-29)
+
+---
+
+---
+
+### public.item_type_field_overrides
+
+Per-item-type overrides for a field definition. Uses a copy-on-write model — a door item starts with no override rows and inherits the global doors-wizard config; the first edit writes a row here, leaving the global config untouched.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `canonical_code` (TEXT, NOT NULL) - The item type (e.g., 'CH-door')
+- `field_definition_id` (UUID, NOT NULL, FK → field_definitions.id ON DELETE CASCADE)
+- `field_label_override` (TEXT, NULL) - Custom label for this item type only
+- `is_required` (BOOLEAN, NOT NULL, DEFAULT false) - Whether field is required for this item
+- `is_adder` (BOOLEAN, NOT NULL, DEFAULT false) - When true, field appears in the Adders tab of the Pricing editor
+- `is_hidden` (BOOLEAN, NOT NULL, DEFAULT false) - Hides the field in the expanded item panel
+- `sort_order` (INTEGER, NULL) - Per-item display order; NULL = inherit global sort_order
+- `is_added_locally` (BOOLEAN, NOT NULL, DEFAULT false) - True if the field was added to this item only (not present in global defaults)
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(canonical_code, field_definition_id)`
+
+**Indexes:**
+- `idx_item_type_field_overrides_canonical_code` on canonical_code
+- `idx_item_type_field_overrides_field_definition_id` on field_definition_id
+- `idx_item_type_field_overrides_is_adder` on canonical_code WHERE is_adder = true
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type field overrides` - All authenticated users can SELECT
+- `Authenticated users can insert item type field overrides` - All authenticated users can INSERT
+- `Authenticated users can update item type field overrides` - All authenticated users can UPDATE
+- `Authenticated users can delete item type field overrides` - All authenticated users can DELETE
+
+**Triggers:**
+- `set_item_type_field_overrides_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+---
+
+### public.item_type_field_value_options
+
+Per-item-type option list. When **any** row exists for `(canonical_code, field_definition_id)`, that full set replaces the global `field_value_options` for this item (copy-on-write snapshot).
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `canonical_code` (TEXT, NOT NULL) - The item type
+- `field_definition_id` (UUID, NOT NULL, FK → field_definitions.id ON DELETE CASCADE)
+- `value` (TEXT, NOT NULL) - Option value string
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order
+- `is_default` (BOOLEAN, NOT NULL, DEFAULT false) - Whether this option is the default for estimates wizard
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(canonical_code, field_definition_id, value)`
+
+**Indexes:**
+- `idx_item_type_field_value_options_canonical_field` on (canonical_code, field_definition_id)
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type field value options` - All authenticated users can SELECT
+- `Authenticated users can insert item type field value options` - All authenticated users can INSERT
+- `Authenticated users can update item type field value options` - All authenticated users can UPDATE
+- `Authenticated users can delete item type field value options` - All authenticated users can DELETE
+
+---
+
+### public.item_type_manufacturer_field_labels
+
+Per-item-type alias overrides. Same shape as `manufacturer_field_labels` plus `canonical_code` and `is_removed` flag (allows an item to hide an inherited global alias).
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `canonical_code` (TEXT, NOT NULL) - The item type
+- `field_definition_id` (UUID, NOT NULL, FK → field_definitions.id ON DELETE CASCADE)
+- `manufacturer_id` (UUID, NULL, FK → companies.id ON DELETE CASCADE) - NULL = generic alias
+- `manufacturer_field_label` (TEXT, NOT NULL) - Alias label text
+- `status` (TEXT, NOT NULL, DEFAULT 'pending') - CHECK IN ('pending', 'approved')
+- `is_removed` (BOOLEAN, NOT NULL, DEFAULT false) - True when this item has removed an inherited global alias
+- `notes` (TEXT, NULL) - Optional notes
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(canonical_code, field_definition_id, manufacturer_id, manufacturer_field_label)`
+
+**Indexes:**
+- `idx_item_type_mfl_canonical_field` on (canonical_code, field_definition_id)
+- `idx_item_type_mfl_manufacturer_id` on manufacturer_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type manufacturer field labels` - All authenticated users can SELECT
+- `Authenticated users can insert item type manufacturer field labels` - All authenticated users can INSERT
+- `Authenticated users can update item type manufacturer field labels` - All authenticated users can UPDATE
+- `Authenticated users can delete item type manufacturer field labels` - All authenticated users can DELETE
+
+**Triggers:**
+- `set_item_type_manufacturer_field_labels_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+---
+
+### public.pricing_adder_cells
+
+One price cell per `(pricing_table) × (item type) × (adder field) × (option value) × (vendor)`. Populated from the Adders tab in the Pricing editor for fields that have `is_adder = true` in `item_type_field_overrides`. Each option value for the field gets its own row so adder prices can vary by option.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `pricing_table_id` (UUID, NOT NULL, FK → pricing_tables.id ON DELETE CASCADE)
+- `canonical_code` (TEXT, NOT NULL) - The item type that has this field as an adder
+- `field_definition_id` (UUID, NOT NULL, FK → field_definitions.id ON DELETE CASCADE) - The adder field
+- `option_value` (TEXT, NOT NULL, DEFAULT '') - The specific option value being priced (e.g. "18 Gauge")
+- `company_id` (UUID, NOT NULL, FK → companies.id ON DELETE CASCADE) - The vendor/manufacturer
+- `price` (NUMERIC(12,2), NULL) - NULL = blank/not set
+- `currency` (TEXT, NOT NULL, DEFAULT 'USD') - ISO currency code
+- `notes` (TEXT, NULL) - Optional cell notes
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(pricing_table_id, canonical_code, field_definition_id, option_value, company_id)`
+
+**Indexes:**
+- `idx_pricing_adder_cells_table_id` on pricing_table_id
+- `idx_pricing_adder_cells_canonical_code` on canonical_code
+- `idx_pricing_adder_cells_field_definition_id` on field_definition_id
+- `idx_pricing_adder_cells_company_id` on company_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing adder cells` - All authenticated users can SELECT
+- `Authenticated users can insert pricing adder cells` - All authenticated users can INSERT
+- `Authenticated users can update pricing adder cells` - All authenticated users can UPDATE
+- `Authenticated users can delete pricing adder cells` - All authenticated users can DELETE
+
+**Triggers:**
+- `set_pricing_adder_cells_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+**Migrations:**
+- `add_item_type_field_overrides_and_adders` (applied 2026-05-01) - Initial table creation
+- `add_option_value_to_pricing_adder_cells` (applied 2026-05-01) - Added `option_value` column and updated unique constraint to include it, enabling per-option pricing
+
+---
+
+### public.item_type_registry
+
+Stores user-defined and system item types. Replaces hardcoded category enum for dynamic category support.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `name` (TEXT, NOT NULL) - Display name (e.g., "Doors")
+- `slug` (TEXT, UNIQUE NOT NULL) - URL/code identifier (e.g., "doors")
+- `icon` (TEXT, NULLABLE) - Lucide icon name
+- `description` (TEXT, NULLABLE) - Human-readable description
+- `sort_order` (INTEGER, DEFAULT 0) - Display order
+- `is_system` (BOOLEAN, DEFAULT false) - True for the 3 built-in types (doors, frames, hardware)
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, DEFAULT NOW())
+
+**Indexes:**
+- `idx_item_type_registry_slug` on slug
+- `idx_item_type_registry_sort_order` on sort_order
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type registry` - All authenticated users can SELECT
+- `Admins can insert item type registry` - Only admins can INSERT
+- `Admins can update item type registry` - Only admins can UPDATE
+- `Admins can delete item type registry` - Only admins can DELETE (non-system types only)
+
+**Triggers:**
+- `set_item_type_registry_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+**Seed data:** 3 system types seeded on creation — Doors (slug: doors), Frames (slug: frames), Hardware (slug: hardware)
+
+**Migration:** `create_item_type_registry` (applied 2026-05-06)
+
+---
+
+### public.item_type_base_fields
+
+Junction table defining which `field_definitions` are "base fields" for each item type. Replaces the hardcoded BIG_FIVE constant.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `item_type_slug` (TEXT, NOT NULL, FK → item_type_registry(slug) ON DELETE CASCADE) - The item type
+- `field_definition_id` (UUID, NOT NULL, FK → field_definitions(id) ON DELETE CASCADE) - The field
+- `sort_order` (INTEGER, DEFAULT 0) - Display order within the base fields section
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(item_type_slug, field_definition_id)`
+
+**Indexes:**
+- `idx_item_type_base_fields_slug` on item_type_slug
+- `idx_item_type_base_fields_field_definition_id` on field_definition_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type base fields` - All authenticated users can SELECT
+- `Admins can insert item type base fields` - Only admins can INSERT
+- `Admins can delete item type base fields` - Only admins can DELETE
+
+**Seed data:**
+- Doors Big Five base fields seeded at sort_order 0–3: `series`, `gauge`, `opening_width`, `opening_height`
+- Doors "other" fields seeded at sort_order 100–118 from legacy `item_type_fields` data (migration `seed_doors_other_fields_into_base_fields`): `closer`, `design`, `door_description_code`, `exit_device_height_code`, `exit_device_prep_type`, `glass_or_louver`, `handing`, `hinge_measurements`, `hinge_option`, `hinge_quantity`, `hinge_spacing_code`, `lock_description`, `lock_measurement_btm_to_cl`, `material`, `net_height`, `net_width`, `quantity`, `type_of_hinging`, `undercut_code`
+
+**Migration:** `create_item_type_base_fields` (applied 2026-05-06)
+
+---
+
 ## Migrations Applied
 
 1. `create_users_table_with_rls` - Initial users table creation with RLS policies
@@ -669,6 +1103,14 @@ Junction table that explicitly associates field definitions with item types (ide
 25. `add_parent_item_id_to_estimate_items` - Added `parent_item_id` FK column (nullable, CASCADE on delete) to `estimate_items` self-referencing for hardware child items under a door or frame; index on parent_item_id
 26. `create_manufacturer_field_labels_table` - Created `manufacturer_field_labels` table mapping manufacturer-specific field terminology (e.g., "Width" for CECO) to master `field_definitions`; FK to `field_definitions` (CASCADE) and nullable FK to `companies`; unique on `(field_definition_id, manufacturer_id, manufacturer_field_label)`; indexes, updated_at trigger, and full authenticated RLS policies
 27. `add_subcategory_to_estimate_items` - Added `subcategory` TEXT column (nullable, CHECK IN swing_it/close_it/latch_it/protect_it) to `estimate_items` for hardware display grouping; backfilled existing hardware rows via join to `hardware_catalog` by `canonical_code`
+28. `add_template_type_to_estimate_openings` - Created `opening_template_type` enum (single, pair, single_with_panel, pair_with_panel) and added nullable `template_type` column to `estimate_openings`; NULL indicates a custom (manual) opening
+29. `create_pricing_tables` - Created `pricing_tables`, `pricing_table_vendors`, `pricing_columns`, `pricing_rows`, and `pricing_cells` tables for the door pricing management feature; full RLS (read = authenticated, write = admins via `is_admin()`), `updated_at` triggers via `handle_updated_at()`, and indexes on all FK and sort-order columns
+30. `add_item_type_field_overrides_and_adders` - Created `item_type_field_overrides`, `item_type_field_value_options`, `item_type_manufacturer_field_labels`, and `pricing_adder_cells` tables for per-item field customization and pricing adders; full authenticated CRUD RLS, `updated_at` triggers, and indexes on all FK and filter columns
+31. `add_option_value_to_pricing_adder_cells` - Added `option_value TEXT NOT NULL DEFAULT ''` to `pricing_adder_cells` and updated the unique constraint from `(pricing_table_id, canonical_code, field_definition_id, company_id)` to `(pricing_table_id, canonical_code, field_definition_id, option_value, company_id)` to support per-option adder pricing
+32. `create_item_type_registry` - Created `item_type_registry` table for dynamic item type management; seeded 3 system types (doors, frames, hardware); full RLS (read = authenticated, write = admins), updated_at trigger, indexes on slug and sort_order
+33. `create_item_type_base_fields` - Created `item_type_base_fields` junction table linking `item_type_registry` slugs to `field_definitions`; seeded doors base fields from BIG_FIVE keys; full RLS (read = authenticated, write/delete = admins), indexes on slug and field_definition_id
+34. `seed_doors_other_fields_into_base_fields` - Seeded 19 non-Big-Five door fields (closer, design, door_description_code, exit_device_height_code, exit_device_prep_type, glass_or_louver, handing, hinge_measurements, hinge_option, hinge_quantity, hinge_spacing_code, lock_description, lock_measurement_btm_to_cl, material, net_height, net_width, quantity, type_of_hinging, undercut_code) into `item_type_base_fields` at sort_order 100–118 so all door items inherit them automatically
+34. `relax_estimate_items_item_type_check` - Dropped `estimate_items_item_type_check` CHECK constraint from `estimate_items.item_type`; app logic now validates against `item_type_registry` slug values
 
 ## Edge Functions
 
@@ -772,6 +1214,33 @@ Admin page for managing AI-discovered field definitions used in estimate extract
 - `getEstimateFileUrl(filePath)` - Generate temporary signed URL for file preview
 
 **Access:** Admin users only (enforced by sidebar visibility and Supabase RLS policies)
+
+## Item Registry & Manual Item API
+
+### Item Type Registry (`src/lib/item-fields-api.ts`)
+
+API functions for managing the `item_type_registry` and `item_type_base_fields` tables:
+
+- `getItemTypeRegistry()` — Returns all rows from `item_type_registry` ordered by `sort_order`, then `name`. Used by `CategoryDashboard` and `CreateItemDialog`.
+- `createItemType({ name, slug, icon?, description? })` — Inserts a new non-system item type into `item_type_registry`. Returns the created `ItemTypeRegistryEntry`.
+- `deleteItemType(slug)` — Deletes a non-system item type. Guards against `is_system = true` types; throws if the type is a system type or doesn't exist.
+- `getItemTypeBaseFields(slug)` — Returns all `item_type_base_fields` rows for the given slug, joined with `field_definitions`, ordered by `sort_order`. Used by `CategoryFieldsWizard` and `CreateItemDialog`.
+- `addItemTypeBaseField(slug, fieldDefinitionId)` — Appends a field definition as a base field for the given item type slug. Auto-assigns `sort_order = max + 1`. Returns the new `ItemTypeBaseField` row with joined `field_definitions`.
+- `removeItemTypeBaseField(slug, fieldDefinitionId)` — Removes a base field association for the given slug and field_definition_id pair.
+
+### Category Field Definitions & Manual Item Creation (`src/lib/estimates-api.ts`)
+
+- `getCategoryFieldDefinitions(slug)` — Parameterized replacement for `getDoorFieldDefinitions`. Returns all `field_definitions` linked via `item_type_fields` to any `estimate_items` with `item_type = slug`, excluding base fields for that slug (loaded from `item_type_base_fields`). Falls back to legacy BIG_FIVE exclusion for `'doors'` if no base fields are seeded.
+- `getDoorFieldDefinitions()` — Thin wrapper: calls `getCategoryFieldDefinitions('doors')`. Kept for backward compatibility.
+- `createManualItem({ itemLabel, canonicalCode, itemTypeSlug, fieldValues })` — Inserts a new `estimate_items` row (`estimate_id = null`, `item_type = itemTypeSlug`) and one `item_fields` row per entry in `fieldValues`. Returns the created `EstimateItem`. Used by `CreateItemDialog` to add catalog items without tying them to an estimate.
+
+### TypeScript Types (`src/types/index.ts`)
+
+New types added for dynamic item type support:
+
+- `ItemTypeRegistryEntry` — `{ id, name, slug, icon, description, sortOrder, isSystem, createdAt, updatedAt }`
+- `ItemTypeBaseField` — `{ id, itemTypeSlug, fieldDefinitionId, sortOrder, createdAt, fieldDefinition? }`
+- `ItemCategory` — broadened from `'doors' | 'frames' | 'hardware'` to `string` to allow any registered slug
 
 ### public.hardware_catalog
 

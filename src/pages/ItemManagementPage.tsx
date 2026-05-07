@@ -16,12 +16,14 @@ import {
   DoorOpen,
   Square,
   Wrench,
+  Package,
   Building2,
   Tag,
   Ban,
   ShieldOff,
   ArrowLeftRight,
   ToggleLeft,
+  type LucideIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -94,7 +96,10 @@ import {
   deleteHardwareCatalogItem,
 } from '@/lib/estimates-api';
 import { listCompanies, createCompany } from '@/lib/companies-api';
+import { getItemTypeRegistry } from '@/lib/item-fields-api';
 import { useAuth } from '@/contexts/AuthContext';
+import { ItemFieldsPanel } from '@/components/items/ItemFieldsPanel';
+import { CreateItemDialog } from '@/components/items/CreateItemDialog';
 import type {
   ItemType,
   ItemCategory,
@@ -107,13 +112,15 @@ import type {
   Company,
   HardwareCatalogItem,
   HardwareSubcategory,
+  ItemTypeRegistryEntry,
 } from '@/types';
 
-const CATEGORIES: { key: ItemCategory; label: string; icon: typeof DoorOpen }[] = [
-  { key: 'doors', label: 'Doors', icon: DoorOpen },
-  { key: 'frames', label: 'Frames', icon: Square },
-  { key: 'hardware', label: 'Hardware', icon: Wrench },
-];
+const ITEM_TYPE_ICON_MAP: Record<string, LucideIcon> = {
+  DoorOpen,
+  Square,
+  Wrench,
+  Package,
+};
 
 type HardwareSubtab = HardwareSubcategory | 'discovered';
 
@@ -135,11 +142,15 @@ export default function ItemManagementPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
 
+  const [itemTypeRegistry, setItemTypeRegistry] = useState<ItemTypeRegistryEntry[]>([]);
+  const [registryLoading, setRegistryLoading] = useState(true);
+
   const [itemTypes, setItemTypes] = useState<ItemType[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<ItemCategory>('doors');
+  const [seriesFilter, setSeriesFilter] = useState<string | null>(null);
   const [expandedCodes, setExpandedCodes] = useState<Set<string>>(new Set());
   const [itemTypeFieldsMap, setItemTypeFieldsMap] = useState<Map<string, ItemTypeField[]>>(new Map());
   const [fieldsLoading, setFieldsLoading] = useState<Set<string>>(new Set());
@@ -207,8 +218,34 @@ export default function ItemManagementPage() {
   const [catalogDeleteTarget, setCatalogDeleteTarget] = useState<HardwareCatalogItem | null>(null);
   const [catalogDeleteLoading, setCatalogDeleteLoading] = useState(false);
 
+  // Create item dialog state
+  const [createItemOpen, setCreateItemOpen] = useState(false);
+  const [createItemDefaultSlug, setCreateItemDefaultSlug] = useState<string | undefined>(undefined);
+
   const loadingCodesRef = useRef(new Set<string>());
   const { toast } = useToast();
+
+  const fetchItemTypeRegistry = useCallback(async () => {
+    setRegistryLoading(true);
+    try {
+      const data = await getItemTypeRegistry();
+      setItemTypeRegistry(data);
+      // If the currently active category doesn't exist in the registry, switch to the first one
+      setActiveCategory((prev) => {
+        if (data.length === 0) return prev;
+        return data.some((t) => t.slug === prev) ? prev : (data[0].slug as ItemCategory);
+      });
+    } catch {
+      // best-effort — fallback to hardcoded system types if registry fails
+      setItemTypeRegistry([
+        { id: 'doors', name: 'Doors', slug: 'doors', icon: 'DoorOpen', description: null, sortOrder: 0, isSystem: true, createdAt: '' , updatedAt: '' },
+        { id: 'frames', name: 'Frames', slug: 'frames', icon: 'Square', description: null, sortOrder: 1, isSystem: true, createdAt: '', updatedAt: '' },
+        { id: 'hardware', name: 'Hardware', slug: 'hardware', icon: 'Wrench', description: null, sortOrder: 2, isSystem: true, createdAt: '', updatedAt: '' },
+      ]);
+    } finally {
+      setRegistryLoading(false);
+    }
+  }, []);
 
   const fetchItemTypes = useCallback(async () => {
     try {
@@ -344,6 +381,7 @@ export default function ItemManagementPage() {
   };
 
   useEffect(() => {
+    fetchItemTypeRegistry();
     fetchItemTypes();
     fetchBlockedLabels();
     fetchCatalog();
@@ -359,7 +397,7 @@ export default function ItemManagementPage() {
         )
       )
       .catch(() => {/* best-effort */});
-  }, [fetchItemTypes, fetchBlockedLabels, fetchCatalog]);
+  }, [fetchItemTypeRegistry, fetchItemTypes, fetchBlockedLabels, fetchCatalog]);
 
   const loadFieldsForCode = useCallback(async (canonicalCode: string, allCodes: string[]) => {
     if (loadingCodesRef.current.has(canonicalCode)) return;
@@ -394,7 +432,8 @@ export default function ItemManagementPage() {
       });
     } else {
       setExpandedCodes((prev) => new Set(prev).add(canonicalCode));
-      if (!itemTypeFieldsMap.has(canonicalCode)) {
+      // Door items use ItemFieldsPanel which handles its own data loading
+      if (item.category !== 'doors' && !itemTypeFieldsMap.has(canonicalCode)) {
         loadFieldsForCode(canonicalCode, canonicalCodes);
       }
     }
@@ -580,21 +619,31 @@ export default function ItemManagementPage() {
     }
   };
 
-  const categoryCounts = {
-    doors: itemTypes.filter((i) => i.category === 'doors').length,
-    frames: itemTypes.filter((i) => i.category === 'frames').length,
-    hardware: itemTypes.filter((i) => i.category === 'hardware').length,
-  };
+  const categoryCounts = itemTypeRegistry.reduce<Record<string, number>>((acc, t) => {
+    acc[t.slug] = itemTypes.filter((i) => i.category === t.slug).length;
+    return acc;
+  }, {});
+
+  // Unique series values for the current category (sorted alphabetically)
+  const availableSeries = Array.from(
+    new Set(
+      itemTypes
+        .filter((i) => i.category === activeCategory && i.series)
+        .map((i) => i.series as string)
+    )
+  ).sort((a, b) => a.localeCompare(b));
 
   const filteredItemTypes = itemTypes.filter((item) => {
     if (item.category !== activeCategory) return false;
+    if (seriesFilter && item.series !== seriesFilter) return false;
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
     return (
       item.itemLabel.toLowerCase().includes(q) ||
       item.canonicalCode.toLowerCase().includes(q) ||
       (item.series ?? '').toLowerCase().includes(q) ||
-      (item.material ?? '').toLowerCase().includes(q)
+      (item.material ?? '').toLowerCase().includes(q) ||
+      (item.gauge ?? '').toLowerCase().includes(q)
     );
   });
 
@@ -753,11 +802,11 @@ export default function ItemManagementPage() {
     if (!renameTarget || !renameLabel.trim()) return;
     try {
       setRenameLoading(true);
-      await renameItemType(renameTarget.canonicalCodes, renameLabel.trim());
+      await renameItemType(renameTarget.canonicalCodes, renameLabel.trim(), renameTarget.series);
       setItemTypes((prev) =>
         prev.map((t) =>
           t.canonicalCode === renameTarget.canonicalCode
-            ? { ...t, itemLabel: renameLabel.trim() }
+            ? { ...t, itemLabel: renameLabel.trim(), series: renameTarget.series ? renameLabel.trim() : t.series }
             : t
         )
       );
@@ -918,6 +967,16 @@ export default function ItemManagementPage() {
               className="pl-9"
             />
           </div>
+          <Button
+            size="sm"
+            onClick={() => {
+              setCreateItemDefaultSlug(activeCategory);
+              setCreateItemOpen(true);
+            }}
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            New Item
+          </Button>
           <Button variant="outline" size="sm" onClick={fetchItemTypes} disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -926,43 +985,94 @@ export default function ItemManagementPage() {
       </div>
 
       {/* Category Tabs */}
-      <div className="mb-6 flex gap-1 rounded-lg border bg-muted/30 p-1 w-fit">
-        {CATEGORIES.map(({ key, label, icon: Icon }) => (
+      <div className="mb-6 flex flex-wrap gap-1 rounded-lg border bg-muted/30 p-1 w-fit">
+        {registryLoading
+          ? ['Doors', 'Frames', 'Hardware'].map((label) => (
+              <div
+                key={label}
+                className="flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-muted-foreground/50 animate-pulse"
+              >
+                <div className="h-4 w-4 rounded bg-muted" />
+                {label}
+              </div>
+            ))
+          : itemTypeRegistry.map((itemType) => {
+              const Icon = ITEM_TYPE_ICON_MAP[itemType.icon ?? ''] ?? Package;
+              const count = categoryCounts[itemType.slug] ?? 0;
+              const isActive = activeCategory === itemType.slug;
+              return (
+                <button
+                  key={itemType.slug}
+                  type="button"
+                  onClick={() => { setActiveCategory(itemType.slug as ItemCategory); setSeriesFilter(null); }}
+                  className={[
+                    'flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all',
+                    isActive
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                  ].join(' ')}
+                >
+                  <Icon className="h-4 w-4" />
+                  {itemType.name}
+                  <span
+                    className={[
+                      'rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums',
+                      isActive
+                        ? 'bg-primary/10 text-primary'
+                        : 'bg-muted text-muted-foreground',
+                    ].join(' ')}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+      </div>
+
+      {/* Series Filter */}
+      {availableSeries.length > 0 && (
+        <div className="mb-5 flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide shrink-0">
+            Series
+          </span>
           <button
-            key={key}
             type="button"
-            onClick={() => setActiveCategory(key)}
+            onClick={() => setSeriesFilter(null)}
             className={[
-              'flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-all',
-              activeCategory === key
-                ? 'bg-background text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground',
+              'rounded-full px-3 py-1 text-xs font-medium border transition-colors',
+              seriesFilter === null
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'bg-background text-muted-foreground border-border hover:border-foreground/40 hover:text-foreground',
             ].join(' ')}
           >
-            <Icon className="h-4 w-4" />
-            {label}
-            <span
+            All
+          </button>
+          {availableSeries.map((series) => (
+            <button
+              key={series}
+              type="button"
+              onClick={() => setSeriesFilter(seriesFilter === series ? null : series)}
               className={[
-                'rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums',
-                activeCategory === key
-                  ? 'bg-primary/10 text-primary'
-                  : 'bg-muted text-muted-foreground',
+                'rounded-full px-3 py-1 text-xs font-medium border transition-colors',
+                seriesFilter === series
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'bg-background text-muted-foreground border-border hover:border-foreground/40 hover:text-foreground',
               ].join(' ')}
             >
-              {categoryCounts[key]}
-            </span>
-          </button>
-        ))}
-      </div>
+              {series}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="mb-6 grid gap-4 sm:grid-cols-3">
         <Card>
           <CardHeader className="pb-2">
             <p className="text-sm text-muted-foreground">
-              {CATEGORIES.find((c) => c.key === activeCategory)?.label} Items
+              {itemTypeRegistry.find((t) => t.slug === activeCategory)?.name ?? activeCategory} Items
             </p>
-            <p className="text-3xl font-bold">{categoryCounts[activeCategory]}</p>
+            <p className="text-3xl font-bold">{categoryCounts[activeCategory] ?? 0}</p>
           </CardHeader>
           <CardContent>
             <p className="text-xs text-muted-foreground">Unique item groups</p>
@@ -1051,7 +1161,7 @@ export default function ItemManagementPage() {
                       : 'bg-muted text-muted-foreground',
                   ].join(' ')}
                 >
-                  {categoryCounts.hardware}
+                  {categoryCounts['hardware'] ?? 0}
                 </span>
               </button>
             </div>
@@ -1183,7 +1293,7 @@ export default function ItemManagementPage() {
               ? 'No item types match your search'
               : activeCategory === 'hardware'
               ? 'No discovered hardware items yet — hardware items appear here as they are added to estimates'
-              : 'No item types found'}
+              : `No ${itemTypeRegistry.find((t) => t.slug === activeCategory)?.name.toLowerCase() ?? activeCategory} items found`}
           </p>
         </div>
       ) : (
@@ -1194,76 +1304,36 @@ export default function ItemManagementPage() {
             const fields = itemTypeFieldsMap.get(item.canonicalCode) ?? [];
             const requiredCount = fields.filter((f) => f.isRequired).length;
             const hasLoadedFields = itemTypeFieldsMap.has(item.canonicalCode);
-            const hasKeyFields = item.series || item.material || item.openingWidth || item.openingHeight;
-            const hasVariants = item.canonicalCodes.length > 1;
 
             return (
-              <Card key={item.canonicalCode} className="overflow-hidden">
+              <Card
+                key={item.canonicalCode}
+                id={`item-card-${item.canonicalCode}`}
+                className="overflow-hidden"
+              >
                 {/* Item Header Row */}
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-4 p-4 text-left transition-colors hover:bg-muted/30"
-                  onClick={() => toggleExpand(item)}
-                >
-                  <span className="shrink-0 text-muted-foreground">
-                    {isExpanded ? (
-                      <ChevronDown className="h-4 w-4" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4" />
-                    )}
-                  </span>
+                <div className="flex w-full items-center gap-2 pr-2 transition-colors hover:bg-muted/30">
+                  <button
+                    type="button"
+                    className="flex flex-1 items-center gap-4 p-4 text-left min-w-0"
+                    onClick={() => toggleExpand(item)}
+                  >
+                    <span className="shrink-0 text-muted-foreground">
+                      {isExpanded ? (
+                        <ChevronDown className="h-4 w-4" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4" />
+                      )}
+                    </span>
 
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="min-w-0 flex-1">
                       <span className="font-semibold">
                         {item.series ?? item.itemLabel}
                       </span>
-                      {hasVariants && (
-                        <Badge variant="outline" className="font-mono text-xs">
-                          {item.canonicalCodes.length} variants
-                        </Badge>
-                      )}
                     </div>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
-                        <span className="text-muted-foreground/70">Code</span>
-                        <span className="font-mono font-medium text-foreground/80">
-                          {hasVariants ? item.canonicalCodes[0] : item.canonicalCode}
-                        </span>
-                      </span>
-                      {item.series && item.series !== item.itemLabel && (
-                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
-                          <span className="text-muted-foreground/70">Series</span>
-                          <span className="font-medium text-foreground/80">{item.series}</span>
-                        </span>
-                      )}
-                      {item.material && (
-                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
-                          <span className="text-muted-foreground/70">Material</span>
-                          <span className="font-medium text-foreground/80">{item.material}</span>
-                        </span>
-                      )}
-                      {item.openingWidth && (
-                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
-                          <span className="text-muted-foreground/70">W</span>
-                          <span className="font-medium text-foreground/80">{item.openingWidth}</span>
-                        </span>
-                      )}
-                      {item.openingHeight && (
-                        <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none">
-                          <span className="text-muted-foreground/70">H</span>
-                          <span className="font-medium text-foreground/80">{item.openingHeight}</span>
-                        </span>
-                      )}
-                    </div>
-                  </div>
 
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Badge variant="secondary" className="text-xs">
-                      {item.usageCount} {item.usageCount === 1 ? 'use' : 'uses'}
-                    </Badge>
                     {hasLoadedFields && (
-                      <>
+                      <div className="flex shrink-0 items-center gap-2">
                         <Badge variant="secondary" className="text-xs">
                           {fields.length} {fields.length === 1 ? 'field' : 'fields'}
                         </Badge>
@@ -1275,18 +1345,18 @@ export default function ItemManagementPage() {
                             {requiredCount} required
                           </Badge>
                         )}
-                      </>
+                      </div>
                     )}
+                  </button>
+
+                  <div className="flex shrink-0 items-center gap-1">
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openRenameDialog(item);
-                          }}
+                          onClick={() => openRenameDialog(item)}
                         >
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -1299,31 +1369,22 @@ export default function ItemManagementPage() {
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeleteItemTarget(item);
-                          }}
+                          onClick={() => setDeleteItemTarget(item)}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </TooltipTrigger>
-                      <TooltipContent>Delete item type</TooltipContent>
+                      <TooltipContent>Delete item</TooltipContent>
                     </Tooltip>
                   </div>
-                </button>
+                </div>
 
                 {/* Expanded Field Management Panel */}
                 {isExpanded && (
                   <div className="border-t">
-                    {hasVariants && (
-                      <div className="border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
-                        Fields managed via primary code:{' '}
-                        <code className="rounded bg-muted px-1">{item.canonicalCode}</code>
-                        {' '}({item.canonicalCodes.length} variants share these key dimensions)
-                      </div>
-                    )}
-
-                    {isFieldsLoading ? (
+                    {item.category === 'doors' ? (
+                      <ItemFieldsPanel canonicalCode={item.canonicalCode} />
+                    ) : isFieldsLoading ? (
                       <div className="flex items-center justify-center py-8">
                         <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground/50" />
                       </div>
@@ -1635,98 +1696,6 @@ export default function ItemManagementPage() {
         </div>
       )}
 
-      {/* Blocked Field Labels Section */}
-      <div className="mt-10">
-        <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Ban className="h-5 w-5 text-destructive" />
-            <div>
-              <h2 className="text-lg font-semibold">Blocked Fields</h2>
-              <p className="text-sm text-muted-foreground">
-                These field labels will never be extracted by the AI in future estimates.
-              </p>
-            </div>
-          </div>
-          <Button variant="outline" size="sm" onClick={fetchBlockedLabels} disabled={blockedLabelsLoading}>
-            <RefreshCw className={`mr-2 h-4 w-4 ${blockedLabelsLoading ? 'animate-spin' : ''}`} />
-            Refresh
-          </Button>
-        </div>
-
-        {blockedLabelsLoading ? (
-          <div className="flex items-center justify-center py-8">
-            <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground/50" />
-          </div>
-        ) : blockedLabels.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-10 text-center">
-            <ShieldOff className="mb-3 h-10 w-10 text-muted-foreground/30" />
-            <p className="text-sm font-medium text-muted-foreground">No blocked fields yet</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              When you delete a pending field from an item type, it will appear here.
-            </p>
-          </div>
-        ) : (
-          <div className="overflow-hidden rounded-lg border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Field Label</TableHead>
-                  <TableHead>Field Key</TableHead>
-                  <TableHead>Blocked On</TableHead>
-                  <TableHead className="w-24 text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {blockedLabels.map((blocked) => (
-                  <TableRow key={blocked.id}>
-                    <TableCell className="font-medium">
-                      <div className="flex items-center gap-2">
-                        <Ban className="h-3.5 w-3.5 shrink-0 text-destructive" />
-                        {blocked.fieldLabel}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {blocked.fieldKey ? (
-                        <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
-                          {blocked.fieldKey}
-                        </code>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {new Date(blocked.createdAt).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex justify-end">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 text-xs text-muted-foreground hover:text-foreground"
-                              onClick={() => handleUnblock(blocked)}
-                              disabled={unblockLoading === blocked.id}
-                            >
-                              {unblockLoading === blocked.id ? (
-                                <RefreshCw className="mr-1.5 h-3 w-3 animate-spin" />
-                              ) : (
-                                <X className="mr-1.5 h-3 w-3" />
-                              )}
-                              Unblock
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Allow AI to extract this field again</TooltipContent>
-                        </Tooltip>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </div>
 
       {/* Delete Field Association Confirmation */}
       <AlertDialog open={!!deleteTarget} onOpenChange={() => setDeleteTarget(null)}>
@@ -1852,7 +1821,7 @@ export default function ItemManagementPage() {
       <AlertDialog open={!!deleteItemTarget} onOpenChange={() => setDeleteItemTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete item type?</AlertDialogTitle>
+            <AlertDialogTitle>Delete item?</AlertDialogTitle>
             <AlertDialogDescription>
               This will permanently delete{' '}
               <span className="font-semibold">
@@ -2329,6 +2298,32 @@ export default function ItemManagementPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Create Item Dialog */}
+      <CreateItemDialog
+        open={createItemOpen}
+        onOpenChange={setCreateItemOpen}
+        defaultItemTypeSlug={createItemDefaultSlug}
+        onCreated={(createdItem) => {
+          // Switch to the new item's category tab
+          if (createdItem.itemType) {
+            setActiveCategory(createdItem.itemType as ItemCategory);
+            setSeriesFilter(null);
+          }
+          // Refresh the list, then auto-expand the new item
+          fetchItemTypes().then(() => {
+            if (createdItem.canonicalCode) {
+              setExpandedCodes((prev) => new Set(prev).add(createdItem.canonicalCode));
+              // Scroll to the newly expanded item after a short paint delay
+              setTimeout(() => {
+                document
+                  .getElementById(`item-card-${createdItem.canonicalCode}`)
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }, 150);
+            }
+          });
+        }}
+      />
     </div>
   );
 }

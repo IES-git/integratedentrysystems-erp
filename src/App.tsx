@@ -25,8 +25,9 @@ import OrdersPage from "@/pages/OrdersPage";
 import TemplatesPage from "@/pages/TemplatesPage";
 import AdminUsersPage from "@/pages/AdminUsersPage";
 import AdminIntegrationsPage from "@/pages/AdminIntegrationsPage";
-import AdminFieldDefinitionsPage from "@/pages/AdminFieldDefinitionsPage";
 import ItemManagementPage from "@/pages/ItemManagementPage";
+import ItemManagementProgressivePage from "@/pages/ItemManagementProgressivePage";
+import PricingPage from "@/pages/PricingPage";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -76,13 +77,18 @@ const App = () => (
                 
                   {/* Items */}
                   <Route path="items" element={<ItemManagementPage />} />
+                  <Route path="item-management" element={<ItemManagementProgressivePage />} />
+
+                  {/* Pricing */}
+                  <Route path="pricing" element={<PricingPage />} />
+                  <Route path="pricing/doors" element={<PricingPage />} />
+                  <Route path="pricing/doors/:seriesValue" element={<PricingPage />} />
 
                   {/* Templates */}
                   <Route path="templates" element={<TemplatesPage />} />
                 
                 {/* Admin */}
                 <Route path="admin/users" element={<AdminUsersPage />} />
-                <Route path="admin/field-definitions" element={<AdminFieldDefinitionsPage />} />
                 <Route path="admin/settings/integrations" element={<AdminIntegrationsPage />} />
               </Route>
 

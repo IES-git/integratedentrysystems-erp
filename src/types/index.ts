@@ -105,6 +105,7 @@ export interface EstimateItem {
   openingId?: string | null;
   parentItemId?: string | null;
   subcategory?: HardwareSubcategory | null;
+  itemType?: ItemCategory | null;
   createdAt: string;
 }
 
@@ -112,12 +113,15 @@ export interface EstimateItemWithHardware extends EstimateItem {
   hardware: EstimateItem[];
 }
 
+export type OpeningTemplateType = 'single' | 'pair' | 'single_with_panel' | 'pair_with_panel';
+
 export interface EstimateOpening {
   id: string;
   estimateId: string;
   name: string;
   quantity: number;
   sortOrder: number;
+  templateType: OpeningTemplateType | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -140,6 +144,8 @@ export interface FieldValueOption {
   fieldDefinitionId: string;
   value: string;
   usageCount: number;
+  sortOrder: number;
+  isDefault: boolean;
   createdAt: string;
 }
 
@@ -184,6 +190,7 @@ export interface FieldDefinition {
   description: string | null;
   status: FieldDefinitionStatus;
   usageCount: number;
+  sortOrder: number;
   createdAt: string;
   updatedAt: string;
   // joined
@@ -201,7 +208,33 @@ export interface BlockedFieldLabel {
 }
 
 // Item Management Types
-export type ItemCategory = 'doors' | 'frames' | 'hardware';
+
+/** Top-level category tag. Historically 'doors' | 'frames' | 'hardware'; now any registered slug. */
+export type ItemCategory = string;
+
+/** Row from item_type_registry — defines a user or system item type. */
+export interface ItemTypeRegistryEntry {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string | null;
+  description: string | null;
+  sortOrder: number;
+  isSystem: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Row from item_type_base_fields — links a field_definition to an item type as a base field. */
+export interface ItemTypeBaseField {
+  id: string;
+  itemTypeSlug: string;
+  fieldDefinitionId: string;
+  sortOrder: number;
+  createdAt: string;
+  // joined
+  fieldDefinition?: FieldDefinition;
+}
 
 export type HardwareSubcategory = 'swing_it' | 'close_it' | 'latch_it' | 'protect_it';
 
@@ -225,6 +258,7 @@ export interface ItemType {
   category: ItemCategory;
   series?: string;
   material?: string;
+  gauge?: string;
   openingWidth?: string;
   openingHeight?: string;
   subcategory?: HardwareSubcategory;
@@ -383,6 +417,196 @@ export interface QuickBooksSync {
   qbReferenceId: string | null;
   lastSyncAt: string | null;
   errorMessage: string | null;
+}
+
+// Pricing Types
+export type PricingCategory = 'doors' | 'frames' | 'hardware';
+
+export interface PricingTable {
+  id: string;
+  category: PricingCategory;
+  seriesValue: string;
+  fieldValueOptionId: string | null;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PricingTableVendor {
+  id: string;
+  pricingTableId: string;
+  companyId: string;
+  createdAt: string;
+}
+
+export type DimensionCriteriaLeaf =
+  | { type: 'in'; values: number[] }
+  | { type: 'between'; min: number; max: number }
+  | { type: 'gte'; value: number }
+  | { type: 'gt'; value: number }
+  | { type: 'lte'; value: number };
+
+export type DimensionCriteria =
+  | DimensionCriteriaLeaf
+  | { type: 'or'; conditions: DimensionCriteriaLeaf[] }
+  | { type: 'raw'; label: string };
+
+export type ColumnCriteria = Record<string, string | { type: 'in'; values: string[] }>;
+
+export interface PricingColumn {
+  id: string;
+  pricingTableId: string;
+  label: string;
+  criteria: ColumnCriteria;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PricingRow {
+  id: string;
+  pricingTableId: string;
+  label: string;
+  widthCriteria: DimensionCriteria | Record<string, never>;
+  heightCriteria: DimensionCriteria | Record<string, never>;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PricingCell {
+  id: string;
+  pricingRowId: string;
+  pricingColumnId: string;
+  price: number | null;
+  currency: string;
+  notes: string | null;
+  updatedAt: string;
+}
+
+/** Summary of a single pricing table as shown in series list views. */
+export interface PricingTableSummary {
+  id: string;
+  name: string;
+  rowCount: number;
+  columnCount: number;
+  lastUpdatedAt: string;
+  vendors: { id: string; name: string }[];
+}
+
+export interface DoorSeriesSummary {
+  /** The series value (e.g. 'CH') */
+  seriesValue: string;
+  /** Display label from field_value_options */
+  label: string;
+  /** The field_value_option id */
+  fieldValueOptionId: string;
+  /** All pricing tables that have been created for this series. */
+  pricingTables: PricingTableSummary[];
+}
+
+// ---------------------------------------------------------------------------
+// Per-item field override types (item_type_field_overrides_and_adders migration)
+// ---------------------------------------------------------------------------
+
+/** Row from item_type_field_overrides — per-item copy-on-write field config. */
+export interface ItemTypeFieldOverride {
+  id: string;
+  canonicalCode: string;
+  fieldDefinitionId: string;
+  fieldLabelOverride: string | null;
+  isRequired: boolean;
+  isAdder: boolean;
+  isHidden: boolean;
+  sortOrder: number | null;
+  /** True when this field was added directly on the item (not inherited from global). */
+  isAddedLocally: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Row from item_type_field_value_options — per-item option set. */
+export interface ItemTypeFieldValueOption {
+  id: string;
+  canonicalCode: string;
+  fieldDefinitionId: string;
+  value: string;
+  sortOrder: number;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+/** Row from item_type_manufacturer_field_labels — per-item alias override. */
+export interface ItemTypeManufacturerFieldLabel {
+  id: string;
+  canonicalCode: string;
+  fieldDefinitionId: string;
+  manufacturerId: string | null;
+  manufacturerFieldLabel: string;
+  status: ManufacturerFieldLabelStatus;
+  /** True when this row marks an inherited global alias as removed for this item. */
+  isRemoved: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  // joined
+  manufacturer?: Pick<Company, 'id' | 'name'>;
+}
+
+/** Row from pricing_adder_cells — one price per (table × item × adder field × option value × vendor). */
+export interface PricingAdderCell {
+  id: string;
+  pricingTableId: string;
+  canonicalCode: string;
+  fieldDefinitionId: string;
+  /** The option value (e.g. "18 Gauge") this cell prices. */
+  optionValue: string;
+  companyId: string;
+  price: number | null;
+  currency: string;
+  notes: string | null;
+  updatedAt: string;
+}
+
+/**
+ * Merged view of a single field for a specific item type, as returned by
+ * `getItemFieldsView()`. Combines global field_definitions +
+ * item_type_field_overrides into a single object the UI consumes directly.
+ */
+export interface ItemFieldView {
+  definition: FieldDefinition;
+  /** Resolved label: override wins, falls back to definition.fieldLabel. */
+  effectiveLabel: string;
+  isRequired: boolean;
+  isAdder: boolean;
+  isHidden: boolean;
+  sortOrder: number;
+  /** True when the field was added locally (not from global defaults). */
+  isAddedLocally: boolean;
+  /** Effective option list: per-item set when one exists, else global. */
+  options: (FieldValueOption | ItemTypeFieldValueOption)[];
+  /** Effective alias list: merged global + per-item overrides (is_removed=true filtered out). */
+  aliases: (ManufacturerFieldLabel | ItemTypeManufacturerFieldLabel)[];
+  /** The raw override row if one exists, null otherwise. */
+  override: ItemTypeFieldOverride | null;
+}
+
+export interface ItemFieldsView {
+  /** Big Five / base fields (series, gauge, opening_width, opening_height). */
+  baseFields: ItemFieldView[];
+  /** All other (non-Big-Five) fields, sorted by sortOrder. */
+  otherFields: ItemFieldView[];
+}
+
+/** Summary row used by the Adders tab in the Pricing editor. */
+export interface AdderFieldSummary {
+  canonicalCode: string;
+  fieldDefinitionId: string;
+  fieldLabel: string;
+  itemLabel: string;
+  /** Effective option values for this field (per-item if overridden, global otherwise). */
+  options: string[];
 }
 
 // Navigation & UI Types
