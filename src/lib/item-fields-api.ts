@@ -23,7 +23,12 @@ import type {
   AdderFieldSummary,
   ItemTypeRegistryEntry,
   ItemTypeBaseField,
+  DependencyOperator,
+  ItemTypeFieldDependency,
+  ItemTypeFieldDependencyOverride,
+  ResolvedFieldDependency,
 } from '@/types';
+import { mergeDependencies } from './field-dependencies';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,6 +48,7 @@ function mapFieldDefinition(row: any): FieldDefinition {
     fieldKey: row.field_key,
     fieldLabel: row.field_label,
     valueType: row.value_type,
+    optionType: row.option_type ?? 'selection',
     description: row.description ?? null,
     status: row.status,
     usageCount: row.usage_count ?? 0,
@@ -200,6 +206,8 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
     perItemOptionsResult,
     globalAliasesResult,
     perItemAliasesResult,
+    typeDepsResult,
+    depOverridesResult,
   ] = await Promise.all([
     // Big Five are structural — fetch regardless of approval status
     supabase
@@ -242,6 +250,21 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
       .select('*, companies(id, name)')
       .eq('canonical_code', canonicalCode)
       .order('created_at', { ascending: true }),
+    // Field dependencies — type level
+    itemTypeSlug
+      ? supabase
+          .from('item_type_field_dependencies')
+          .select(
+            '*, parent_field:field_definitions!parent_field_definition_id(*), child_field:field_definitions!child_field_definition_id(*)'
+          )
+          .eq('item_type_slug', itemTypeSlug)
+          .order('sort_order', { ascending: true })
+      : Promise.resolve({ data: [], error: null }),
+    // Field dependency overrides — per-item
+    supabase
+      .from('item_type_field_dependency_overrides')
+      .select('*, child_field:field_definitions!child_field_definition_id(*)')
+      .eq('canonical_code', canonicalCode),
   ]);
 
   if (bigFiveResult.error) throw new Error(`Failed to fetch Big Five fields: ${bigFiveResult.error.message}`);
@@ -351,7 +374,7 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
     if (!def) return [];
     const view = buildFieldView(def, i);
     return view.isHidden ? [] : [view];
-  });
+  }).sort((a, b) => a.sortOrder - b.sortOrder);
 
   // Build "other" fields by merging two sources (deduplicated):
   //   1. Type-level base fields from item_type_base_fields (the master default for this type)
@@ -410,7 +433,12 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
     (a, b) => a.sortOrder - b.sortOrder
   );
 
-  return { baseFields, otherFields };
+  // Resolved dependencies
+  const typeRules = (typeDepsResult.data ?? []).map(mapItemTypeFieldDependency);
+  const depOverrides = (depOverridesResult.data ?? []).map(mapItemTypeFieldDependencyOverride);
+  const resolvedDependencies = mergeDependencies(typeRules, depOverrides);
+
+  return { baseFields, otherFields, resolvedDependencies };
 }
 
 // ---------------------------------------------------------------------------
@@ -888,6 +916,7 @@ function mapItemTypeBaseField(row: any): ItemTypeBaseField {
     itemTypeSlug: row.item_type_slug,
     fieldDefinitionId: row.field_definition_id,
     sortOrder: row.sort_order ?? 0,
+    passValueToFrame: row.pass_value_to_frame ?? false,
     createdAt: row.created_at,
     fieldDefinition: row.field_definitions ? mapFieldDefinition(row.field_definitions) : undefined,
   };
@@ -1037,8 +1066,417 @@ export async function reorderItemTypeBaseFields(
 }
 
 // ---------------------------------------------------------------------------
+// Field Dependencies — item-type level defaults
+// ---------------------------------------------------------------------------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapItemTypeFieldDependency(row: any): ItemTypeFieldDependency {
+  return {
+    id: row.id,
+    itemTypeSlug: row.item_type_slug,
+    parentFieldDefinitionId: row.parent_field_definition_id,
+    childFieldDefinitionId: row.child_field_definition_id,
+    operator: row.operator as DependencyOperator,
+    triggerValues: (row.trigger_values ?? []) as (string | number)[],
+    sortOrder: row.sort_order ?? 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    parentField: row.parent_field ? mapFieldDefinition(row.parent_field) : undefined,
+    childField: row.child_field ? mapFieldDefinition(row.child_field) : undefined,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapItemTypeFieldDependencyOverride(row: any): ItemTypeFieldDependencyOverride {
+  return {
+    id: row.id,
+    canonicalCode: row.canonical_code,
+    parentFieldDefinitionId: row.parent_field_definition_id,
+    childFieldDefinitionId: row.child_field_definition_id,
+    operator: (row.operator as DependencyOperator) ?? null,
+    triggerValues: (row.trigger_values ?? null) as (string | number)[] | null,
+    sortOrder: row.sort_order ?? null,
+    isHidden: row.is_hidden ?? false,
+    isAddedLocally: row.is_added_locally ?? false,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    childField: row.child_field ? mapFieldDefinition(row.child_field) : undefined,
+  };
+}
+
+/**
+ * Returns all item-type-level field dependency rules for the given item type
+ * slug, joined with parent and child field_definitions.
+ */
+export async function getItemTypeFieldDependencies(
+  slug: string
+): Promise<ItemTypeFieldDependency[]> {
+  const { data, error } = await supabase
+    .from('item_type_field_dependencies')
+    .select(
+      '*, parent_field:field_definitions!parent_field_definition_id(*), child_field:field_definitions!child_field_definition_id(*)'
+    )
+    .eq('item_type_slug', slug)
+    .order('sort_order', { ascending: true });
+  if (error) throw new Error(`Failed to fetch field dependencies for '${slug}': ${error.message}`);
+  return (data ?? []).map(mapItemTypeFieldDependency);
+}
+
+/**
+ * Adds a conditional sub-field rule at the item-type level.
+ * Enforces one-level nesting: rejects if `childFieldDefinitionId` is already
+ * a parent in any existing rule for this item type.
+ */
+export async function addItemTypeFieldDependency(input: {
+  itemTypeSlug: string;
+  parentFieldDefinitionId: string;
+  childFieldDefinitionId: string;
+  operator: DependencyOperator;
+  triggerValues: (string | number)[];
+  sortOrder?: number;
+}): Promise<ItemTypeFieldDependency> {
+  // One-level nesting guard
+  const { data: childAsParent } = await supabase
+    .from('item_type_field_dependencies')
+    .select('id')
+    .eq('item_type_slug', input.itemTypeSlug)
+    .eq('parent_field_definition_id', input.childFieldDefinitionId)
+    .limit(1);
+  if (childAsParent && childAsParent.length > 0) {
+    throw new Error(
+      'Cannot add a sub-field that is already a parent field (max one level of nesting).'
+    );
+  }
+
+  // Determine next sort_order if not provided
+  let sortOrder = input.sortOrder;
+  if (sortOrder === undefined) {
+    const { data: last } = await supabase
+      .from('item_type_field_dependencies')
+      .select('sort_order')
+      .eq('item_type_slug', input.itemTypeSlug)
+      .eq('parent_field_definition_id', input.parentFieldDefinitionId)
+      .order('sort_order', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    sortOrder = last ? (last.sort_order ?? 0) + 1 : 0;
+  }
+
+  const { data, error } = await supabase
+    .from('item_type_field_dependencies')
+    .insert({
+      item_type_slug: input.itemTypeSlug,
+      parent_field_definition_id: input.parentFieldDefinitionId,
+      child_field_definition_id: input.childFieldDefinitionId,
+      operator: input.operator,
+      trigger_values: input.triggerValues,
+      sort_order: sortOrder,
+    })
+    .select(
+      '*, parent_field:field_definitions!parent_field_definition_id(*), child_field:field_definitions!child_field_definition_id(*)'
+    )
+    .single();
+  if (error || !data)
+    throw new Error(`Failed to add field dependency: ${error?.message ?? 'unknown'}`);
+  return mapItemTypeFieldDependency(data);
+}
+
+/** Updates operator, trigger_values, or sort_order on a type-level dependency. */
+export async function updateItemTypeFieldDependency(
+  id: string,
+  patch: {
+    operator?: DependencyOperator;
+    triggerValues?: (string | number)[];
+    sortOrder?: number;
+  }
+): Promise<void> {
+  const update: Record<string, unknown> = {};
+  if (patch.operator !== undefined) update.operator = patch.operator;
+  if (patch.triggerValues !== undefined) update.trigger_values = patch.triggerValues;
+  if (patch.sortOrder !== undefined) update.sort_order = patch.sortOrder;
+
+  const { error } = await supabase
+    .from('item_type_field_dependencies')
+    .update(update)
+    .eq('id', id);
+  if (error) throw new Error(`Failed to update field dependency: ${error.message}`);
+}
+
+/** Removes a type-level dependency rule. */
+export async function removeItemTypeFieldDependency(id: string): Promise<void> {
+  const { error } = await supabase
+    .from('item_type_field_dependencies')
+    .delete()
+    .eq('id', id);
+  if (error) throw new Error(`Failed to remove field dependency: ${error.message}`);
+}
+
+/**
+ * Persists sort_order for all child dependencies under a given parent field
+ * in an item type.  `orderedChildIds` is the ordered array of
+ * child_field_definition_id values.
+ */
+export async function reorderItemTypeFieldDependencies(
+  slug: string,
+  parentFieldDefinitionId: string,
+  orderedChildIds: string[]
+): Promise<void> {
+  const updates = orderedChildIds.map((childId, index) =>
+    supabase
+      .from('item_type_field_dependencies')
+      .update({ sort_order: index })
+      .eq('item_type_slug', slug)
+      .eq('parent_field_definition_id', parentFieldDefinitionId)
+      .eq('child_field_definition_id', childId)
+  );
+  const results = await Promise.all(updates);
+  for (const { error } of results) {
+    if (error)
+      throw new Error(`Failed to reorder field dependencies for '${slug}': ${error.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Field Dependencies — per-canonical-code overrides
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns all per-item dependency override rows for a canonical code,
+ * joined with child field_definitions.
+ */
+export async function getItemFieldDependencyOverrides(
+  canonicalCode: string
+): Promise<ItemTypeFieldDependencyOverride[]> {
+  const { data, error } = await supabase
+    .from('item_type_field_dependency_overrides')
+    .select('*, child_field:field_definitions!child_field_definition_id(*)')
+    .eq('canonical_code', canonicalCode);
+  if (error)
+    throw new Error(
+      `Failed to fetch dependency overrides for '${canonicalCode}': ${error.message}`
+    );
+  return (data ?? []).map(mapItemTypeFieldDependencyOverride);
+}
+
+/**
+ * Adds a per-item dependency override.
+ * `isAddedLocally = true` means the sub-field does not exist at the type level.
+ * One-level nesting is enforced by checking if the child is already a parent
+ * in either the type rules or local overrides.
+ */
+export async function addItemFieldDependencyOverride(input: {
+  canonicalCode: string;
+  parentFieldDefinitionId: string;
+  childFieldDefinitionId: string;
+  operator: DependencyOperator;
+  triggerValues: (string | number)[];
+  sortOrder?: number;
+  isAddedLocally?: boolean;
+}): Promise<ItemTypeFieldDependencyOverride> {
+  // One-level nesting guard: check type-level and override-level parents
+  const itemTypeRow = await supabase
+    .from('estimate_items')
+    .select('item_type')
+    .eq('canonical_code', input.canonicalCode)
+    .not('item_type', 'is', null)
+    .limit(1)
+    .maybeSingle();
+
+  const itemTypeSlug = (itemTypeRow.data?.item_type as string | null) ?? null;
+
+  const checks = await Promise.all([
+    itemTypeSlug
+      ? supabase
+          .from('item_type_field_dependencies')
+          .select('id')
+          .eq('item_type_slug', itemTypeSlug)
+          .eq('parent_field_definition_id', input.childFieldDefinitionId)
+          .limit(1)
+      : Promise.resolve({ data: [], error: null }),
+    supabase
+      .from('item_type_field_dependency_overrides')
+      .select('id')
+      .eq('canonical_code', input.canonicalCode)
+      .eq('parent_field_definition_id', input.childFieldDefinitionId)
+      .limit(1),
+  ]);
+
+  const isAlreadyParent = checks.some((r) => (r.data?.length ?? 0) > 0);
+  if (isAlreadyParent) {
+    throw new Error(
+      'Cannot add a sub-field that is already a parent field (max one level of nesting).'
+    );
+  }
+
+  const { data, error } = await supabase
+    .from('item_type_field_dependency_overrides')
+    .upsert(
+      {
+        canonical_code: input.canonicalCode,
+        parent_field_definition_id: input.parentFieldDefinitionId,
+        child_field_definition_id: input.childFieldDefinitionId,
+        operator: input.operator,
+        trigger_values: input.triggerValues,
+        sort_order: input.sortOrder ?? null,
+        is_added_locally: input.isAddedLocally ?? false,
+        is_hidden: false,
+      },
+      { onConflict: 'canonical_code,parent_field_definition_id,child_field_definition_id' }
+    )
+    .select('*, child_field:field_definitions!child_field_definition_id(*)')
+    .single();
+  if (error || !data)
+    throw new Error(`Failed to add dependency override: ${error?.message ?? 'unknown'}`);
+  return mapItemTypeFieldDependencyOverride(data);
+}
+
+/** Updates an existing per-item dependency override. */
+export async function updateItemFieldDependencyOverride(
+  id: string,
+  patch: {
+    operator?: DependencyOperator | null;
+    triggerValues?: (string | number)[] | null;
+    sortOrder?: number | null;
+    isHidden?: boolean;
+  }
+): Promise<void> {
+  const update: Record<string, unknown> = {};
+  if (patch.operator !== undefined) update.operator = patch.operator;
+  if (patch.triggerValues !== undefined) update.trigger_values = patch.triggerValues;
+  if (patch.sortOrder !== undefined) update.sort_order = patch.sortOrder;
+  if (patch.isHidden !== undefined) update.is_hidden = patch.isHidden;
+
+  const { error } = await supabase
+    .from('item_type_field_dependency_overrides')
+    .update(update)
+    .eq('id', id);
+  if (error) throw new Error(`Failed to update dependency override: ${error.message}`);
+}
+
+/**
+ * Removes a per-item dependency:
+ * - Locally-added: deletes the override row.
+ * - Inherited: flips is_hidden = true (preserves the inherited rule but hides it).
+ */
+export async function removeItemFieldDependency(
+  canonicalCode: string,
+  parentFieldDefinitionId: string,
+  childFieldDefinitionId: string,
+  isAddedLocally: boolean
+): Promise<void> {
+  if (isAddedLocally) {
+    const { error } = await supabase
+      .from('item_type_field_dependency_overrides')
+      .delete()
+      .eq('canonical_code', canonicalCode)
+      .eq('parent_field_definition_id', parentFieldDefinitionId)
+      .eq('child_field_definition_id', childFieldDefinitionId);
+    if (error) throw new Error(`Failed to remove dependency override: ${error.message}`);
+  } else {
+    // Insert or update a "hidden" sentinel
+    const { error } = await supabase
+      .from('item_type_field_dependency_overrides')
+      .upsert(
+        {
+          canonical_code: canonicalCode,
+          parent_field_definition_id: parentFieldDefinitionId,
+          child_field_definition_id: childFieldDefinitionId,
+          is_hidden: true,
+          is_added_locally: false,
+        },
+        {
+          onConflict:
+            'canonical_code,parent_field_definition_id,child_field_definition_id',
+        }
+      );
+    if (error) throw new Error(`Failed to hide dependency: ${error.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Field Dependencies — resolver
+// ---------------------------------------------------------------------------
+
+/**
+ * Loads both item-type-level rules and per-item overrides in parallel, then
+ * merges them into a flat resolved list.
+ */
+export async function getResolvedDependencies(
+  canonicalCode: string
+): Promise<ResolvedFieldDependency[]> {
+  const { data: itemRow } = await supabase
+    .from('estimate_items')
+    .select('item_type')
+    .eq('canonical_code', canonicalCode)
+    .not('item_type', 'is', null)
+    .limit(1)
+    .maybeSingle();
+
+  const itemTypeSlug = (itemRow?.item_type as string | null) ?? null;
+
+  const [typeRulesResult, overridesResult] = await Promise.all([
+    itemTypeSlug
+      ? supabase
+          .from('item_type_field_dependencies')
+          .select(
+            '*, parent_field:field_definitions!parent_field_definition_id(*), child_field:field_definitions!child_field_definition_id(*)'
+          )
+          .eq('item_type_slug', itemTypeSlug)
+          .order('sort_order', { ascending: true })
+      : Promise.resolve({ data: [], error: null }),
+    supabase
+      .from('item_type_field_dependency_overrides')
+      .select('*, child_field:field_definitions!child_field_definition_id(*)')
+      .eq('canonical_code', canonicalCode),
+  ]);
+
+  if (typeRulesResult.error)
+    throw new Error(`Failed to fetch type field dependencies: ${typeRulesResult.error.message}`);
+  if (overridesResult.error)
+    throw new Error(`Failed to fetch dependency overrides: ${overridesResult.error.message}`);
+
+  const typeRules = (typeRulesResult.data ?? []).map(mapItemTypeFieldDependency);
+  const overrides = (overridesResult.data ?? []).map(mapItemTypeFieldDependencyOverride);
+
+  return mergeDependencies(typeRules, overrides);
+}
+
+// ---------------------------------------------------------------------------
 // Adder fields — for the Pricing editor
 // ---------------------------------------------------------------------------
+
+/**
+ * Sets the pass_value_to_frame flag for a base field on the doors item type.
+ * Only meaningful for rows with item_type_slug = 'doors'.
+ */
+export async function setItemTypeBaseFieldPassValueToFrame(
+  slug: string,
+  fieldDefinitionId: string,
+  value: boolean
+): Promise<void> {
+  const { error } = await supabase
+    .from('item_type_base_fields')
+    .update({ pass_value_to_frame: value })
+    .eq('item_type_slug', slug)
+    .eq('field_definition_id', fieldDefinitionId);
+  if (error) throw new Error(`Failed to set pass_value_to_frame: ${error.message}`);
+}
+
+/**
+ * Returns the set of field_key values for doors base fields that have
+ * pass_value_to_frame = true. Used by the estimate wizards to know which
+ * door field changes should be mirrored to matching frame fields.
+ */
+export async function getPassToFrameFieldKeys(): Promise<Set<string>> {
+  const { data, error } = await supabase
+    .from('item_type_base_fields')
+    .select('field_definitions(field_key)')
+    .eq('item_type_slug', 'doors')
+    .eq('pass_value_to_frame', true);
+  if (error) throw new Error(`Failed to fetch pass-to-frame field keys: ${error.message}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new Set((data ?? []).map((r: any) => r.field_definitions?.field_key).filter(Boolean));
+}
 
 /**
  * Returns all (canonicalCode, fieldDefinitionId) pairs where is_adder = true

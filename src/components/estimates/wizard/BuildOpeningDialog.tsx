@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus,
   Trash2,
@@ -48,6 +48,9 @@ import {
   updateEstimateOpening,
   deleteEstimateItem,
 } from '@/lib/estimates-api';
+import { getPassToFrameFieldKeys, getResolvedDependencies } from '@/lib/item-fields-api';
+import { evaluateDependency } from '@/lib/field-dependencies';
+import { syncDoorFieldToFrames, applyDoorValuesToFrame } from '@/lib/door-frame-sync';
 import {
   groupHardwareBySubcategory,
   HARDWARE_SUBCATEGORY_ORDER,
@@ -63,6 +66,7 @@ import type {
   FieldValueOption,
   ItemField,
   HardwareSubcategory,
+  DependencyOperator,
 } from '@/types';
 
 const newLocalId = () =>
@@ -76,6 +80,10 @@ interface LocalField {
   valueType: FieldValueType;
   fieldDefinitionId?: string;
   isRequired: boolean;
+  /** If set, this is a conditional child field — only shown when the parent's value satisfies the condition. */
+  conditionalParentDefId?: string;
+  conditionOperator?: DependencyOperator;
+  conditionTriggerValues?: (string | number)[];
 }
 
 interface LocalHardwareItem {
@@ -443,16 +451,49 @@ interface FieldsListProps {
 function FieldsList({ fields, onUpdateField, onDeleteField }: FieldsListProps) {
   if (fields.length === 0) return null;
 
+  // Separate top-level (parent) fields from conditional child fields
+  const parentFields = fields.filter((f) => !f.conditionalParentDefId);
+  const childrenByParentDefId = new Map<string, LocalField[]>();
+  for (const f of fields) {
+    if (!f.conditionalParentDefId) continue;
+    const list = childrenByParentDefId.get(f.conditionalParentDefId) ?? [];
+    list.push(f);
+    childrenByParentDefId.set(f.conditionalParentDefId, list);
+  }
+
+  const rows: JSX.Element[] = [];
+  for (const field of parentFields) {
+    rows.push(
+      <FieldRow
+        key={field.localId}
+        field={field}
+        onUpdate={(val) => onUpdateField(field.localId, val)}
+        onDelete={() => onDeleteField(field.localId)}
+      />
+    );
+    if (!field.fieldDefinitionId) continue;
+    const children = childrenByParentDefId.get(field.fieldDefinitionId) ?? [];
+    for (const child of children) {
+      if (
+        child.conditionOperator === undefined ||
+        child.conditionTriggerValues === undefined
+      ) continue;
+      if (!evaluateDependency(field.fieldValue || null, child.conditionOperator, child.conditionTriggerValues)) continue;
+      rows.push(
+        <div key={child.localId} className="pl-4 ml-1 border-l-2 border-primary/20 bg-muted/20">
+          <FieldRow
+            field={child}
+            onUpdate={(val) => onUpdateField(child.localId, val)}
+            onDelete={() => onDeleteField(child.localId)}
+          />
+        </div>
+      );
+    }
+  }
+
   return (
     <div className="rounded-md border divide-y mt-2">
-      {fields.map((field) => (
-        <FieldRow
-          key={field.localId}
-          field={field}
-          onUpdate={(val) => onUpdateField(field.localId, val)}
-          onDelete={() => onDeleteField(field.localId)}
-        />
-      ))}
+      {rows}
     </div>
   );
 }
@@ -643,6 +684,14 @@ export function BuildOpeningDialog({
   const [addFieldFormOpenForId, setAddFieldFormOpenForId] = useState<string | null>(null);
   const [addHwFieldFormOpenForId, setAddHwFieldFormOpenForId] = useState<string | null>(null);
 
+  // Field keys from doors that should be mirrored to matching frame fields
+  const [passToFrameKeys, setPassToFrameKeys] = useState<Set<string>>(new Set());
+  // Refs to access latest values inside memoized buildLocalItem callbacks
+  const passToFrameKeysRef = useRef<Set<string>>(new Set());
+  const doorItemsRef = useRef<LocalTopLevelItem[]>([]);
+  useEffect(() => { passToFrameKeysRef.current = passToFrameKeys; }, [passToFrameKeys]);
+  useEffect(() => { doorItemsRef.current = doorItems; }, [doorItems]);
+
   // Load item types and reset state when dialog opens
   useEffect(() => {
     if (!open) return;
@@ -670,6 +719,12 @@ export function BuildOpeningDialog({
       })
       .catch((err) => console.error('Failed to load item types:', err))
       .finally(() => setItemTypesLoading(false));
+    getPassToFrameFieldKeys()
+      .then((keys) => {
+        setPassToFrameKeys(keys);
+        passToFrameKeysRef.current = keys;
+      })
+      .catch((err) => console.error('Failed to load pass-to-frame keys:', err));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, openingCount, editingOpening?.id]);
 
@@ -771,7 +826,11 @@ export function BuildOpeningDialog({
 
   // Build a LocalTopLevelItem from a selected ItemType
   const buildLocalItem = useCallback(
-    async (itemType: ItemType, category: 'doors' | 'frames'): Promise<LocalTopLevelItem> => {
+    async (
+      itemType: ItemType,
+      category: 'doors' | 'frames',
+      onFieldsLoaded?: (localId: string) => void
+    ): Promise<LocalTopLevelItem> => {
       const localId = newLocalId();
       const item: LocalTopLevelItem = {
         localId,
@@ -785,8 +844,9 @@ export function BuildOpeningDialog({
       Promise.all([
         getItemTypeFields(itemType.canonicalCodes ?? [itemType.canonicalCode]),
         getMostRecentFieldValuesForItem(itemType.canonicalCodes ?? [itemType.canonicalCode]),
+        getResolvedDependencies(itemType.canonicalCode),
       ])
-        .then(([allFields, recentValues]) => {
+        .then(([allFields, recentValues, resolvedDeps]) => {
           const fields: LocalField[] = allFields
             .filter((rf) => rf.fieldDefinition)
             .map((rf) => ({
@@ -798,6 +858,25 @@ export function BuildOpeningDialog({
               fieldDefinitionId: rf.fieldDefinitionId,
               isRequired: rf.isRequired,
             }));
+
+          // Append conditional child fields from dependency rules
+          const existingFieldKeys = new Set(fields.map((f) => f.fieldKey));
+          for (const dep of resolvedDeps) {
+            if (existingFieldKeys.has(dep.childField.fieldKey)) continue;
+            fields.push({
+              localId: newLocalId(),
+              fieldKey: dep.childField.fieldKey,
+              fieldLabel: dep.childField.fieldLabel,
+              fieldValue: '',
+              valueType: dep.childField.valueType,
+              fieldDefinitionId: dep.childField.id,
+              isRequired: false,
+              conditionalParentDefId: dep.parentFieldDefinitionId,
+              conditionOperator: dep.operator,
+              conditionTriggerValues: dep.triggerValues,
+            });
+            existingFieldKeys.add(dep.childField.fieldKey);
+          }
 
           const descriptionCodeKey =
             category === 'doors' ? 'door_description_code' : 'frame_description';
@@ -821,6 +900,8 @@ export function BuildOpeningDialog({
           } else {
             setFrameItems(updater);
           }
+
+          onFieldsLoaded?.(localId);
         })
         .catch(() => {
           const updater = (prev: LocalTopLevelItem[]) =>
@@ -852,8 +933,9 @@ export function BuildOpeningDialog({
       Promise.all([
         getItemTypeFields(hwType.canonicalCode),
         getMostRecentFieldValuesForItem([hwType.canonicalCode]),
+        getResolvedDependencies(hwType.canonicalCode),
       ])
-        .then(([allFields, recentValues]) => {
+        .then(([allFields, recentValues, resolvedDeps]) => {
           const fields: LocalField[] = allFields
             .filter((rf) => rf.fieldDefinition)
             .map((rf) => ({
@@ -865,6 +947,25 @@ export function BuildOpeningDialog({
               fieldDefinitionId: rf.fieldDefinitionId,
               isRequired: rf.isRequired,
             }));
+
+          // Append conditional child fields from dependency rules
+          const existingFieldKeys = new Set(fields.map((f) => f.fieldKey));
+          for (const dep of resolvedDeps) {
+            if (existingFieldKeys.has(dep.childField.fieldKey)) continue;
+            fields.push({
+              localId: newLocalId(),
+              fieldKey: dep.childField.fieldKey,
+              fieldLabel: dep.childField.fieldLabel,
+              fieldValue: '',
+              valueType: dep.childField.valueType,
+              fieldDefinitionId: dep.childField.id,
+              isRequired: false,
+              conditionalParentDefId: dep.parentFieldDefinitionId,
+              conditionOperator: dep.operator,
+              conditionTriggerValues: dep.triggerValues,
+            });
+            existingFieldKeys.add(dep.childField.fieldKey);
+          }
 
           setHardwareItems((prev) =>
             prev.map((h) => (h.localId === hwLocalId ? { ...h, fields, loadingFields: false } : h))
@@ -887,7 +988,22 @@ export function BuildOpeningDialog({
   };
 
   const handleSelectFrame = async (itemType: ItemType) => {
-    const item = await buildLocalItem(itemType, 'frames');
+    // Snapshot door items and pass-to-frame keys at selection time so the
+    // sync callback closes over the correct values even if state updates later.
+    const snapshotDoors = doorItemsRef.current;
+    const snapshotKeys = passToFrameKeysRef.current;
+
+    const item = await buildLocalItem(itemType, 'frames', (localId) => {
+      if (snapshotKeys.size > 0 && snapshotDoors.length > 0) {
+        const sourceDoor = snapshotDoors[snapshotDoors.length - 1];
+        setFrameItems((prev) =>
+          prev.map((f) => {
+            if (f.localId !== localId) return f;
+            return applyDoorValuesToFrame(f, sourceDoor, snapshotKeys);
+          })
+        );
+      }
+    });
     setFrameItems((prev) => [...prev, item]);
   };
 
@@ -921,6 +1037,11 @@ export function BuildOpeningDialog({
   };
 
   const handleUpdateField = (itemLocalId: string, fieldLocalId: string, value: string) => {
+    // Detect if this update is for a door item, and find the changed field key
+    // before applying the update so we can sync to frames if needed.
+    const doorItem = doorItems.find((i) => i.localId === itemLocalId);
+    const changedFieldKey = doorItem?.fields.find((f) => f.localId === fieldLocalId)?.fieldKey;
+
     updateItemInBoth(itemLocalId, (item) => {
       const descriptionCodeKey =
         item.category === 'doors' ? 'door_description_code' : 'frame_description';
@@ -934,6 +1055,11 @@ export function BuildOpeningDialog({
         ),
       };
     });
+
+    // Mirror the value to matching frame fields when pass_value_to_frame is set
+    if (doorItem && changedFieldKey && passToFrameKeys.has(changedFieldKey)) {
+      setFrameItems((prev) => syncDoorFieldToFrames(prev, changedFieldKey, value));
+    }
   };
 
   const handleDeleteField = (itemLocalId: string, fieldLocalId: string) => {
@@ -1019,8 +1145,22 @@ export function BuildOpeningDialog({
         fields: LocalField[]
       ): Promise<ItemField[]> => {
         const saved: ItemField[] = [];
+        // Build a map of parent field def ID → current value for conditional evaluation
+        const parentValueByDefId = new Map<string, string>();
+        for (const f of fields) {
+          if (f.fieldDefinitionId && !f.conditionalParentDefId) {
+            parentValueByDefId.set(f.fieldDefinitionId, f.fieldValue);
+          }
+        }
         for (const field of fields) {
           if (!field.fieldKey.trim()) continue;
+          // Skip conditional children whose trigger condition is not currently met
+          if (field.conditionalParentDefId !== undefined) {
+            const parentValue = parentValueByDefId.get(field.conditionalParentDefId) ?? null;
+            if (!evaluateDependency(parentValue, field.conditionOperator!, field.conditionTriggerValues!)) {
+              continue;
+            }
+          }
           const f = await addItemField(itemId, {
             fieldKey: field.fieldKey,
             fieldLabel: field.fieldLabel,

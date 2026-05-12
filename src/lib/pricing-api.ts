@@ -84,12 +84,18 @@ function mapCell(row: Record<string, unknown>): PricingCell {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns all door series from `field_value_options` (joined via
- * `field_definitions` where `field_key='series'`), enriched with
- * pricing table summary data (row/column counts, last updated, vendors).
+ * Returns all door series, merging two sources:
+ *   1. Global `field_value_options` for the `series` field_definition.
+ *   2. Door items from `estimate_items` (item_type='doors'), using each item's
+ *      series value from `item_fields` when present, or its `item_label` as a
+ *      fallback — mirrors the same grouping logic used by the Items page.
+ *
+ * Each entry is enriched with pricing table summary data (row/column counts,
+ * last updated, vendors). Item-only series that have no global option record
+ * will have fieldValueOptionId = null.
  */
 export async function listDoorSeries(): Promise<DoorSeriesSummary[]> {
-  // 1. Fetch the series field definition id
+  // 1. Fetch the series field definition id (may not exist)
   const { data: fieldDef, error: fieldDefError } = await supabase
     .from('field_definitions')
     .select('id')
@@ -97,20 +103,71 @@ export async function listDoorSeries(): Promise<DoorSeriesSummary[]> {
     .maybeSingle();
 
   if (fieldDefError) throw new Error(fieldDefError.message);
-  if (!fieldDef) return [];
 
-  // 2. Fetch all series options
-  const { data: options, error: optionsError } = await supabase
-    .from('field_value_options')
-    .select('id, value')
-    .eq('field_definition_id', fieldDef.id)
-    .order('sort_order', { ascending: true })
-    .order('value', { ascending: true });
+  // 2. Fetch global series options (empty array if no field definition)
+  const globalOptions: { id: string; value: string }[] = [];
+  if (fieldDef) {
+    const { data: options, error: optionsError } = await supabase
+      .from('field_value_options')
+      .select('id, value')
+      .eq('field_definition_id', fieldDef.id)
+      .order('sort_order', { ascending: true })
+      .order('value', { ascending: true });
 
-  if (optionsError) throw new Error(optionsError.message);
-  if (!options || options.length === 0) return [];
+    if (optionsError) throw new Error(optionsError.message);
+    globalOptions.push(...(options ?? []));
+  }
 
-  // 3. Fetch pricing tables for 'doors' with vendor names
+  // 3. Fetch all door items and derive the same group names shown on the Items page.
+  //
+  // Multiple estimate_items rows can share the same canonical_code (one per estimate
+  // line). The Items page (getItemTypes) groups by canonical_code and picks the
+  // MOST COMMON series value across all rows for that code; if no series is set on
+  // any row it falls back to item_label. We replicate that logic exactly so the
+  // Pricing series list always matches what the Items page displays.
+  const { data: doorItems, error: doorItemsError } = await supabase
+    .from('estimate_items')
+    .select('canonical_code, item_label, item_fields(field_key, field_value)')
+    .eq('item_type', 'doors');
+
+  if (doorItemsError) throw new Error(doorItemsError.message);
+
+  // Accumulate series counts per canonical_code
+  const codeData = new Map<string, { itemLabel: string; seriesCounts: Map<string, number> }>();
+  for (const item of doorItems ?? []) {
+    if (!codeData.has(item.canonical_code)) {
+      codeData.set(item.canonical_code, { itemLabel: item.item_label, seriesCounts: new Map() });
+    }
+    const entry = codeData.get(item.canonical_code)!;
+    const fields = item.item_fields as { field_key: string; field_value: string | null }[] | null;
+    const seriesValue = fields?.find((f) => f.field_key === 'series')?.field_value;
+    if (seriesValue) {
+      entry.seriesCounts.set(seriesValue, (entry.seriesCounts.get(seriesValue) ?? 0) + 1);
+    }
+  }
+
+  // Per unique canonical_code pick the most-common series (or item_label as fallback)
+  const itemSeriesValues = new Set<string>();
+  for (const { itemLabel, seriesCounts } of codeData.values()) {
+    const name =
+      seriesCounts.size > 0
+        ? [...seriesCounts.entries()].reduce((a, b) => (b[1] > a[1] ? b : a))[0]
+        : itemLabel;
+    if (name) itemSeriesValues.add(name);
+  }
+
+  // Merge: global options first (preserve sort order), then alphabetical extras
+  const globalValueSet = new Set(globalOptions.map((o) => o.value));
+  const extraOptions = [...itemSeriesValues]
+    .filter((v) => !globalValueSet.has(v))
+    .sort()
+    .map((v) => ({ id: null as string | null, value: v }));
+
+  const allOptions: { id: string | null; value: string }[] = [...globalOptions, ...extraOptions];
+
+  if (allOptions.length === 0) return [];
+
+  // 4. Fetch pricing tables for 'doors' with vendor names
   const { data: tables, error: tablesError } = await supabase
     .from('pricing_tables')
     .select(`
@@ -149,7 +206,7 @@ export async function listDoorSeries(): Promise<DoorSeriesSummary[]> {
     tableMap.set(t.series_value, existing);
   }
 
-  return options.map((opt) => ({
+  return allOptions.map((opt) => ({
     seriesValue: opt.value,
     label: opt.value,
     fieldValueOptionId: opt.id,

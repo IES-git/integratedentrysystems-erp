@@ -23,6 +23,8 @@ import {
   ShieldOff,
   ArrowLeftRight,
   ToggleLeft,
+  ArrowUp,
+  ArrowDown,
   type LucideIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -151,6 +153,8 @@ export default function ItemManagementPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<ItemCategory>('doors');
   const [seriesFilter, setSeriesFilter] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<'usage' | 'name' | 'code'>('usage');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [expandedCodes, setExpandedCodes] = useState<Set<string>>(new Set());
   const [itemTypeFieldsMap, setItemTypeFieldsMap] = useState<Map<string, ItemTypeField[]>>(new Map());
   const [fieldsLoading, setFieldsLoading] = useState<Set<string>>(new Set());
@@ -633,19 +637,33 @@ export default function ItemManagementPage() {
     )
   ).sort((a, b) => a.localeCompare(b));
 
-  const filteredItemTypes = itemTypes.filter((item) => {
-    if (item.category !== activeCategory) return false;
-    if (seriesFilter && item.series !== seriesFilter) return false;
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      item.itemLabel.toLowerCase().includes(q) ||
-      item.canonicalCode.toLowerCase().includes(q) ||
-      (item.series ?? '').toLowerCase().includes(q) ||
-      (item.material ?? '').toLowerCase().includes(q) ||
-      (item.gauge ?? '').toLowerCase().includes(q)
-    );
-  });
+  const filteredItemTypes = itemTypes
+    .filter((item) => {
+      if (item.category !== activeCategory) return false;
+      if (seriesFilter && item.series !== seriesFilter) return false;
+      if (!searchQuery) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        item.itemLabel.toLowerCase().includes(q) ||
+        item.canonicalCode.toLowerCase().includes(q) ||
+        (item.series ?? '').toLowerCase().includes(q) ||
+        (item.material ?? '').toLowerCase().includes(q) ||
+        (item.gauge ?? '').toLowerCase().includes(q)
+      );
+    })
+    .sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === 'usage') {
+        cmp = a.usageCount - b.usageCount;
+      } else if (sortKey === 'name') {
+        const aName = (a.series ?? a.itemLabel).toLowerCase();
+        const bName = (b.series ?? b.itemLabel).toLowerCase();
+        cmp = aName.localeCompare(bName);
+      } else {
+        cmp = a.canonicalCode.localeCompare(b.canonicalCode);
+      }
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
 
   const totalFieldsManaged = Array.from(itemTypeFieldsMap.values()).reduce(
     (acc, fields) => acc + fields.length,
@@ -967,6 +985,31 @@ export default function ItemManagementPage() {
               className="pl-9"
             />
           </div>
+          <Select
+            value={`${sortKey}-${sortDir}`}
+            onValueChange={(val) => {
+              const [key, dir] = val.split('-') as ['usage' | 'name' | 'code', 'asc' | 'desc'];
+              setSortKey(key);
+              setSortDir(dir);
+            }}
+          >
+            <SelectTrigger className="w-auto gap-1.5 text-sm h-9 px-3">
+              {sortDir === 'asc' ? (
+                <ArrowUp className="h-3.5 w-3.5 text-muted-foreground" />
+              ) : (
+                <ArrowDown className="h-3.5 w-3.5 text-muted-foreground" />
+              )}
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="usage-desc">Usage (High → Low)</SelectItem>
+              <SelectItem value="usage-asc">Usage (Low → High)</SelectItem>
+              <SelectItem value="name-asc">Name (A → Z)</SelectItem>
+              <SelectItem value="name-desc">Name (Z → A)</SelectItem>
+              <SelectItem value="code-asc">Code (A → Z)</SelectItem>
+              <SelectItem value="code-desc">Code (Z → A)</SelectItem>
+            </SelectContent>
+          </Select>
           <Button
             size="sm"
             onClick={() => {

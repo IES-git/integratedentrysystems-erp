@@ -31,7 +31,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import type { ItemFieldView, FieldDefinition } from '@/types';
+import type { ItemFieldView, ItemFieldsView, FieldDefinition } from '@/types';
 import {
   getItemFieldsView,
   addItemField,
@@ -43,6 +43,51 @@ import { getFieldDefinitions } from '@/lib/estimates-api';
 import { FieldOptionsPanel } from './FieldOptionsPanel';
 
 const BIG_FIVE_SET = new Set<string>(BIG_FIVE_KEYS);
+
+// ---------------------------------------------------------------------------
+// Sortable base-field row (grip handle only — no delete for base fields)
+// ---------------------------------------------------------------------------
+
+interface SortableBaseFieldRowProps {
+  field: ItemFieldView;
+  canonicalCode: string;
+}
+
+function SortableBaseFieldRow({ field, canonicalCode }: SortableBaseFieldRowProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: field.definition.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.45 : 1,
+  };
+
+  const effectiveLabelOverride =
+    field.effectiveLabel !== field.definition.fieldLabel ? field.effectiveLabel : undefined;
+
+  return (
+    <div ref={setNodeRef} style={style} className="flex items-start gap-2">
+      <span
+        {...attributes}
+        {...listeners}
+        className="mt-3.5 cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-muted-foreground shrink-0"
+        title="Drag to reorder"
+      >
+        <GripVertical className="h-4 w-4" />
+      </span>
+      <div className="flex-1 min-w-0">
+        <FieldOptionsPanel
+          field={field.definition}
+          dataSource={{ canonicalCode }}
+          isAdder={field.isAdder}
+          isBigFive={BIG_FIVE_SET.has(field.definition.fieldKey)}
+          overrideLabel={effectiveLabelOverride}
+        />
+      </div>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Sortable other-field row
@@ -103,7 +148,7 @@ interface ItemFieldsPanelProps {
 export function ItemFieldsPanel({ canonicalCode }: ItemFieldsPanelProps) {
   const { toast } = useToast();
 
-  const [view, setView] = useState<{ baseFields: ItemFieldView[]; otherFields: ItemFieldView[] } | null>(null);
+  const [view, setView] = useState<ItemFieldsView | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Add-field dialog
@@ -134,6 +179,25 @@ export function ItemFieldsPanel({ canonicalCode }: ItemFieldsPanelProps) {
   useEffect(() => {
     void loadView();
   }, [loadView]);
+
+  // ── Base field drag-to-reorder ─────────────────────────────────────────────
+  async function handleBaseFieldDragEnd(event: DragEndEvent) {
+    if (!view) return;
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const oldIndex = view.baseFields.findIndex((f) => f.definition.id === active.id);
+    const newIndex = view.baseFields.findIndex((f) => f.definition.id === over.id);
+    const reordered = arrayMove(view.baseFields, oldIndex, newIndex);
+    setView({ ...view, baseFields: reordered });
+
+    try {
+      await reorderItemFields(canonicalCode, reordered.map((f) => f.definition.id));
+    } catch {
+      toast({ title: 'Error', description: 'Failed to save field order', variant: 'destructive' });
+      void loadView();
+    }
+  }
 
   // ── Field drag-to-reorder ──────────────────────────────────────────────────
   async function handleFieldDragEnd(event: DragEndEvent) {
@@ -227,25 +291,29 @@ export function ItemFieldsPanel({ canonicalCode }: ItemFieldsPanelProps) {
           <div className="mb-3">
             <h2 className="text-base font-semibold">Base Fields</h2>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Core structural fields. Expand to manage options and aliases.
+              Core structural fields. Drag to reorder, expand to manage options and aliases.
             </p>
           </div>
-          <div className="flex flex-col gap-2">
-            {view.baseFields.map((field) => {
-              const effectiveLabelOverride =
-                field.effectiveLabel !== field.definition.fieldLabel ? field.effectiveLabel : undefined;
-              return (
-                <FieldOptionsPanel
-                  key={field.definition.id}
-                  field={field.definition}
-                  dataSource={{ canonicalCode }}
-                  isAdder={field.isAdder}
-                  isBigFive={BIG_FIVE_SET.has(field.definition.fieldKey)}
-                  overrideLabel={effectiveLabelOverride}
-                />
-              );
-            })}
-          </div>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleBaseFieldDragEnd}
+          >
+            <SortableContext
+              items={view.baseFields.map((f) => f.definition.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              <div className="flex flex-col gap-2">
+                {view.baseFields.map((field) => (
+                  <SortableBaseFieldRow
+                    key={field.definition.id}
+                    field={field}
+                    canonicalCode={canonicalCode}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
         </section>
 
         {/* ── Other Fields ────────────────────────────────────────────────── */}

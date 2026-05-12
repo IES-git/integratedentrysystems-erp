@@ -25,18 +25,20 @@ import {
   Star,
   GripVertical,
   DollarSign,
+  ArrowRightFromLine,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { FieldDefinition, FieldValueOption, ItemTypeFieldValueOption } from '@/types';
+import type { FieldDefinition, FieldValueOption, ItemTypeFieldValueOption, OptionType } from '@/types';
 import {
   getFieldValueOptions,
   addFieldValueOption,
   updateFieldValueOption,
   deleteFieldValueOption,
   updateFieldDefinition,
+  updateFieldOptionType,
   setDefaultFieldValueOption,
   reorderFieldValueOptions,
 } from '@/lib/estimates-api';
@@ -52,6 +54,7 @@ import {
 } from '@/lib/item-fields-api';
 import { useToast } from '@/hooks/use-toast';
 import { FieldAliasSection } from './FieldAliasSection';
+import { FieldDependenciesSection } from './FieldDependenciesSection';
 
 // ---------------------------------------------------------------------------
 // Sortable row
@@ -189,10 +192,12 @@ interface FieldOptionsPanelProps {
   /** If provided, a delete-field button appears in the header. */
   onDeleteField?: () => void;
   /**
-   * When `{ canonicalCode }`, reads/writes use per-item copy-on-write tables.
-   * Defaults to `'global'` (existing DoorsWizard behavior).
+   * Controls which backend tables are used for reads/writes:
+   * - `'global'` (default): operates on global field_definitions / field_value_options
+   * - `{ canonicalCode }`: per-item copy-on-write tables
+   * - `{ itemTypeSlug }`: item-type defaults (options/aliases still global; deps from type table)
    */
-  dataSource?: 'global' | { canonicalCode: string };
+  dataSource?: 'global' | { canonicalCode: string } | { itemTypeSlug: string };
   /** Initial adder state (per-item mode only). */
   isAdder?: boolean;
   /**
@@ -202,6 +207,16 @@ interface FieldOptionsPanelProps {
   isBigFive?: boolean;
   /** Effective label override — initialises the label draft in per-item mode. */
   overrideLabel?: string;
+  /**
+   * When true, the "Conditional sub-fields" section is hidden.
+   * Used to prevent grandchildren when rendering a child FieldOptionsPanel.
+   */
+  disableNestedDependencies?: boolean;
+  /**
+   * When provided, renders a "pass value to frame" toggle in the header.
+   * Only meaningful for the Doors category in the category-level fields wizard.
+   */
+  passToFrame?: { value: boolean; onChange: (next: boolean) => Promise<void> };
 }
 
 export function FieldOptionsPanel({
@@ -213,9 +228,19 @@ export function FieldOptionsPanel({
   isAdder: isAdderProp = false,
   isBigFive = false,
   overrideLabel,
+  disableNestedDependencies = false,
+  passToFrame,
 }: FieldOptionsPanelProps) {
   const { toast } = useToast();
-  const canonicalCode = typeof dataSource === 'object' ? dataSource.canonicalCode : null;
+  const canonicalCode =
+    typeof dataSource === 'object' && 'canonicalCode' in dataSource
+      ? dataSource.canonicalCode
+      : null;
+  const itemTypeSlug =
+    typeof dataSource === 'object' && 'itemTypeSlug' in dataSource
+      ? dataSource.itemTypeSlug
+      : null;
+  // Per-item mode: options/aliases/labels use per-item tables
   const isPerItem = canonicalCode !== null;
 
   const [expanded, setExpanded] = useState(defaultExpanded && !collapsed);
@@ -225,6 +250,7 @@ export function FieldOptionsPanel({
   const initialLabel = overrideLabel ?? field.fieldLabel;
   const [labelDraft, setLabelDraft] = useState(initialLabel);
   const [adderActive, setAdderActive] = useState(isAdderProp);
+  const [optionType, setOptionType] = useState<OptionType>(field.optionType ?? 'selection');
   const [editingOptionId, setEditingOptionId] = useState<string | null>(null);
   const [optionDraft, setOptionDraft] = useState('');
   const [newOptionValue, setNewOptionValue] = useState('');
@@ -248,11 +274,11 @@ export function FieldOptionsPanel({
   }, [canonicalCode, field.id, isPerItem, toast]);
 
   useEffect(() => {
-    if (expanded && options.length === 0 && !loadingOptions) {
+    if (expanded && optionType === 'selection' && options.length === 0 && !loadingOptions) {
       void loadOptions();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded]);
+  }, [expanded, optionType]);
 
   async function handleSaveLabel() {
     if (!labelDraft.trim() || labelDraft === initialLabel) {
@@ -282,6 +308,18 @@ export function FieldOptionsPanel({
     } catch {
       setAdderActive(!newValue);
       toast({ title: 'Error', description: 'Failed to update adder status', variant: 'destructive' });
+    }
+  }
+
+  async function handleChangeOptionType(next: OptionType) {
+    if (next === optionType) return;
+    const prev = optionType;
+    setOptionType(next);
+    try {
+      await updateFieldOptionType(field.id, next);
+    } catch {
+      setOptionType(prev);
+      toast({ title: 'Error', description: 'Failed to update option type', variant: 'destructive' });
     }
   }
 
@@ -386,7 +424,11 @@ export function FieldOptionsPanel({
     return (
       <div className="flex items-center justify-between px-4 py-2 rounded-lg border bg-muted/40 text-sm">
         <span className="font-medium text-muted-foreground">{initialLabel}</span>
-        {defaultOption ? (
+        {optionType !== 'selection' ? (
+          <Badge variant="secondary" className="text-xs">
+            {optionType === 'string' ? 'Text input' : 'Number input'}
+          </Badge>
+        ) : defaultOption ? (
           <Badge variant="secondary" className="gap-1">
             <Star className="h-2.5 w-2.5 fill-amber-400 text-amber-400" />
             {defaultOption.value}
@@ -452,7 +494,12 @@ export function FieldOptionsPanel({
         </div>
 
         <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-          {defaultOption && !expanded && (
+          {!expanded && optionType !== 'selection' && (
+            <Badge variant="outline" className="text-xs mr-1">
+              {optionType === 'string' ? 'Text input' : 'Number input'}
+            </Badge>
+          )}
+          {defaultOption && !expanded && optionType === 'selection' && (
             <Badge variant="outline" className="text-xs gap-1 mr-1">
               <Star className="h-2.5 w-2.5 fill-amber-400 text-amber-400" />
               {defaultOption.value}
@@ -476,17 +523,34 @@ export function FieldOptionsPanel({
             </Button>
           )}
 
+          {passToFrame !== undefined && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className={cn(
+                'h-7 w-7',
+                passToFrame.value
+                  ? 'text-sky-600 hover:text-sky-700'
+                  : 'text-muted-foreground/30 hover:text-sky-600'
+              )}
+              title="Pass value to frame"
+              onClick={() => void passToFrame.onChange(!passToFrame.value)}
+            >
+              <ArrowRightFromLine className={cn('h-3.5 w-3.5', passToFrame.value && 'stroke-[2.5]')} />
+            </Button>
+          )}
+
           <Button
             size="icon"
             variant="ghost"
-            className="h-7 w-7"
-            title="Rename field label"
+            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            title="Edit label"
             onClick={() => {
               setEditingLabelId('label');
               setExpanded(true);
             }}
           >
-            <Pencil className="h-3 w-3" />
+            <Pencil className="h-3.5 w-3.5" />
           </Button>
 
           {onDeleteField && (
@@ -506,93 +570,143 @@ export function FieldOptionsPanel({
       {/* Options list */}
       {expanded && (
         <div className="border-t px-4 py-3 space-y-1">
+          {/* Option type selector */}
+          <div className="flex items-center gap-3 pb-3 mb-1 border-b" onClick={(e) => e.stopPropagation()}>
+            <span className="text-xs font-medium text-muted-foreground shrink-0">Input type</span>
+            <div className="flex items-center gap-1">
+              {(['selection', 'string', 'integer'] as OptionType[]).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => void handleChangeOptionType(t)}
+                  className={cn(
+                    'px-2.5 py-0.5 rounded text-xs font-medium transition-colors',
+                    optionType === t
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                  )}
+                >
+                  {t === 'selection' ? 'Selection' : t === 'string' ? 'Text' : 'Number'}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {optionType === 'selection'
+                ? 'User picks from a predefined list'
+                : optionType === 'string'
+                ? 'User types free text in the wizard'
+                : 'User enters a whole number in the wizard'}
+            </span>
+          </div>
+
           {/* Manufacturer aliases — sits above options */}
           <FieldAliasSection
             fieldDefinitionId={field.id}
             fieldLabel={labelDraft}
-            dataSource={dataSource}
+            dataSource={canonicalCode ? { canonicalCode } : 'global'}
           />
 
-          {loadingOptions && (
-            <p className="text-xs text-muted-foreground animate-pulse py-2">Loading options…</p>
-          )}
+          {/* Options list — only for selection type */}
+          {optionType === 'selection' ? (
+            <>
+              {loadingOptions && (
+                <p className="text-xs text-muted-foreground animate-pulse py-2">Loading options…</p>
+              )}
 
-          {!loadingOptions && options.length === 0 && !addingNew && (
-            <p className="text-xs text-muted-foreground italic py-1">No options yet. Add one below.</p>
-          )}
+              {!loadingOptions && options.length === 0 && !addingNew && (
+                <p className="text-xs text-muted-foreground italic py-1">No options yet. Add one below.</p>
+              )}
 
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-            <SortableContext items={options.map((o) => o.id)} strategy={verticalListSortingStrategy}>
-              {options.map((opt) => (
-                <SortableOptionRow
-                  key={opt.id}
-                  opt={opt}
-                  isEditing={editingOptionId === opt.id}
-                  optionDraft={optionDraft}
-                  onDraftChange={setOptionDraft}
-                  onStartEdit={() => {
-                    setEditingOptionId(opt.id);
-                    setOptionDraft(opt.value);
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                <SortableContext items={options.map((o) => o.id)} strategy={verticalListSortingStrategy}>
+                  {options.map((opt) => (
+                    <SortableOptionRow
+                      key={opt.id}
+                      opt={opt}
+                      isEditing={editingOptionId === opt.id}
+                      optionDraft={optionDraft}
+                      onDraftChange={setOptionDraft}
+                      onStartEdit={() => {
+                        setEditingOptionId(opt.id);
+                        setOptionDraft(opt.value);
+                      }}
+                      onCancelEdit={() => setEditingOptionId(null)}
+                      onSaveEdit={() => void handleSaveOptionEdit(opt.id)}
+                      onDelete={() => void handleDeleteOption(opt.id)}
+                      onToggleDefault={() => void handleToggleDefault(opt)}
+                    />
+                  ))}
+                </SortableContext>
+              </DndContext>
+
+              {/* Add new option */}
+              {addingNew ? (
+                <div
+                  className="flex items-center gap-2 pt-1"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Input
+                    ref={newInputRef}
+                    className="h-7 text-sm flex-1"
+                    placeholder="New option value…"
+                    value={newOptionValue}
+                    onChange={(e) => setNewOptionValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void handleAddOption();
+                      if (e.key === 'Escape') {
+                        setAddingNew(false);
+                        setNewOptionValue('');
+                      }
+                    }}
+                    autoFocus
+                  />
+                  <Button size="sm" variant="default" className="h-7" onClick={() => void handleAddOption()}>
+                    Add
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7"
+                    onClick={() => {
+                      setAddingNew(false);
+                      setNewOptionValue('');
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 text-xs text-muted-foreground gap-1 mt-1"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setAddingNew(true);
+                    setTimeout(() => newInputRef.current?.focus(), 50);
                   }}
-                  onCancelEdit={() => setEditingOptionId(null)}
-                  onSaveEdit={() => void handleSaveOptionEdit(opt.id)}
-                  onDelete={() => void handleDeleteOption(opt.id)}
-                  onToggleDefault={() => void handleToggleDefault(opt)}
-                />
-              ))}
-            </SortableContext>
-          </DndContext>
-
-          {/* Add new option */}
-          {addingNew ? (
-            <div
-              className="flex items-center gap-2 pt-1"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <Input
-                ref={newInputRef}
-                className="h-7 text-sm flex-1"
-                placeholder="New option value…"
-                value={newOptionValue}
-                onChange={(e) => setNewOptionValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void handleAddOption();
-                  if (e.key === 'Escape') {
-                    setAddingNew(false);
-                    setNewOptionValue('');
-                  }
-                }}
-                autoFocus
-              />
-              <Button size="sm" variant="default" className="h-7" onClick={() => void handleAddOption()}>
-                Add
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7"
-                onClick={() => {
-                  setAddingNew(false);
-                  setNewOptionValue('');
-                }}
-              >
-                Cancel
-              </Button>
-            </div>
+                >
+                  <Plus className="h-3 w-3" />
+                  Add option
+                </Button>
+              )}
+            </>
           ) : (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 text-xs text-muted-foreground gap-1 mt-1"
-              onClick={(e) => {
-                e.stopPropagation();
-                setAddingNew(true);
-                setTimeout(() => newInputRef.current?.focus(), 50);
-              }}
-            >
-              <Plus className="h-3 w-3" />
-              Add option
-            </Button>
+            <p className="text-xs text-muted-foreground italic py-2">
+              Values will be entered by the user when creating an estimate.
+            </p>
+          )}
+
+          {/* Conditional sub-fields — shown for item-type and per-item modes */}
+          {(canonicalCode || itemTypeSlug) && !disableNestedDependencies && (
+            <FieldDependenciesSection
+              parentField={field}
+              dataSource={
+                canonicalCode
+                  ? { canonicalCode }
+                  : { itemTypeSlug: itemTypeSlug! }
+              }
+              disableNestedDependencies={disableNestedDependencies}
+            />
           )}
         </div>
       )}

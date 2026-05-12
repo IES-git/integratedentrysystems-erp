@@ -1009,6 +1009,19 @@ export async function updateFieldDefinition(
   return mapFieldDefinitionRow(data);
 }
 
+/** Update the option type (selection | string | integer) for a field definition. */
+export async function updateFieldOptionType(
+  fieldDefinitionId: string,
+  optionType: import('@/types').OptionType
+): Promise<void> {
+  const { error } = await supabase
+    .from('field_definitions')
+    .update({ option_type: optionType })
+    .eq('id', fieldDefinitionId);
+  if (error)
+    throw new Error(`Failed to update field option type: ${error.message}`);
+}
+
 /** Delete a field definition (e.g. rejected/unwanted fields). */
 export async function deleteFieldDefinition(id: string): Promise<void> {
   const { error } = await supabase
@@ -2038,6 +2051,7 @@ function mapFieldDefinitionRow(row: any): FieldDefinition {
     fieldKey: row.field_key,
     fieldLabel: row.field_label,
     valueType: row.value_type,
+    optionType: row.option_type ?? 'selection',
     description: row.description,
     status: row.status,
     usageCount: row.usage_count,

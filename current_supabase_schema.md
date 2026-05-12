@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-05-06 (added item_type_registry and item_type_base_fields tables; relaxed estimate_items.item_type CHECK constraint to allow any registered slug)
+Last updated: 2026-05-11 (added pass_value_to_frame column to item_type_base_fields for door→frame field sync)
 
 ## Authentication Status
 
@@ -47,6 +47,7 @@ The "learning" table that grows as Gemini discovers new field types during estim
 - `field_key` (TEXT, UNIQUE NOT NULL) - Unique identifier for field (e.g., 'gauge', 'hinge_prep')
 - `field_label` (TEXT, NOT NULL) - Display label (e.g., "Gauge", "Hinge Prep")
 - `value_type` (TEXT, NOT NULL) - Data type: 'string', 'number', 'bool', 'date', 'code'
+- `option_type` (TEXT, NOT NULL, DEFAULT 'selection') - How this field is input in the wizard: 'selection' (dropdown from predefined options), 'string' (free-text), or 'integer' (numeric entry). CHECK constraint enforces these three values.
 - `description` (TEXT) - AI-generated description of what this field represents
 - `status` (TEXT, NOT NULL, DEFAULT 'pending_review') - 'approved' or 'pending_review'
 - `usage_count` (INTEGER, DEFAULT 0) - How many times this field has been extracted
@@ -1051,6 +1052,7 @@ Junction table defining which `field_definitions` are "base fields" for each ite
 - `item_type_slug` (TEXT, NOT NULL, FK → item_type_registry(slug) ON DELETE CASCADE) - The item type
 - `field_definition_id` (UUID, NOT NULL, FK → field_definitions(id) ON DELETE CASCADE) - The field
 - `sort_order` (INTEGER, DEFAULT 0) - Display order within the base fields section
+- `pass_value_to_frame` (BOOLEAN, NOT NULL, DEFAULT false) - When true (doors slug only), the field's value is automatically copied to matching frame fields in the estimate wizard
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW())
 
 **Constraints:**
@@ -1059,11 +1061,13 @@ Junction table defining which `field_definitions` are "base fields" for each ite
 **Indexes:**
 - `idx_item_type_base_fields_slug` on item_type_slug
 - `idx_item_type_base_fields_field_definition_id` on field_definition_id
+- `idx_item_type_base_fields_pass_to_frame` on item_type_slug WHERE pass_value_to_frame = true
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
 - `Authenticated users can read item type base fields` - All authenticated users can SELECT
 - `Admins can insert item type base fields` - Only admins can INSERT
+- `Admins can update item type base fields` - Only admins can UPDATE (sort_order reordering)
 - `Admins can delete item type base fields` - Only admins can DELETE
 
 **Seed data:**
@@ -1071,6 +1075,81 @@ Junction table defining which `field_definitions` are "base fields" for each ite
 - Doors "other" fields seeded at sort_order 100–118 from legacy `item_type_fields` data (migration `seed_doors_other_fields_into_base_fields`): `closer`, `design`, `door_description_code`, `exit_device_height_code`, `exit_device_prep_type`, `glass_or_louver`, `handing`, `hinge_measurements`, `hinge_option`, `hinge_quantity`, `hinge_spacing_code`, `lock_description`, `lock_measurement_btm_to_cl`, `material`, `net_height`, `net_width`, `quantity`, `type_of_hinging`, `undercut_code`
 
 **Migration:** `create_item_type_base_fields` (applied 2026-05-06)
+
+---
+
+### public.item_type_field_dependencies
+
+Item-type-level defaults wiring a parent field to a conditional child field. When the parent field's value satisfies the operator/trigger_values predicate, the child field is shown.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `item_type_slug` (TEXT, NOT NULL, FK → item_type_registry(slug) ON DELETE CASCADE)
+- `parent_field_definition_id` (UUID, NOT NULL, FK → field_definitions(id) ON DELETE CASCADE)
+- `child_field_definition_id` (UUID, NOT NULL, FK → field_definitions(id) ON DELETE CASCADE)
+- `operator` (TEXT, NOT NULL) - CHECK IN ('equals','not_equals','in','not_in','gt','lt','gte','lte','between')
+- `trigger_values` (JSONB, NOT NULL) - Strings for equality ops; numbers for comparison ops; `[min,max]` for `between`
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order among siblings
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- `UNIQUE(item_type_slug, parent_field_definition_id, child_field_definition_id)`
+- `CHECK(parent_field_definition_id <> child_field_definition_id)`
+
+**Indexes:**
+- `idx_itfd_item_type_parent` on (item_type_slug, parent_field_definition_id)
+- `idx_itfd_child` on child_field_definition_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type field dependencies` - All authenticated users can SELECT
+- `Admins can insert item type field dependencies` - Only admins can INSERT (via `is_admin()`)
+- `Admins can update item type field dependencies` - Only admins can UPDATE (via `is_admin()`)
+- `Admins can delete item type field dependencies` - Only admins can DELETE (via `is_admin()`)
+
+**Triggers:**
+- `set_item_type_field_dependencies_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+**Migration:** `add_item_type_field_dependencies` (applied 2026-05-11)
+
+---
+
+### public.item_type_field_dependency_overrides
+
+Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_dependencies`. NULL columns inherit the item-type default. `is_hidden=true` suppresses an inherited dependency; `is_added_locally=true` marks a dependency added only for this item.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `canonical_code` (TEXT, NOT NULL) - The specific item this override applies to
+- `parent_field_definition_id` (UUID, NOT NULL, FK → field_definitions(id) ON DELETE CASCADE)
+- `child_field_definition_id` (UUID, NOT NULL, FK → field_definitions(id) ON DELETE CASCADE)
+- `operator` (TEXT, NULLABLE) - NULL = inherit from item-type default; CHECK IN ('equals',…) when set
+- `trigger_values` (JSONB, NULLABLE) - NULL = inherit
+- `sort_order` (INTEGER, NULLABLE) - NULL = inherit
+- `is_hidden` (BOOLEAN, NOT NULL, DEFAULT false) - true = suppress this inherited dependency
+- `is_added_locally` (BOOLEAN, NOT NULL, DEFAULT false) - true = this dependency is not in the item-type defaults
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- `UNIQUE(canonical_code, parent_field_definition_id, child_field_definition_id)`
+
+**Indexes:**
+- `idx_itfdo_canonical_parent` on (canonical_code, parent_field_definition_id)
+- `idx_itfdo_child` on child_field_definition_id
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read item type field dependency overrides` - All authenticated users can SELECT
+- `Authenticated users can insert item type field dependency overrides` - All authenticated users can INSERT
+- `Authenticated users can update item type field dependency overrides` - All authenticated users can UPDATE
+- `Authenticated users can delete item type field dependency overrides` - All authenticated users can DELETE
+
+**Triggers:**
+- `set_item_type_field_dependency_overrides_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
+
+**Migration:** `add_item_type_field_dependencies` (applied 2026-05-11)
 
 ---
 
@@ -1111,6 +1190,9 @@ Junction table defining which `field_definitions` are "base fields" for each ite
 33. `create_item_type_base_fields` - Created `item_type_base_fields` junction table linking `item_type_registry` slugs to `field_definitions`; seeded doors base fields from BIG_FIVE keys; full RLS (read = authenticated, write/delete = admins), indexes on slug and field_definition_id
 34. `seed_doors_other_fields_into_base_fields` - Seeded 19 non-Big-Five door fields (closer, design, door_description_code, exit_device_height_code, exit_device_prep_type, glass_or_louver, handing, hinge_measurements, hinge_option, hinge_quantity, hinge_spacing_code, lock_description, lock_measurement_btm_to_cl, material, net_height, net_width, quantity, type_of_hinging, undercut_code) into `item_type_base_fields` at sort_order 100–118 so all door items inherit them automatically
 34. `relax_estimate_items_item_type_check` - Dropped `estimate_items_item_type_check` CHECK constraint from `estimate_items.item_type`; app logic now validates against `item_type_registry` slug values
+35. `add_update_policy_item_type_base_fields` - Added UPDATE RLS policy for admins on `item_type_base_fields` so `reorderItemTypeBaseFields` (sort_order updates) can persist; previously the table had SELECT/INSERT/DELETE policies but no UPDATE policy, causing silent no-ops on drag-to-reorder
+36. `add_item_type_field_dependencies` - Created `item_type_field_dependencies` (item-type-level defaults) and `item_type_field_dependency_overrides` (per-canonical-code copy-on-write) tables for conditional sub-field support; RLS mirroring `item_type_base_fields` (read = authenticated, write = admins) for the defaults table and full authenticated CRUD for overrides; `updated_at` triggers via `handle_updated_at()`; composite unique constraints and indexes on (item_type_slug/canonical_code, parent_id) and child_id
+37. `add_pass_value_to_frame_to_item_type_base_fields` - Added `pass_value_to_frame BOOLEAN NOT NULL DEFAULT false` column to `item_type_base_fields`; added partial index `idx_item_type_base_fields_pass_to_frame` on `item_type_slug` where `pass_value_to_frame = true` for efficient lookup of door→frame sync fields in the estimate wizard
 
 ## Edge Functions
 
@@ -1239,7 +1321,7 @@ API functions for managing the `item_type_registry` and `item_type_base_fields` 
 New types added for dynamic item type support:
 
 - `ItemTypeRegistryEntry` — `{ id, name, slug, icon, description, sortOrder, isSystem, createdAt, updatedAt }`
-- `ItemTypeBaseField` — `{ id, itemTypeSlug, fieldDefinitionId, sortOrder, createdAt, fieldDefinition? }`
+- `ItemTypeBaseField` — `{ id, itemTypeSlug, fieldDefinitionId, sortOrder, passValueToFrame, createdAt, fieldDefinition? }`
 - `ItemCategory` — broadened from `'doors' | 'frames' | 'hardware'` to `string` to allow any registered slug
 
 ### public.hardware_catalog

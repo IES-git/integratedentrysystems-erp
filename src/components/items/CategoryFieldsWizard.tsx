@@ -5,6 +5,7 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  useDroppable,
   type DragEndEvent,
 } from '@dnd-kit/core';
 import {
@@ -50,14 +51,13 @@ import {
   addItemTypeBaseField,
   removeItemTypeBaseField,
   reorderItemTypeBaseFields,
+  setItemTypeBaseFieldPassValueToFrame,
 } from '@/lib/item-fields-api';
 import { FieldOptionsPanel } from './FieldOptionsPanel';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const BIG_FIVE_KEYS = new Set(['series', 'gauge', 'opening_width', 'opening_height', 'material']);
 
 // Big Five fields use sort_orders 0–9 to keep them pinned at the top.
 // Other fields start at sort_order 100 to stay in their own range.
@@ -69,10 +69,13 @@ const OTHER_FIELDS_SORT_OFFSET = 100;
 
 interface SortableFieldRowProps {
   bf: ItemTypeBaseField;
+  itemTypeSlug: string;
+  itemTypeName: string;
   onRemove: () => void;
+  passToFrame?: { value: boolean; onChange: (next: boolean) => Promise<void> };
 }
 
-function SortableFieldRow({ bf, onRemove }: SortableFieldRowProps) {
+function SortableFieldRow({ bf, itemTypeSlug, itemTypeName, onRemove, passToFrame }: SortableFieldRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: bf.fieldDefinitionId });
 
@@ -95,17 +98,46 @@ function SortableFieldRow({ bf, onRemove }: SortableFieldRowProps) {
         <GripVertical className="h-4 w-4" />
       </span>
       <div className="flex-1 min-w-0">
-        <FieldOptionsPanel field={bf.fieldDefinition} />
+        <FieldOptionsPanel
+          field={bf.fieldDefinition}
+          dataSource={{ itemTypeSlug }}
+          passToFrame={passToFrame}
+        />
       </div>
       <Button
         variant="ghost"
         size="icon"
         className="mt-2 h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-        title={`Remove "${bf.fieldDefinition.fieldLabel}" from ${name}`}
+        title={`Remove "${bf.fieldDefinition.fieldLabel}" from ${itemTypeName}`}
         onClick={onRemove}
       >
         <X className="h-3.5 w-3.5" />
       </Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Droppable container — makes each section a valid drop target when empty
+// ---------------------------------------------------------------------------
+
+const BASE_DROPPABLE = 'base-droppable';
+const OTHER_DROPPABLE = 'other-droppable';
+
+interface DroppableContainerProps {
+  id: string;
+  children: React.ReactNode;
+  isOver: boolean;
+}
+
+function DroppableContainer({ id, children, isOver }: DroppableContainerProps) {
+  const { setNodeRef } = useDroppable({ id });
+  return (
+    <div
+      ref={setNodeRef}
+      className={isOver ? 'rounded-lg ring-2 ring-primary/25 ring-offset-1' : undefined}
+    >
+      {children}
     </div>
   );
 }
@@ -146,12 +178,16 @@ export function CategoryFieldsWizard({ slug, name, onBack }: CategoryFieldsWizar
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
+  // Track which droppable container the dragged item is currently over
+  const [overContainer, setOverContainer] = useState<string | null>(null);
+
   const loadFields = useCallback(async () => {
     setLoading(true);
     try {
       const all = await getItemTypeBaseFields(slug);
-      setBaseFields(all.filter((bf) => bf.fieldDefinition && BIG_FIVE_KEYS.has(bf.fieldDefinition.fieldKey)));
-      setOtherFields(all.filter((bf) => !bf.fieldDefinition || !BIG_FIVE_KEYS.has(bf.fieldDefinition.fieldKey)));
+      // Split by sort_order range: base fields live in 0–99, other fields at 100+.
+      setBaseFields(all.filter((bf) => bf.sortOrder < OTHER_FIELDS_SORT_OFFSET));
+      setOtherFields(all.filter((bf) => bf.sortOrder >= OTHER_FIELDS_SORT_OFFSET));
     } catch {
       toast({ title: 'Error', description: 'Failed to load field definitions', variant: 'destructive' });
     } finally {
@@ -205,11 +241,20 @@ export function CategoryFieldsWizard({ slug, name, onBack }: CategoryFieldsWizar
         if (def) added.fieldDefinition = def;
       }
 
-      const isBigFive = added.fieldDefinition && BIG_FIVE_KEYS.has(added.fieldDefinition.fieldKey);
-      if (isBigFive) {
-        setBaseFields((prev) => [...prev, added]);
+      // Route to the correct section based on which button triggered the dialog,
+      // then normalize sort_orders so the range-based split survives a reload.
+      if (addDialogTarget === 'base') {
+        const newBase = [...baseFields, added];
+        setBaseFields(newBase);
+        await reorderItemTypeBaseFields(slug, newBase.map((bf) => bf.fieldDefinitionId), 0);
       } else {
-        setOtherFields((prev) => [...prev, added]);
+        const newOther = [...otherFields, added];
+        setOtherFields(newOther);
+        await reorderItemTypeBaseFields(
+          slug,
+          newOther.map((bf) => bf.fieldDefinitionId),
+          OTHER_FIELDS_SORT_OFFSET
+        );
       }
 
       setAddDialogOpen(false);
@@ -246,25 +291,107 @@ export function CategoryFieldsWizard({ slug, name, onBack }: CategoryFieldsWizar
     }
   }
 
-  // ── Drag-to-reorder (other fields only) ───────────────────────────────────
-  async function handleOtherFieldDragEnd(event: DragEndEvent) {
+  // ── Unified drag handler — handles same-section reorder and cross-section moves ──
+  async function handleDragEnd(event: DragEndEvent) {
+    setOverContainer(null);
     const { active, over } = event;
-    if (!over || active.id === over.id) return;
+    if (!over) return;
 
-    const oldIndex = otherFields.findIndex((bf) => bf.fieldDefinitionId === active.id);
-    const newIndex = otherFields.findIndex((bf) => bf.fieldDefinitionId === over.id);
-    const reordered = arrayMove(otherFields, oldIndex, newIndex);
-    setOtherFields(reordered);
+    const activeId = active.id as string;
+    const overId = over.id as string;
+
+    const activeInBase = baseFields.some((bf) => bf.fieldDefinitionId === activeId);
+    // overId may be a field ID or a container droppable ID
+    const overInBase =
+      overId === BASE_DROPPABLE ||
+      (overId !== OTHER_DROPPABLE && baseFields.some((bf) => bf.fieldDefinitionId === overId));
+
+    if (activeId === overId) return;
 
     try {
-      await reorderItemTypeBaseFields(
-        slug,
-        reordered.map((bf) => bf.fieldDefinitionId),
-        OTHER_FIELDS_SORT_OFFSET
-      );
+      if (activeInBase === overInBase) {
+        // ── Same-container reorder ────────────────────────────────────────
+        // Dropping on the container background itself is a no-op
+        if (overId === BASE_DROPPABLE || overId === OTHER_DROPPABLE) return;
+
+        if (activeInBase) {
+          const oldIndex = baseFields.findIndex((bf) => bf.fieldDefinitionId === activeId);
+          const newIndex = baseFields.findIndex((bf) => bf.fieldDefinitionId === overId);
+          const reordered = arrayMove(baseFields, oldIndex, newIndex);
+          setBaseFields(reordered);
+          await reorderItemTypeBaseFields(slug, reordered.map((bf) => bf.fieldDefinitionId), 0);
+        } else {
+          const oldIndex = otherFields.findIndex((bf) => bf.fieldDefinitionId === activeId);
+          const newIndex = otherFields.findIndex((bf) => bf.fieldDefinitionId === overId);
+          const reordered = arrayMove(otherFields, oldIndex, newIndex);
+          setOtherFields(reordered);
+          await reorderItemTypeBaseFields(
+            slug,
+            reordered.map((bf) => bf.fieldDefinitionId),
+            OTHER_FIELDS_SORT_OFFSET
+          );
+        }
+      } else {
+        // ── Cross-container move ──────────────────────────────────────────
+        const activeField = activeInBase
+          ? baseFields.find((bf) => bf.fieldDefinitionId === activeId)!
+          : otherFields.find((bf) => bf.fieldDefinitionId === activeId)!;
+
+        if (activeInBase) {
+          // Base → Other
+          const newBase = baseFields.filter((bf) => bf.fieldDefinitionId !== activeId);
+          const newOther = [...otherFields];
+          if (overId === OTHER_DROPPABLE) {
+            newOther.push(activeField);
+          } else {
+            const overIndex = newOther.findIndex((bf) => bf.fieldDefinitionId === overId);
+            newOther.splice(overIndex >= 0 ? overIndex : newOther.length, 0, activeField);
+          }
+          setBaseFields(newBase);
+          setOtherFields(newOther);
+          await Promise.all([
+            reorderItemTypeBaseFields(slug, newBase.map((bf) => bf.fieldDefinitionId), 0),
+            reorderItemTypeBaseFields(
+              slug,
+              newOther.map((bf) => bf.fieldDefinitionId),
+              OTHER_FIELDS_SORT_OFFSET
+            ),
+          ]);
+        } else {
+          // Other → Base
+          const newOther = otherFields.filter((bf) => bf.fieldDefinitionId !== activeId);
+          const newBase = [...baseFields];
+          if (overId === BASE_DROPPABLE) {
+            newBase.push(activeField);
+          } else {
+            const overIndex = newBase.findIndex((bf) => bf.fieldDefinitionId === overId);
+            newBase.splice(overIndex >= 0 ? overIndex : newBase.length, 0, activeField);
+          }
+          setBaseFields(newBase);
+          setOtherFields(newOther);
+          await Promise.all([
+            reorderItemTypeBaseFields(slug, newBase.map((bf) => bf.fieldDefinitionId), 0),
+            reorderItemTypeBaseFields(
+              slug,
+              newOther.map((bf) => bf.fieldDefinitionId),
+              OTHER_FIELDS_SORT_OFFSET
+            ),
+          ]);
+        }
+      }
     } catch {
       toast({ title: 'Error', description: 'Failed to save field order', variant: 'destructive' });
       void loadFields();
+    }
+  }
+
+  function handleDragOver(event: { active: { id: string | number }; over: { id: string | number } | null }) {
+    const overId = event.over?.id as string | undefined;
+    if (!overId) { setOverContainer(null); return; }
+    if (overId === BASE_DROPPABLE || baseFields.some((bf) => bf.fieldDefinitionId === overId)) {
+      setOverContainer(BASE_DROPPABLE);
+    } else {
+      setOverContainer(OTHER_DROPPABLE);
     }
   }
 
@@ -303,116 +430,136 @@ export function CategoryFieldsWizard({ slug, name, onBack }: CategoryFieldsWizar
           <span className="font-semibold text-sm">{name}</span>
         </div>
 
-        {/* ── Base Fields ──────────────────────────────────────────────────── */}
-        <section className="mb-8">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-base font-semibold">Base Fields</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Core structural fields shared by all {name.toLowerCase()} items. Expand any field to manage its options.
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5"
-              onClick={() => void openAddDialog('base')}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add Base Field
-            </Button>
-          </div>
-
-          {baseFields.length === 0 ? (
-            <div className="rounded-xl border border-dashed px-6 py-8 text-center text-sm text-muted-foreground">
-              No base fields configured yet.{' '}
-              <button
-                className="underline underline-offset-2 hover:text-foreground transition-colors"
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+        >
+          {/* ── Base Fields ────────────────────────────────────────────────── */}
+          <section className="mb-8">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-base font-semibold">Base Fields</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Core structural fields shared by all {name.toLowerCase()} items. Drag to reorder or into Other Fields.
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5"
                 onClick={() => void openAddDialog('base')}
               >
-                Add one
-              </button>
-              .
+                <Plus className="h-3.5 w-3.5" />
+                Add Base Field
+              </Button>
             </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {baseFields.map((bf) => {
-                if (!bf.fieldDefinition) return null;
-                return (
-                  <div key={bf.id} className="flex items-start gap-2">
-                    <div className="flex-1 min-w-0">
-                      <FieldOptionsPanel field={bf.fieldDefinition} />
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="mt-2 h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                      title={`Remove "${bf.fieldDefinition.fieldLabel}" from base fields`}
-                      onClick={() => setRemoveTarget(bf)}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
+
+            <DroppableContainer id={BASE_DROPPABLE} isOver={overContainer === BASE_DROPPABLE}>
+              {baseFields.length === 0 ? (
+                <div className="rounded-xl border border-dashed px-6 py-8 text-center text-sm text-muted-foreground">
+                  No base fields configured yet.{' '}
+                  <button
+                    className="underline underline-offset-2 hover:text-foreground transition-colors"
+                    onClick={() => void openAddDialog('base')}
+                  >
+                    Add one
+                  </button>
+                  .
+                </div>
+              ) : (
+                <SortableContext
+                  items={baseFields.map((bf) => bf.fieldDefinitionId)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <div className="flex flex-col gap-2">
+                    {baseFields.map((bf) => (
+                      <SortableFieldRow
+                        key={bf.id}
+                        bf={bf}
+                        itemTypeSlug={slug}
+                        itemTypeName={name}
+                        onRemove={() => setRemoveTarget(bf)}
+                        passToFrame={slug === 'doors' ? {
+                          value: bf.passValueToFrame,
+                          onChange: async (next: boolean) => {
+                            await setItemTypeBaseFieldPassValueToFrame(slug, bf.fieldDefinitionId, next);
+                            setBaseFields((prev) =>
+                              prev.map((f) => f.id === bf.id ? { ...f, passValueToFrame: next } : f)
+                            );
+                          },
+                        } : undefined}
+                      />
+                    ))}
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
+                </SortableContext>
+              )}
+            </DroppableContainer>
+          </section>
 
-        {/* ── Other Fields ─────────────────────────────────────────────────── */}
-        <section>
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-base font-semibold">Other Fields</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Additional {name.toLowerCase()}-specific fields. All fields here are inherited by new items of this type. Drag to reorder.
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5"
-              onClick={() => void openAddDialog('other')}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add Field
-            </Button>
-          </div>
-
-          {otherFields.length === 0 ? (
-            <div className="rounded-xl border border-dashed px-6 py-8 text-center text-sm text-muted-foreground">
-              No additional fields yet.{' '}
-              <button
-                className="underline underline-offset-2 hover:text-foreground transition-colors"
+          {/* ── Other Fields ───────────────────────────────────────────────── */}
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-base font-semibold">Other Fields</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Additional {name.toLowerCase()}-specific fields. Drag to reorder or into Base Fields.
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5"
                 onClick={() => void openAddDialog('other')}
               >
-                Add one
-              </button>
-              .
+                <Plus className="h-3.5 w-3.5" />
+                Add Field
+              </Button>
             </div>
-          ) : (
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragEnd={handleOtherFieldDragEnd}
-            >
-              <SortableContext
-                items={otherFields.map((bf) => bf.fieldDefinitionId)}
-                strategy={verticalListSortingStrategy}
-              >
-                <div className="flex flex-col gap-2">
-                  {otherFields.map((bf) => (
-                    <SortableFieldRow
-                      key={bf.id}
-                      bf={bf}
-                      onRemove={() => setRemoveTarget(bf)}
-                    />
-                  ))}
+
+            <DroppableContainer id={OTHER_DROPPABLE} isOver={overContainer === OTHER_DROPPABLE}>
+              {otherFields.length === 0 ? (
+                <div className="rounded-xl border border-dashed px-6 py-8 text-center text-sm text-muted-foreground">
+                  No additional fields yet.{' '}
+                  <button
+                    className="underline underline-offset-2 hover:text-foreground transition-colors"
+                    onClick={() => void openAddDialog('other')}
+                  >
+                    Add one
+                  </button>
+                  .
                 </div>
-              </SortableContext>
-            </DndContext>
-          )}
-        </section>
+              ) : (
+                <SortableContext
+                  items={otherFields.map((bf) => bf.fieldDefinitionId)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <div className="flex flex-col gap-2">
+                    {otherFields.map((bf) => (
+                      <SortableFieldRow
+                        key={bf.id}
+                        bf={bf}
+                        itemTypeSlug={slug}
+                        itemTypeName={name}
+                        onRemove={() => setRemoveTarget(bf)}
+                        passToFrame={slug === 'doors' ? {
+                          value: bf.passValueToFrame,
+                          onChange: async (next: boolean) => {
+                            await setItemTypeBaseFieldPassValueToFrame(slug, bf.fieldDefinitionId, next);
+                            setOtherFields((prev) =>
+                              prev.map((f) => f.id === bf.id ? { ...f, passValueToFrame: next } : f)
+                            );
+                          },
+                        } : undefined}
+                      />
+                    ))}
+                  </div>
+                </SortableContext>
+              )}
+            </DroppableContainer>
+          </section>
+        </DndContext>
       </div>
 
       {/* ── Add Field Dialog ─────────────────────────────────────────────── */}

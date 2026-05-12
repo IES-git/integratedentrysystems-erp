@@ -167,6 +167,8 @@ export interface ItemField {
 // Field Definition Types
 export type FieldDefinitionStatus = 'approved' | 'pending_review';
 
+export type OptionType = 'selection' | 'string' | 'integer';
+
 export type ManufacturerFieldLabelStatus = 'pending' | 'approved';
 
 export interface ManufacturerFieldLabel {
@@ -187,6 +189,7 @@ export interface FieldDefinition {
   fieldKey: string;
   fieldLabel: string;
   valueType: FieldValueType;
+  optionType: OptionType;
   description: string | null;
   status: FieldDefinitionStatus;
   usageCount: number;
@@ -231,6 +234,7 @@ export interface ItemTypeBaseField {
   itemTypeSlug: string;
   fieldDefinitionId: string;
   sortOrder: number;
+  passValueToFrame: boolean;
   createdAt: string;
   // joined
   fieldDefinition?: FieldDefinition;
@@ -498,10 +502,10 @@ export interface PricingTableSummary {
 export interface DoorSeriesSummary {
   /** The series value (e.g. 'CH') */
   seriesValue: string;
-  /** Display label from field_value_options */
+  /** Display label from field_value_options or item_fields */
   label: string;
-  /** The field_value_option id */
-  fieldValueOptionId: string;
+  /** The field_value_option id, or null for series discovered from item_fields only */
+  fieldValueOptionId: string | null;
   /** All pricing tables that have been created for this series. */
   pricingTables: PricingTableSummary[];
 }
@@ -597,6 +601,8 @@ export interface ItemFieldsView {
   baseFields: ItemFieldView[];
   /** All other (non-Big-Five) fields, sorted by sortOrder. */
   otherFields: ItemFieldView[];
+  /** Merged (type-level defaults + per-item overrides) dependency rules for this item. */
+  resolvedDependencies: ResolvedFieldDependency[];
 }
 
 /** Summary row used by the Adders tab in the Pricing editor. */
@@ -616,4 +622,55 @@ export interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
   badge?: number;
   children?: NavItem[];
+}
+
+// Field Dependency Types
+
+export type DependencyOperator =
+  | 'equals'
+  | 'not_equals'
+  | 'in'
+  | 'not_in'
+  | 'gt'
+  | 'lt'
+  | 'gte'
+  | 'lte'
+  | 'between';
+
+export interface ItemTypeFieldDependency {
+  id: string;
+  itemTypeSlug: string;
+  parentFieldDefinitionId: string;
+  childFieldDefinitionId: string;
+  operator: DependencyOperator;
+  triggerValues: (string | number)[];
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  parentField?: FieldDefinition;
+  childField?: FieldDefinition;
+}
+
+export interface ItemTypeFieldDependencyOverride {
+  id: string;
+  canonicalCode: string;
+  parentFieldDefinitionId: string;
+  childFieldDefinitionId: string;
+  operator: DependencyOperator | null;
+  triggerValues: (string | number)[] | null;
+  sortOrder: number | null;
+  isHidden: boolean;
+  isAddedLocally: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** Populated by the API layer when joining field_definitions. */
+  childField?: FieldDefinition;
+}
+
+export interface ResolvedFieldDependency {
+  parentFieldDefinitionId: string;
+  childField: FieldDefinition;
+  operator: DependencyOperator;
+  triggerValues: (string | number)[];
+  sortOrder: number;
 }

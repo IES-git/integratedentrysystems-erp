@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus,
   Trash2,
@@ -57,6 +57,9 @@ import {
   getFieldValueOptions,
   recordFieldValueUsage,
 } from '@/lib/estimates-api';
+import { getPassToFrameFieldKeys, getResolvedDependencies } from '@/lib/item-fields-api';
+import { evaluateDependency } from '@/lib/field-dependencies';
+import { applyDoorValuesToFrame } from '@/lib/door-frame-sync';
 import {
   HARDWARE_SUBCATEGORY_ORDER,
   HARDWARE_SUBCATEGORY_LABEL,
@@ -70,6 +73,7 @@ import type {
   ItemField,
   HardwareSubcategory,
   OpeningTemplateType,
+  DependencyOperator,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -105,6 +109,10 @@ interface LocalField {
   valueType: FieldValueType;
   fieldDefinitionId?: string;
   isRequired: boolean;
+  /** If set, this is a conditional child field — only shown when the parent's value satisfies the condition. */
+  conditionalParentDefId?: string;
+  conditionOperator?: DependencyOperator;
+  conditionTriggerValues?: (string | number)[];
 }
 
 interface LocalHardwareItem {
@@ -392,16 +400,50 @@ interface FieldsListProps {
 
 function FieldsList({ fields, onUpdateField, onDeleteField }: FieldsListProps) {
   if (fields.length === 0) return null;
+
+  // Separate top-level (parent) fields from conditional child fields
+  const parentFields = fields.filter((f) => !f.conditionalParentDefId);
+  const childrenByParentDefId = new Map<string, LocalField[]>();
+  for (const f of fields) {
+    if (!f.conditionalParentDefId) continue;
+    const list = childrenByParentDefId.get(f.conditionalParentDefId) ?? [];
+    list.push(f);
+    childrenByParentDefId.set(f.conditionalParentDefId, list);
+  }
+
+  const rows: JSX.Element[] = [];
+  for (const field of parentFields) {
+    rows.push(
+      <FieldRow
+        key={field.localId}
+        field={field}
+        onUpdate={(val) => onUpdateField(field.localId, val)}
+        onDelete={() => onDeleteField(field.localId)}
+      />
+    );
+    if (!field.fieldDefinitionId) continue;
+    const children = childrenByParentDefId.get(field.fieldDefinitionId) ?? [];
+    for (const child of children) {
+      if (
+        child.conditionOperator === undefined ||
+        child.conditionTriggerValues === undefined
+      ) continue;
+      if (!evaluateDependency(field.fieldValue || null, child.conditionOperator, child.conditionTriggerValues)) continue;
+      rows.push(
+        <div key={child.localId} className="pl-4 ml-1 border-l-2 border-primary/20 bg-muted/20">
+          <FieldRow
+            field={child}
+            onUpdate={(val) => onUpdateField(child.localId, val)}
+            onDelete={() => onDeleteField(child.localId)}
+          />
+        </div>
+      );
+    }
+  }
+
   return (
     <div className="rounded-md border divide-y mt-2">
-      {fields.map((field) => (
-        <FieldRow
-          key={field.localId}
-          field={field}
-          onUpdate={(val) => onUpdateField(field.localId, val)}
-          onDelete={() => onDeleteField(field.localId)}
-        />
-      ))}
+      {rows}
     </div>
   );
 }
@@ -895,6 +937,15 @@ export function TemplateOpeningDialog({
   const [addFieldFormOpenForId, setAddFieldFormOpenForId] = useState<string | null>(null);
   const [addHwFieldFormOpenForId, setAddHwFieldFormOpenForId] = useState<string | null>(null);
 
+  // Field keys from doors that should be mirrored to matching frame fields
+  const [passToFrameKeys, setPassToFrameKeys] = useState<Set<string>>(new Set());
+  const passToFrameKeysRef = useRef<Set<string>>(new Set());
+  const doorSlot1Ref = useRef<LocalTopLevelItem | null>(null);
+  const doorSlot2Ref = useRef<LocalTopLevelItem | null>(null);
+  useEffect(() => { passToFrameKeysRef.current = passToFrameKeys; }, [passToFrameKeys]);
+  useEffect(() => { doorSlot1Ref.current = doorSlot1; }, [doorSlot1]);
+  useEffect(() => { doorSlot2Ref.current = doorSlot2; }, [doorSlot2]);
+
   const isPair = templateType === 'pair' || templateType === 'pair_with_panel';
 
   // Reset state when dialog opens
@@ -915,6 +966,12 @@ export function TemplateOpeningDialog({
       .then(setItemTypes)
       .catch((err) => console.error('Failed to load item types:', err))
       .finally(() => setItemTypesLoading(false));
+    getPassToFrameFieldKeys()
+      .then((keys) => {
+        setPassToFrameKeys(keys);
+        passToFrameKeysRef.current = keys;
+      })
+      .catch((err) => console.error('Failed to load pass-to-frame keys:', err));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, openingCount]);
 
@@ -933,7 +990,8 @@ export function TemplateOpeningDialog({
     async (
       itemType: ItemType,
       category: 'doors' | 'frames',
-      setter: React.Dispatch<React.SetStateAction<LocalTopLevelItem | null>>
+      setter: React.Dispatch<React.SetStateAction<LocalTopLevelItem | null>>,
+      onFieldsLoaded?: (localId: string) => void
     ): Promise<LocalTopLevelItem> => {
       const localId = newLocalId();
       const item: LocalTopLevelItem = {
@@ -948,8 +1006,9 @@ export function TemplateOpeningDialog({
       Promise.all([
         getItemTypeFields(itemType.canonicalCodes ?? [itemType.canonicalCode]),
         getMostRecentFieldValuesForItem(itemType.canonicalCodes ?? [itemType.canonicalCode]),
+        getResolvedDependencies(itemType.canonicalCode),
       ])
-        .then(([allFields, recentValues]) => {
+        .then(([allFields, recentValues, resolvedDeps]) => {
           const fields: LocalField[] = allFields
             .filter((rf) => rf.fieldDefinition)
             .map((rf) => ({
@@ -961,6 +1020,25 @@ export function TemplateOpeningDialog({
               fieldDefinitionId: rf.fieldDefinitionId,
               isRequired: rf.isRequired,
             }));
+
+          // Append conditional child fields from dependency rules
+          const existingFieldKeys = new Set(fields.map((f) => f.fieldKey));
+          for (const dep of resolvedDeps) {
+            if (existingFieldKeys.has(dep.childField.fieldKey)) continue;
+            fields.push({
+              localId: newLocalId(),
+              fieldKey: dep.childField.fieldKey,
+              fieldLabel: dep.childField.fieldLabel,
+              fieldValue: '',
+              valueType: dep.childField.valueType,
+              fieldDefinitionId: dep.childField.id,
+              isRequired: false,
+              conditionalParentDefId: dep.parentFieldDefinitionId,
+              conditionOperator: dep.operator,
+              conditionTriggerValues: dep.triggerValues,
+            });
+            existingFieldKeys.add(dep.childField.fieldKey);
+          }
 
           const descriptionCodeKey =
             category === 'doors' ? 'door_description_code' : 'frame_description';
@@ -977,6 +1055,8 @@ export function TemplateOpeningDialog({
                 }
               : prev
           );
+
+          onFieldsLoaded?.(localId);
         })
         .catch(() => {
           setter((prev) =>
@@ -1003,8 +1083,9 @@ export function TemplateOpeningDialog({
     Promise.all([
       getItemTypeFields(hwType.canonicalCode),
       getMostRecentFieldValuesForItem([hwType.canonicalCode]),
+      getResolvedDependencies(hwType.canonicalCode),
     ])
-      .then(([allFields, recentValues]) => {
+      .then(([allFields, recentValues, resolvedDeps]) => {
         const fields: LocalField[] = allFields
           .filter((rf) => rf.fieldDefinition)
           .map((rf) => ({
@@ -1016,6 +1097,26 @@ export function TemplateOpeningDialog({
             fieldDefinitionId: rf.fieldDefinitionId,
             isRequired: rf.isRequired,
           }));
+
+        // Append conditional child fields from dependency rules
+        const existingFieldKeys = new Set(fields.map((f) => f.fieldKey));
+        for (const dep of resolvedDeps) {
+          if (existingFieldKeys.has(dep.childField.fieldKey)) continue;
+          fields.push({
+            localId: newLocalId(),
+            fieldKey: dep.childField.fieldKey,
+            fieldLabel: dep.childField.fieldLabel,
+            fieldValue: '',
+            valueType: dep.childField.valueType,
+            fieldDefinitionId: dep.childField.id,
+            isRequired: false,
+            conditionalParentDefId: dep.parentFieldDefinitionId,
+            conditionOperator: dep.operator,
+            conditionTriggerValues: dep.triggerValues,
+          });
+          existingFieldKeys.add(dep.childField.fieldKey);
+        }
+
         setHardwareItems((prev) =>
           prev.map((h) => (h.localId === hwLocalId ? { ...h, fields, loadingFields: false } : h))
         );
@@ -1071,6 +1172,43 @@ export function TemplateOpeningDialog({
   const slot1Ops = makeSlotFieldUpdater(setDoorSlot1);
   const slot2Ops = makeSlotFieldUpdater(setDoorSlot2);
   const frameOps = makeSlotFieldUpdater(setFrameSlot);
+
+  // Wrapper updaters for door slots that also sync pass-to-frame fields to the frame slot.
+  const handleSlot1UpdateField = (itemLocalId: string, fieldLocalId: string, value: string) => {
+    slot1Ops.updateField(itemLocalId, fieldLocalId, value);
+    const changedFieldKey = doorSlot1?.fields.find((f) => f.localId === fieldLocalId)?.fieldKey;
+    if (changedFieldKey && passToFrameKeys.has(changedFieldKey)) {
+      setFrameSlot((prev) => {
+        if (!prev) return prev;
+        const hasField = prev.fields.some((f) => f.fieldKey === changedFieldKey);
+        if (!hasField) return prev;
+        return {
+          ...prev,
+          fields: prev.fields.map((f) =>
+            f.fieldKey === changedFieldKey ? { ...f, fieldValue: value } : f
+          ),
+        };
+      });
+    }
+  };
+
+  const handleSlot2UpdateField = (itemLocalId: string, fieldLocalId: string, value: string) => {
+    slot2Ops.updateField(itemLocalId, fieldLocalId, value);
+    const changedFieldKey = doorSlot2?.fields.find((f) => f.localId === fieldLocalId)?.fieldKey;
+    if (changedFieldKey && passToFrameKeys.has(changedFieldKey)) {
+      setFrameSlot((prev) => {
+        if (!prev) return prev;
+        const hasField = prev.fields.some((f) => f.fieldKey === changedFieldKey);
+        if (!hasField) return prev;
+        return {
+          ...prev,
+          fields: prev.fields.map((f) =>
+            f.fieldKey === changedFieldKey ? { ...f, fieldValue: value } : f
+          ),
+        };
+      });
+    }
+  };
 
   // ---------------------------------------------------------------------------
   // Hardware handlers
@@ -1129,8 +1267,22 @@ export function TemplateOpeningDialog({
 
       const saveLocalFields = async (itemId: string, fields: LocalField[]) => {
         const saved: ItemField[] = [];
+        // Build a map of parent field def ID → current value for conditional evaluation
+        const parentValueByDefId = new Map<string, string>();
+        for (const f of fields) {
+          if (f.fieldDefinitionId && !f.conditionalParentDefId) {
+            parentValueByDefId.set(f.fieldDefinitionId, f.fieldValue);
+          }
+        }
         for (const field of fields) {
           if (!field.fieldKey.trim()) continue;
+          // Skip conditional children whose trigger condition is not currently met
+          if (field.conditionalParentDefId !== undefined) {
+            const parentValue = parentValueByDefId.get(field.conditionalParentDefId) ?? null;
+            if (!evaluateDependency(parentValue, field.conditionOperator!, field.conditionTriggerValues!)) {
+              continue;
+            }
+          }
           const f = await addItemField(itemId, {
             fieldKey: field.fieldKey,
             fieldLabel: field.fieldLabel,
@@ -1287,7 +1439,7 @@ export function TemplateOpeningDialog({
                   slotLabel={slot1Label}
                   addFieldFormOpenForId={addFieldFormOpenForId}
                   onClear={() => setDoorSlot1(null)}
-                  onUpdateField={slot1Ops.updateField}
+                  onUpdateField={handleSlot1UpdateField}
                   onDeleteField={slot1Ops.deleteField}
                   onAddField={slot1Ops.addField}
                   onToggleAddFieldForm={setAddFieldFormOpenForId}
@@ -1324,7 +1476,7 @@ export function TemplateOpeningDialog({
                     slotLabel={slot2Label}
                     addFieldFormOpenForId={addFieldFormOpenForId}
                     onClear={() => setDoorSlot2(null)}
-                    onUpdateField={slot2Ops.updateField}
+                    onUpdateField={handleSlot2UpdateField}
                     onDeleteField={slot2Ops.deleteField}
                     onAddField={slot2Ops.addField}
                     onToggleAddFieldForm={setAddFieldFormOpenForId}
@@ -1384,7 +1536,16 @@ export function TemplateOpeningDialog({
                   open={framePickerOpen}
                   onOpenChange={setFramePickerOpen}
                   onSelect={async (it) => {
-                    const item = await buildLocalItem(it, 'frames', setFrameSlot);
+                    const snapshotDoor = doorSlot1Ref.current ?? doorSlot2Ref.current;
+                    const snapshotKeys = passToFrameKeysRef.current;
+                    const item = await buildLocalItem(it, 'frames', setFrameSlot, (localId) => {
+                      if (snapshotDoor && snapshotKeys.size > 0) {
+                        setFrameSlot((prev) => {
+                          if (!prev || prev.localId !== localId) return prev;
+                          return applyDoorValuesToFrame(prev, snapshotDoor, snapshotKeys);
+                        });
+                      }
+                    });
                     setFrameSlot(item);
                   }}
                 >

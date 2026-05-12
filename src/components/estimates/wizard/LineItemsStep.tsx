@@ -18,8 +18,10 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import { getFieldDefinitionsForItemType, getFieldValueOptions, recordFieldValueUsage, createOrApproveFieldDefinition, getRequiredFieldsForItem } from '@/lib/estimates-api';
+import { getResolvedDependencies } from '@/lib/item-fields-api';
+import { evaluateDependency, groupByParent } from '@/lib/field-dependencies';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
-import type { EstimateItem, ItemField, FieldDefinition, FieldValueOption, EstimateOpeningWithItems } from '@/types';
+import type { EstimateItem, ItemField, FieldDefinition, FieldValueOption, EstimateOpeningWithItems, ResolvedFieldDependency } from '@/types';
 
 interface LineItemWithFields extends EstimateItem {
   fields: ItemField[];
@@ -96,6 +98,10 @@ export function LineItemsStep({
   // Tracks which (itemId:canonicalCode) pairs have already been processed for auto-insert
   const autoInsertedRef = useRef<Set<string>>(new Set());
 
+  // Resolved field dependencies per canonical code
+  const [resolvedDepsMap, setResolvedDepsMap] = useState<Map<string, ResolvedFieldDependency[]>>(new Map());
+  const loadedDepCodesRef = useRef<Set<string>>(new Set());
+
   const hasFieldDefs = fieldDefinitions && fieldDefinitions.length > 0;
 
   // Field defs not in the suggested set (used for the "All Fields" group)
@@ -141,6 +147,24 @@ export function LineItemsStep({
       .then(setFieldValueOptions)
       .catch(console.error);
   }, [editingFieldObj]);
+
+  // Load resolved field dependencies for each item's canonical code
+  useEffect(() => {
+    for (const item of lineItems) {
+      if (!item.canonicalCode || loadedDepCodesRef.current.has(item.canonicalCode)) continue;
+      loadedDepCodesRef.current.add(item.canonicalCode);
+      getResolvedDependencies(item.canonicalCode)
+        .then((deps) => {
+          if (deps.length === 0) return;
+          setResolvedDepsMap((prev) => {
+            const next = new Map(prev);
+            next.set(item.canonicalCode, deps);
+            return next;
+          });
+        })
+        .catch(console.error);
+    }
+  }, [lineItems]);
 
   // Auto-insert required fields whenever items or their canonical codes change
   useEffect(() => {
@@ -500,9 +524,27 @@ export function LineItemsStep({
               </div>
 
               <div className="rounded-lg border divide-y">
-                {item.fields.map((field) => {
-                  const required = isFieldRequired(item.canonicalCode, field.fieldDefinitionId);
-                  return (
+                {(() => {
+                  // Build conditional dependency grouping for this item
+                  const itemDeps = resolvedDepsMap.get(item.canonicalCode) ?? [];
+                  const depsByParentDefId = groupByParent(itemDeps);
+                  const childDefIdSet = new Set(itemDeps.map((d) => d.childField.id));
+
+                  // Separate parent fields from child fields
+                  const parentFields = item.fields.filter(
+                    (f) => !f.fieldDefinitionId || !childDefIdSet.has(f.fieldDefinitionId)
+                  );
+                  const childFieldsByDefId = new Map<string, ItemField>();
+                  for (const f of item.fields) {
+                    if (f.fieldDefinitionId && childDefIdSet.has(f.fieldDefinitionId)) {
+                      childFieldsByDefId.set(f.fieldDefinitionId, f);
+                    }
+                  }
+
+                  const fieldRows: JSX.Element[] = [];
+                  for (const field of parentFields) {
+                    const required = isFieldRequired(item.canonicalCode, field.fieldDefinitionId);
+                    fieldRows.push(
                     <div
                       key={field.id}
                       className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 transition-colors"
@@ -642,14 +684,81 @@ export function LineItemsStep({
                         )}
                       </div>
                     </div>
-                  );
-                })}
+                    );
 
-                {item.fields.length === 0 && (
-                  <p className="px-3 py-4 text-sm text-muted-foreground text-center">
-                    No fields extracted
-                  </p>
-                )}
+                    // Render triggered child fields inline, indented
+                    if (field.fieldDefinitionId) {
+                      const deps = depsByParentDefId.get(field.fieldDefinitionId) ?? [];
+                      for (const dep of deps) {
+                        const isVisible = evaluateDependency(field.fieldValue || null, dep.operator, dep.triggerValues);
+                        const childField = childFieldsByDefId.get(dep.childField.id);
+                        if (!isVisible || !childField) continue;
+                        const childRequired = isFieldRequired(item.canonicalCode, childField.fieldDefinitionId);
+                        fieldRows.push(
+                          <div
+                            key={`child-${childField.id}`}
+                            className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 transition-colors border-l-2 border-primary/20 ml-4 bg-muted/20"
+                          >
+                            <div className="w-32 shrink-0">
+                              <p className="text-xs font-medium text-muted-foreground flex items-center gap-0.5">
+                                {childField.fieldLabel}
+                                {childRequired && (
+                                  <span className="text-destructive font-bold" title="Required field">*</span>
+                                )}
+                              </p>
+                              <p className="text-[10px] font-mono text-muted-foreground/70">
+                                {childField.fieldKey}
+                              </p>
+                            </div>
+                            <div className="flex-1">
+                              {editingField === childField.id ? (
+                                <div className="flex items-center gap-2">
+                                  <Input
+                                    value={editValue}
+                                    onChange={(e) => setEditValue(e.target.value)}
+                                    className="h-7 text-sm"
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') saveFieldEdit(childField.id);
+                                      if (e.key === 'Escape') cancelFieldEdit();
+                                    }}
+                                  />
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => saveFieldEdit(childField.id)}>
+                                    <Check className="h-3 w-3" />
+                                  </Button>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={cancelFieldEdit}>
+                                    <X className="h-3 w-3" />
+                                  </Button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-2 cursor-pointer group" onClick={() => startEditField(childField)}>
+                                  <span className="text-sm">{childField.fieldValue || '—'}</span>
+                                  <Edit2 className="h-3 w-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              {!childRequired && (
+                                <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={() => onDeleteField(childField.id)}>
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      }
+                    }
+                  }
+
+                  if (fieldRows.length === 0) {
+                    return (
+                      <p className="px-3 py-4 text-sm text-muted-foreground text-center">
+                        No fields extracted
+                      </p>
+                    );
+                  }
+                  return fieldRows;
+                })()}
               </div>
 
               {/* Add Field Form */}
