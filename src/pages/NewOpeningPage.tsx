@@ -1,0 +1,1423 @@
+import { useState, useEffect, useCallback } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import {
+  Plus,
+  Trash2,
+  Loader2,
+  DoorOpen,
+  Square,
+  Wrench,
+  ChevronsUpDown,
+  ChevronDown,
+  AlertCircle,
+  LayoutTemplate,
+  LayoutPanelLeft,
+  ArrowLeft,
+  Search,
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
+import {
+  getItemTypes,
+  createEstimateOpening,
+  addEstimateItem,
+  addItemField,
+  getItemTypeFields,
+  getFieldValueOptions,
+  getMostRecentFieldValuesForItem,
+  recordFieldValueUsage,
+} from '@/lib/estimates-api';
+import { getPassToFrameFieldKeys, getResolvedDependencies } from '@/lib/item-fields-api';
+import { evaluateDependency } from '@/lib/field-dependencies';
+import {
+  HARDWARE_SUBCATEGORY_ORDER,
+  HARDWARE_SUBCATEGORY_LABEL,
+} from '@/lib/hardware-utils';
+import { AddItemModal, newLocalId, type LocalField, type LocalTopLevelItem, type LocalHardwareItem } from '@/components/estimates/wizard/AddItemModal';
+import type {
+  ItemType,
+  FieldValueOption,
+  ItemField,
+  HardwareSubcategory,
+  OpeningTemplateType,
+} from '@/types';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const TEMPLATE_LABELS: Record<OpeningTemplateType, string> = {
+  single: 'Single',
+  pair: 'Pair',
+  single_with_panel: 'Single w/ Panel',
+  pair_with_panel: 'Pair w/ Panel',
+};
+
+const ALL_TEMPLATE_TYPES: OpeningTemplateType[] = [
+  'single',
+  'pair',
+  'single_with_panel',
+  'pair_with_panel',
+];
+
+// ---------------------------------------------------------------------------
+// FieldRow
+// ---------------------------------------------------------------------------
+
+interface FieldRowProps {
+  field: LocalField;
+  onUpdate: (value: string) => void;
+  onDelete: () => void;
+}
+
+function FieldRow({ field, onUpdate, onDelete }: FieldRowProps) {
+  const [options, setOptions] = useState<FieldValueOption[]>([]);
+  const [popoverOpen, setPopoverOpen] = useState(false);
+
+  useEffect(() => {
+    if (!field.fieldDefinitionId) return;
+    getFieldValueOptions(field.fieldDefinitionId)
+      .then(setOptions)
+      .catch(console.error);
+  }, [field.fieldDefinitionId]);
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5">
+      <div className="w-28 shrink-0">
+        <p className="text-[11px] font-medium text-muted-foreground flex items-center gap-0.5">
+          {field.fieldLabel}
+          {field.isRequired && (
+            <span className="text-destructive font-bold" title="Required">*</span>
+          )}
+        </p>
+        <p className="text-[10px] font-mono text-muted-foreground/60">{field.fieldKey}</p>
+      </div>
+
+      {options.length > 0 ? (
+        <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              variant="outline"
+              role="combobox"
+              aria-expanded={popoverOpen}
+              className="h-7 flex-1 justify-between text-xs font-normal"
+            >
+              <span className={cn(!field.fieldValue && 'text-muted-foreground')}>
+                {field.fieldValue || (field.isRequired ? 'Required' : '—')}
+              </span>
+              <ChevronsUpDown className="h-3 w-3 ml-1 shrink-0 opacity-50" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-52 p-0" align="start" onWheel={(e) => e.stopPropagation()}>
+            <Command>
+              <CommandInput
+                placeholder="Search or type…"
+                className="h-8 text-xs"
+                value={field.fieldValue}
+                onValueChange={onUpdate}
+              />
+              <CommandList>
+                <CommandEmpty className="py-1.5 text-center text-xs text-muted-foreground">
+                  Press Enter to use this value
+                </CommandEmpty>
+                <CommandGroup>
+                  {options.map((o) => (
+                    <CommandItem
+                      key={o.id}
+                      value={o.value}
+                      onSelect={(val) => {
+                        onUpdate(val);
+                        setPopoverOpen(false);
+                      }}
+                    >
+                      {o.value}
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
+      ) : (
+        <Input
+          value={field.fieldValue}
+          onChange={(e) => onUpdate(e.target.value)}
+          className="h-7 text-xs flex-1"
+          placeholder={field.isRequired ? 'Required' : '—'}
+        />
+      )}
+
+      {!field.isRequired && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
+          onClick={onDelete}
+        >
+          <Trash2 className="h-3 w-3" />
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FieldsList
+// ---------------------------------------------------------------------------
+
+interface FieldsListProps {
+  fields: LocalField[];
+  onUpdateField: (localId: string, value: string) => void;
+  onDeleteField: (localId: string) => void;
+}
+
+function FieldsList({ fields, onUpdateField, onDeleteField }: FieldsListProps) {
+  if (fields.length === 0) return null;
+
+  const parentFields = fields.filter((f) => !f.conditionalParentDefId);
+  const childrenByParentDefId = new Map<string, LocalField[]>();
+  for (const f of fields) {
+    if (!f.conditionalParentDefId) continue;
+    const list = childrenByParentDefId.get(f.conditionalParentDefId) ?? [];
+    list.push(f);
+    childrenByParentDefId.set(f.conditionalParentDefId, list);
+  }
+
+  const rows: JSX.Element[] = [];
+  for (const field of parentFields) {
+    rows.push(
+      <FieldRow
+        key={field.localId}
+        field={field}
+        onUpdate={(val) => onUpdateField(field.localId, val)}
+        onDelete={() => onDeleteField(field.localId)}
+      />
+    );
+    if (!field.fieldDefinitionId) continue;
+    const children = childrenByParentDefId.get(field.fieldDefinitionId) ?? [];
+    for (const child of children) {
+      if (
+        child.conditionOperator === undefined ||
+        child.conditionTriggerValues === undefined
+      ) continue;
+      if (!evaluateDependency(field.fieldValue || null, child.conditionOperator, child.conditionTriggerValues)) continue;
+      rows.push(
+        <div key={child.localId} className="pl-4 ml-1 border-l-2 border-primary/20 bg-muted/20">
+          <FieldRow
+            field={child}
+            onUpdate={(val) => onUpdateField(child.localId, val)}
+            onDelete={() => onDeleteField(child.localId)}
+          />
+        </div>
+      );
+    }
+  }
+
+  return (
+    <div className="rounded-md border divide-y mt-2">
+      {rows}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AddFieldForm
+// ---------------------------------------------------------------------------
+
+interface AddFieldFormProps {
+  onAdd: (field: Omit<LocalField, 'localId'>) => void;
+  onCancel: () => void;
+}
+
+function AddFieldForm({ onAdd, onCancel }: AddFieldFormProps) {
+  const [key, setKey] = useState('');
+  const [label, setLabel] = useState('');
+  const [value, setValue] = useState('');
+
+  const handleSubmit = () => {
+    if (!key.trim() || !label.trim()) return;
+    onAdd({
+      fieldKey: key.toLowerCase().replace(/\s+/g, '_'),
+      fieldLabel: label,
+      fieldValue: value,
+      valueType: 'string',
+      isRequired: false,
+    });
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-dashed bg-muted/20 p-3 space-y-2">
+      <div className="grid grid-cols-3 gap-2">
+        <div>
+          <Label className="text-[11px] text-muted-foreground">Key</Label>
+          <Input
+            placeholder="e.g. gauge"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            className="h-7 text-xs"
+            autoFocus
+          />
+        </div>
+        <div>
+          <Label className="text-[11px] text-muted-foreground">Label</Label>
+          <Input
+            placeholder="e.g. Gauge"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            className="h-7 text-xs"
+          />
+        </div>
+        <div>
+          <Label className="text-[11px] text-muted-foreground">Value</Label>
+          <Input
+            placeholder="e.g. 16 GA"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            className="h-7 text-xs"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleSubmit();
+              if (e.key === 'Escape') onCancel();
+            }}
+          />
+        </div>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          size="sm"
+          className="h-7 text-xs"
+          onClick={handleSubmit}
+          disabled={!key.trim() || !label.trim()}
+        >
+          Add
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ItemSlotCard
+// ---------------------------------------------------------------------------
+
+interface ItemSlotCardProps {
+  item: LocalTopLevelItem;
+  slotLabel: string;
+  addFieldFormOpenForId: string | null;
+  onClear: () => void;
+  onUpdateField: (itemLocalId: string, fieldLocalId: string, value: string) => void;
+  onDeleteField: (itemLocalId: string, fieldLocalId: string) => void;
+  onAddField: (itemLocalId: string, field: Omit<LocalField, 'localId'>) => void;
+  onToggleAddFieldForm: (itemLocalId: string | null) => void;
+}
+
+function ItemSlotCard({
+  item,
+  slotLabel,
+  addFieldFormOpenForId,
+  onClear,
+  onUpdateField,
+  onDeleteField,
+  onAddField,
+  onToggleAddFieldForm,
+}: ItemSlotCardProps) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="rounded-lg border bg-background">
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-0.5">
+            {slotLabel}
+          </p>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium truncate">{item.itemLabel}</span>
+            <Badge variant="secondary" className="font-mono text-[10px] shrink-0">
+              {item.canonicalCode}
+            </Badge>
+          </div>
+        </div>
+        {item.loadingFields && (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground shrink-0" />
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? 'Collapse fields' : 'Expand fields'}
+        >
+          <ChevronDown
+            className={cn('h-3.5 w-3.5 transition-transform duration-150', expanded && 'rotate-180')}
+          />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+          onClick={onClear}
+          title="Remove"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      {expanded && (
+        <div className="border-t px-3 pb-2 pt-2">
+          <FieldsList
+            fields={item.fields}
+            onUpdateField={(fid, val) => onUpdateField(item.localId, fid, val)}
+            onDeleteField={(fid) => onDeleteField(item.localId, fid)}
+          />
+          {addFieldFormOpenForId === item.localId ? (
+            <AddFieldForm
+              onAdd={(field) => {
+                onAddField(item.localId, field);
+                onToggleAddFieldForm(null);
+              }}
+              onCancel={() => onToggleAddFieldForm(null)}
+            />
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs mt-1 text-muted-foreground"
+              onClick={() => onToggleAddFieldForm(item.localId)}
+            >
+              <Plus className="h-3 w-3 mr-1" />
+              Add Field
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HardwareItemCard
+// ---------------------------------------------------------------------------
+
+interface HardwareItemCardProps {
+  hw: LocalHardwareItem;
+  addFieldFormOpenForId: string | null;
+  onDelete: (localId: string) => void;
+  onUpdateField: (hwLocalId: string, fieldLocalId: string, value: string) => void;
+  onDeleteField: (hwLocalId: string, fieldLocalId: string) => void;
+  onAddField: (hwLocalId: string, field: Omit<LocalField, 'localId'>) => void;
+  onToggleAddFieldForm: (hwLocalId: string | null) => void;
+}
+
+function HardwareItemCard({
+  hw,
+  addFieldFormOpenForId,
+  onDelete,
+  onUpdateField,
+  onDeleteField,
+  onAddField,
+  onToggleAddFieldForm,
+}: HardwareItemCardProps) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="rounded-md border bg-background">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium truncate">{hw.itemLabel}</span>
+            <Badge variant="outline" className="font-mono text-[10px] shrink-0">
+              {hw.canonicalCode}
+            </Badge>
+          </div>
+        </div>
+        {hw.loadingFields && (
+          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? 'Collapse fields' : 'Expand fields'}
+        >
+          <ChevronDown
+            className={cn('h-3 w-3 transition-transform duration-150', expanded && 'rotate-180')}
+          />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
+          onClick={() => onDelete(hw.localId)}
+        >
+          <Trash2 className="h-3 w-3" />
+        </Button>
+      </div>
+
+      {expanded && (
+        <div className="border-t px-3 pb-2 pt-2">
+          <FieldsList
+            fields={hw.fields}
+            onUpdateField={(fid, val) => onUpdateField(hw.localId, fid, val)}
+            onDeleteField={(fid) => onDeleteField(hw.localId, fid)}
+          />
+          {addFieldFormOpenForId === hw.localId ? (
+            <AddFieldForm
+              onAdd={(field) => {
+                onAddField(hw.localId, field);
+                onToggleAddFieldForm(null);
+              }}
+              onCancel={() => onToggleAddFieldForm(null)}
+            />
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 text-[11px] mt-1 text-muted-foreground"
+              onClick={() => onToggleAddFieldForm(hw.localId)}
+            >
+              <Plus className="h-3 w-3 mr-1" />
+              Add Field
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HardwareTabs
+// ---------------------------------------------------------------------------
+
+const ALL_HW_TABS: Array<{ key: HardwareSubcategory; label: string }> = HARDWARE_SUBCATEGORY_ORDER.map(
+  (sub) => ({ key: sub, label: HARDWARE_SUBCATEGORY_LABEL[sub] })
+);
+
+interface HardwareTabsProps {
+  itemTypes: ItemType[];
+  loading: boolean;
+  hardwareItems: LocalHardwareItem[];
+  activeTab: HardwareSubcategory;
+  onActiveTabChange: (tab: HardwareSubcategory) => void;
+  hwSearchQuery: Record<string, string>;
+  onHwSearchQueryChange: (state: Record<string, string>) => void;
+  addHwFieldFormOpenForId: string | null;
+  onDeleteHardware: (localId: string) => void;
+  onUpdateHwField: (hwLocalId: string, fieldLocalId: string, value: string) => void;
+  onDeleteHwField: (hwLocalId: string, fieldLocalId: string) => void;
+  onAddHwField: (hwLocalId: string, field: Omit<LocalField, 'localId'>) => void;
+  onToggleAddHwFieldForm: (hwLocalId: string | null) => void;
+  onSelectHardware: (hwType: ItemType) => void;
+}
+
+function HardwareTabs({
+  itemTypes,
+  loading,
+  hardwareItems,
+  activeTab,
+  onActiveTabChange,
+  hwSearchQuery,
+  onHwSearchQueryChange,
+  addHwFieldFormOpenForId,
+  onDeleteHardware,
+  onUpdateHwField,
+  onDeleteHwField,
+  onAddHwField,
+  onToggleAddHwFieldForm,
+  onSelectHardware,
+}: HardwareTabsProps) {
+  const allHardware = itemTypes.filter((it) => it.category === 'hardware');
+
+  const getTabItems = (tabKey: HardwareSubcategory) =>
+    hardwareItems.filter((hw) => hw.subcategory === tabKey);
+
+  const getCatalogItems = (tabKey: HardwareSubcategory) =>
+    allHardware.filter((it) => it.subcategory === tabKey);
+
+  const getTabCount = (tabKey: HardwareSubcategory) =>
+    getTabItems(tabKey).length;
+
+  const visibleTabs = ALL_HW_TABS.filter(
+    (t) => getCatalogItems(t.key).length > 0 || getTabCount(t.key) > 0
+  );
+
+  return (
+    <Tabs
+      value={activeTab}
+      onValueChange={(v) => onActiveTabChange(v as HardwareSubcategory)}
+    >
+      <TabsList className="w-full h-auto flex-wrap gap-1 bg-muted/50 p-1">
+        {visibleTabs.map((tab) => {
+          const count = getTabCount(tab.key);
+          return (
+            <TabsTrigger
+              key={tab.key}
+              value={tab.key}
+              className="flex-1 text-xs data-[state=active]:shadow-sm"
+            >
+              {tab.label}
+              {count > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="ml-1.5 h-4 min-w-4 px-1 text-[10px] data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+                >
+                  {count}
+                </Badge>
+              )}
+            </TabsTrigger>
+          );
+        })}
+      </TabsList>
+
+      {visibleTabs.map((tab) => {
+        const tabItems = getTabItems(tab.key);
+        const catalogItems = getCatalogItems(tab.key);
+        const searchQuery = hwSearchQuery[tab.key] ?? '';
+        const filteredCatalog = searchQuery.trim()
+          ? catalogItems.filter((it) =>
+              `${it.itemLabel} ${it.canonicalCode} ${it.series ?? ''} ${it.material ?? ''}`
+                .toLowerCase()
+                .includes(searchQuery.toLowerCase())
+            )
+          : catalogItems;
+
+        return (
+          <TabsContent key={tab.key} value={tab.key} className="mt-3 space-y-2">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+              <input
+                type="text"
+                placeholder={`Search ${tab.label}…`}
+                value={searchQuery}
+                onChange={(e) =>
+                  onHwSearchQueryChange({ ...hwSearchQuery, [tab.key]: e.target.value })
+                }
+                className="w-full h-8 pl-8 pr-3 text-xs rounded-md border bg-background placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+            </div>
+
+            {loading ? (
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              </div>
+            ) : filteredCatalog.length === 0 ? (
+              <p className="text-xs text-muted-foreground italic text-center py-3">
+                {searchQuery ? 'No items match your search.' : `No ${tab.label} items available.`}
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 gap-1 max-h-48 overflow-y-auto rounded-md border bg-muted/20 p-1">
+                {filteredCatalog.map((it) => {
+                  const alreadySelected = hardwareItems.some(
+                    (hw) => hw.canonicalCode === it.canonicalCode
+                  );
+                  return (
+                    <button
+                      key={it.canonicalCode}
+                      type="button"
+                      onClick={() => {
+                        if (!alreadySelected) onSelectHardware(it);
+                      }}
+                      disabled={alreadySelected}
+                      className={cn(
+                        'flex items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs transition-colors',
+                        alreadySelected
+                          ? 'opacity-50 cursor-default bg-primary/5'
+                          : 'hover:bg-background hover:shadow-sm cursor-pointer'
+                      )}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium truncate block">{it.itemLabel}</span>
+                        {(it.series || it.material) && (
+                          <span className="text-[10px] text-muted-foreground">
+                            {[it.series, it.material].filter(Boolean).join(' · ')}
+                          </span>
+                        )}
+                      </div>
+                      <Badge variant="outline" className="font-mono text-[10px] shrink-0">
+                        {it.canonicalCode}
+                      </Badge>
+                      {alreadySelected && (
+                        <span className="text-[10px] text-primary font-medium shrink-0">Added</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {tabItems.length > 0 && (
+              <div className="space-y-1.5 pt-1">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Selected ({tabItems.length})
+                </p>
+                {tabItems.map((hw) => (
+                  <HardwareItemCard
+                    key={hw.localId}
+                    hw={hw}
+                    addFieldFormOpenForId={addHwFieldFormOpenForId}
+                    onDelete={onDeleteHardware}
+                    onUpdateField={onUpdateHwField}
+                    onDeleteField={onDeleteHwField}
+                    onAddField={onAddHwField}
+                    onToggleAddFieldForm={onToggleAddHwFieldForm}
+                  />
+                ))}
+              </div>
+            )}
+
+            {tabItems.length === 0 && !loading && filteredCatalog.length > 0 && (
+              <p className="text-xs text-muted-foreground italic text-center py-1">
+                Click an item above to add it.
+              </p>
+            )}
+          </TabsContent>
+        );
+      })}
+    </Tabs>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// NewOpeningPage
+// ---------------------------------------------------------------------------
+
+export default function NewOpeningPage() {
+  const { estimateId } = useParams<{ estimateId: string }>();
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+
+  const initialTemplateType = (searchParams.get('type') ?? 'single') as OpeningTemplateType;
+  const openingCount = parseInt(searchParams.get('count') ?? '0', 10);
+
+  const backUrl = estimateId
+    ? `/app/estimates/create?id=${estimateId}&step=1`
+    : '/app/estimates';
+
+  const [templateType, setTemplateType] = useState<OpeningTemplateType>(initialTemplateType);
+  const [name, setName] = useState(`Opening ${openingCount + 1}`);
+  const [quantity, setQuantity] = useState(1);
+
+  const [doorSlot1, setDoorSlot1] = useState<LocalTopLevelItem | null>(null);
+  const [doorSlot2, setDoorSlot2] = useState<LocalTopLevelItem | null>(null);
+  const [frameSlot, setFrameSlot] = useState<LocalTopLevelItem | null>(null);
+  const [panelSlot, setPanelSlot] = useState<LocalTopLevelItem | null>(null);
+  const [hardwareItems, setHardwareItems] = useState<LocalHardwareItem[]>([]);
+
+  const [itemTypes, setItemTypes] = useState<ItemType[]>([]);
+  const [itemTypesLoading, setItemTypesLoading] = useState(true);
+
+  const [door1ModalOpen, setDoor1ModalOpen] = useState(false);
+  const [door2ModalOpen, setDoor2ModalOpen] = useState(false);
+  const [frameModalOpen, setFrameModalOpen] = useState(false);
+  const [panelModalOpen, setPanelModalOpen] = useState(false);
+  const [hardwareModalOpen, setHardwareModalOpen] = useState(false);
+  const [pendingFamilyCode, setPendingFamilyCode] = useState<string | undefined>(undefined);
+  const [activeHwTab, setActiveHwTab] = useState<HardwareSubcategory>('swing_it');
+  const [hwSearchQuery, setHwSearchQuery] = useState<Record<string, string>>({});
+
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [addFieldFormOpenForId, setAddFieldFormOpenForId] = useState<string | null>(null);
+  const [addHwFieldFormOpenForId, setAddHwFieldFormOpenForId] = useState<string | null>(null);
+
+  const [passToFrameKeys, setPassToFrameKeys] = useState<Set<string>>(new Set());
+
+  const isPair = templateType === 'pair' || templateType === 'pair_with_panel';
+  const hasPanel = templateType === 'single_with_panel' || templateType === 'pair_with_panel';
+
+  useEffect(() => {
+    setItemTypesLoading(true);
+    getItemTypes()
+      .then(setItemTypes)
+      .catch((err) => console.error('Failed to load item types:', err))
+      .finally(() => setItemTypesLoading(false));
+    getPassToFrameFieldKeys()
+      .then(setPassToFrameKeys)
+      .catch((err) => console.error('Failed to load pass-to-frame keys:', err));
+  }, []);
+
+  useEffect(() => {
+    if (templateType === 'single' || templateType === 'single_with_panel') {
+      setDoorSlot2(null);
+    }
+    if (templateType === 'single' || templateType === 'pair') {
+      setPanelSlot(null);
+    }
+  }, [templateType]);
+
+  // ---------------------------------------------------------------------------
+  // Slot updaters
+  // ---------------------------------------------------------------------------
+
+  const makeSlotFieldUpdater = (
+    setter: React.Dispatch<React.SetStateAction<LocalTopLevelItem | null>>
+  ) => ({
+    updateField: (itemLocalId: string, fieldLocalId: string, value: string) => {
+      setter((prev) => {
+        if (!prev || prev.localId !== itemLocalId) return prev;
+        const descriptionCodeKey =
+          prev.category === 'doors'
+            ? 'door_description_code'
+            : prev.category === 'frames'
+            ? 'frame_description'
+            : null;
+        const changedField = prev.fields.find((f) => f.localId === fieldLocalId);
+        const isDesc = descriptionCodeKey !== null && changedField?.fieldKey === descriptionCodeKey;
+        return {
+          ...prev,
+          ...(isDesc && value ? { itemLabel: value } : {}),
+          fields: prev.fields.map((f) =>
+            f.localId === fieldLocalId ? { ...f, fieldValue: value } : f
+          ),
+        };
+      });
+    },
+    deleteField: (itemLocalId: string, fieldLocalId: string) => {
+      setter((prev) =>
+        prev?.localId === itemLocalId
+          ? { ...prev, fields: prev.fields.filter((f) => f.localId !== fieldLocalId) }
+          : prev
+      );
+    },
+    addField: (itemLocalId: string, field: Omit<LocalField, 'localId'>) => {
+      setter((prev) =>
+        prev?.localId === itemLocalId
+          ? { ...prev, fields: [...prev.fields, { ...field, localId: newLocalId() }] }
+          : prev
+      );
+    },
+  });
+
+  const slot1Ops = makeSlotFieldUpdater(setDoorSlot1);
+  const slot2Ops = makeSlotFieldUpdater(setDoorSlot2);
+  const frameOps = makeSlotFieldUpdater(setFrameSlot);
+  const panelOps = makeSlotFieldUpdater(setPanelSlot);
+
+  const handleSlot1UpdateField = (itemLocalId: string, fieldLocalId: string, value: string) => {
+    slot1Ops.updateField(itemLocalId, fieldLocalId, value);
+    const changedFieldKey = doorSlot1?.fields.find((f) => f.localId === fieldLocalId)?.fieldKey;
+    if (changedFieldKey && passToFrameKeys.has(changedFieldKey)) {
+      setFrameSlot((prev) => {
+        if (!prev) return prev;
+        const hasField = prev.fields.some((f) => f.fieldKey === changedFieldKey);
+        if (!hasField) return prev;
+        return {
+          ...prev,
+          fields: prev.fields.map((f) =>
+            f.fieldKey === changedFieldKey ? { ...f, fieldValue: value } : f
+          ),
+        };
+      });
+    }
+  };
+
+  const handleSlot2UpdateField = (itemLocalId: string, fieldLocalId: string, value: string) => {
+    slot2Ops.updateField(itemLocalId, fieldLocalId, value);
+    const changedFieldKey = doorSlot2?.fields.find((f) => f.localId === fieldLocalId)?.fieldKey;
+    if (changedFieldKey && passToFrameKeys.has(changedFieldKey)) {
+      setFrameSlot((prev) => {
+        if (!prev) return prev;
+        const hasField = prev.fields.some((f) => f.fieldKey === changedFieldKey);
+        if (!hasField) return prev;
+        return {
+          ...prev,
+          fields: prev.fields.map((f) =>
+            f.fieldKey === changedFieldKey ? { ...f, fieldValue: value } : f
+          ),
+        };
+      });
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Hardware handlers — HardwareTabs builds items via API (not modal)
+  // ---------------------------------------------------------------------------
+
+  const buildLocalHardware = useCallback(async (hwType: ItemType): Promise<LocalHardwareItem> => {
+    const hwLocalId = newLocalId();
+    const hw: LocalHardwareItem = {
+      localId: hwLocalId,
+      itemLabel: hwType.itemLabel,
+      canonicalCode: hwType.canonicalCode,
+      subcategory: (hwType.subcategory as HardwareSubcategory) ?? null,
+      loadingFields: true,
+      fields: [],
+    };
+
+    Promise.all([
+      getItemTypeFields(hwType.canonicalCode),
+      getMostRecentFieldValuesForItem([hwType.canonicalCode]),
+      getResolvedDependencies(hwType.canonicalCode),
+    ])
+      .then(([allFields, recentValues, resolvedDeps]) => {
+        const fields: LocalField[] = allFields
+          .filter((rf) => rf.fieldDefinition)
+          .map((rf) => ({
+            localId: newLocalId(),
+            fieldKey: rf.fieldDefinition!.fieldKey,
+            fieldLabel: rf.fieldDefinition!.fieldLabel,
+            fieldValue: recentValues[rf.fieldDefinition!.fieldKey] ?? '',
+            valueType: rf.fieldDefinition!.valueType,
+            fieldDefinitionId: rf.fieldDefinitionId,
+            isRequired: rf.isRequired,
+          }));
+
+        const existingFieldKeys = new Set(fields.map((f) => f.fieldKey));
+        for (const dep of resolvedDeps) {
+          if (existingFieldKeys.has(dep.childField.fieldKey)) continue;
+          fields.push({
+            localId: newLocalId(),
+            fieldKey: dep.childField.fieldKey,
+            fieldLabel: dep.childField.fieldLabel,
+            fieldValue: '',
+            valueType: dep.childField.valueType,
+            fieldDefinitionId: dep.childField.id,
+            isRequired: false,
+            conditionalParentDefId: dep.parentFieldDefinitionId,
+            conditionOperator: dep.operator,
+            conditionTriggerValues: dep.triggerValues,
+          });
+          existingFieldKeys.add(dep.childField.fieldKey);
+        }
+
+        setHardwareItems((prev) =>
+          prev.map((h) => (h.localId === hwLocalId ? { ...h, fields, loadingFields: false } : h))
+        );
+      })
+      .catch(() => {
+        setHardwareItems((prev) =>
+          prev.map((h) => (h.localId === hwLocalId ? { ...h, loadingFields: false } : h))
+        );
+      });
+
+    return hw;
+  }, []);
+
+  const handleSelectHardware = async (hwType: ItemType) => {
+    if (hwType.isFamily) {
+      // Family items require the progressive-disclosure wizard.
+      // Pass the canonical code so the modal skips straight to configure.
+      setPendingFamilyCode(hwType.canonicalCode);
+      setHardwareModalOpen(true);
+      return;
+    }
+    const hw = await buildLocalHardware(hwType);
+    setHardwareItems((prev) => [...prev, hw]);
+  };
+
+  const handleHardwareModalOpenChange = (open: boolean) => {
+    setHardwareModalOpen(open);
+    if (!open) setPendingFamilyCode(undefined);
+  };
+
+  const handleSaveHardwareFromModal = (hw: LocalHardwareItem) => {
+    setHardwareItems((prev) => [...prev, hw]);
+  };
+
+  const handleDeleteHardware = (hwLocalId: string) => {
+    setHardwareItems((prev) => prev.filter((h) => h.localId !== hwLocalId));
+  };
+
+  const handleUpdateHwField = (hwLocalId: string, fieldLocalId: string, value: string) => {
+    setHardwareItems((prev) =>
+      prev.map((h) =>
+        h.localId === hwLocalId
+          ? { ...h, fields: h.fields.map((f) => (f.localId === fieldLocalId ? { ...f, fieldValue: value } : f)) }
+          : h
+      )
+    );
+  };
+
+  const handleDeleteHwField = (hwLocalId: string, fieldLocalId: string) => {
+    setHardwareItems((prev) =>
+      prev.map((h) =>
+        h.localId === hwLocalId
+          ? { ...h, fields: h.fields.filter((f) => f.localId !== fieldLocalId) }
+          : h
+      )
+    );
+  };
+
+  const handleAddHwField = (hwLocalId: string, field: Omit<LocalField, 'localId'>) => {
+    setHardwareItems((prev) =>
+      prev.map((h) =>
+        h.localId === hwLocalId
+          ? { ...h, fields: [...h.fields, { ...field, localId: newLocalId() }] }
+          : h
+      )
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // Save
+  // ---------------------------------------------------------------------------
+
+  const handleSave = async () => {
+    if (!estimateId || !name.trim()) return;
+    setSaving(true);
+    setSaveError(null);
+
+    try {
+      const openingData = await createEstimateOpening(estimateId, name.trim(), quantity, templateType);
+
+      const saveLocalFields = async (itemId: string, fields: LocalField[]) => {
+        const saved: ItemField[] = [];
+        const parentValueByDefId = new Map<string, string>();
+        for (const f of fields) {
+          if (f.fieldDefinitionId && !f.conditionalParentDefId) {
+            parentValueByDefId.set(f.fieldDefinitionId, f.fieldValue);
+          }
+        }
+        for (const field of fields) {
+          if (!field.fieldKey.trim()) continue;
+          if (field.conditionalParentDefId !== undefined) {
+            const parentValue = parentValueByDefId.get(field.conditionalParentDefId) ?? null;
+            if (!evaluateDependency(parentValue, field.conditionOperator!, field.conditionTriggerValues!)) {
+              continue;
+            }
+          }
+          const f = await addItemField(itemId, {
+            fieldKey: field.fieldKey,
+            fieldLabel: field.fieldLabel,
+            fieldValue: field.fieldValue,
+            valueType: field.valueType,
+            fieldDefinitionId: field.fieldDefinitionId,
+          });
+          saved.push(f);
+          if (field.fieldDefinitionId && field.fieldValue.trim()) {
+            recordFieldValueUsage(field.fieldDefinitionId, field.fieldValue.trim()).catch(console.error);
+          }
+        }
+        return saved;
+      };
+
+      const topLevelItems: LocalTopLevelItem[] = [
+        ...(doorSlot1 ? [doorSlot1] : []),
+        ...(doorSlot2 ? [doorSlot2] : []),
+        ...(frameSlot ? [frameSlot] : []),
+        ...(panelSlot ? [panelSlot] : []),
+      ];
+
+      for (let i = 0; i < topLevelItems.length; i++) {
+        const localItem = topLevelItems[i];
+        const created = await addEstimateItem(estimateId, {
+          itemLabel: localItem.itemLabel,
+          canonicalCode: localItem.canonicalCode,
+          quantity: 1,
+          sortOrder: i,
+          openingId: openingData.id,
+          parentItemId: null,
+          itemType: localItem.category,
+        });
+        await saveLocalFields(created.id, localItem.fields);
+      }
+
+      for (let i = 0; i < hardwareItems.length; i++) {
+        const hw = hardwareItems[i];
+        const created = await addEstimateItem(estimateId, {
+          itemLabel: hw.itemLabel,
+          canonicalCode: hw.canonicalCode,
+          quantity: 1,
+          sortOrder: i,
+          openingId: openingData.id,
+          parentItemId: null,
+          subcategory: hw.subcategory,
+        });
+        await saveLocalFields(created.id, hw.fields);
+      }
+
+      navigate(backUrl);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save opening.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const canSave =
+    name.trim().length > 0 &&
+    doorSlot1 !== null &&
+    frameSlot !== null &&
+    (!isPair || doorSlot2 !== null) &&
+    (!hasPanel || panelSlot !== null);
+
+  const slot1Label = isPair ? 'Active Door' : 'Door';
+  const slot2Label = 'Inactive Door';
+
+  if (!estimateId) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <AlertCircle className="h-12 w-12 text-muted-foreground/50" />
+          <p className="font-medium">Invalid estimate</p>
+          <Button variant="outline" onClick={() => navigate('/app/estimates')}>
+            Back to Estimates
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      <div className="flex-1 min-w-0 overflow-y-auto">
+        <div className="p-6 lg:p-8 max-w-2xl mx-auto">
+
+          {/* Header */}
+          <div className="mb-6">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => navigate(backUrl)}
+              className="mb-4 -ml-2"
+            >
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Back to Openings
+            </Button>
+            <div className="flex items-center gap-3">
+              <div className="flex h-8 w-8 sm:h-10 sm:w-10 items-center justify-center rounded-lg bg-primary/10">
+                <LayoutTemplate className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
+              </div>
+              <div>
+                <h1 className="font-display text-xl sm:text-2xl lg:text-3xl tracking-wide">
+                  New Opening
+                </h1>
+                <p className="text-sm text-muted-foreground">
+                  Configure the opening type and select the required doors and frame.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Template type + Name + Quantity */}
+          <div className="space-y-4 mb-6">
+            <div className="space-y-1.5">
+              <Label>Opening Type</Label>
+              <Select
+                value={templateType}
+                onValueChange={(v) => setTemplateType(v as OpeningTemplateType)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ALL_TEMPLATE_TYPES.map((t) => (
+                    <SelectItem key={t} value={t}>
+                      {TEMPLATE_LABELS[t]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="grid grid-cols-[1fr_100px] gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="opening-name">
+                  Opening Name <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="opening-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Main Entrance"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="opening-qty">Quantity</Label>
+                <Input
+                  id="opening-qty"
+                  type="number"
+                  min={1}
+                  value={quantity}
+                  onChange={(e) => setQuantity(parseInt(e.target.value) || 1)}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Doors */}
+          <div className="space-y-3 mb-6">
+            <div className="flex items-center gap-2">
+              <DoorOpen className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-semibold">
+                {isPair ? 'Doors' : 'Door'}
+              </span>
+              {isPair && (
+                <Badge variant="outline" className="text-xs font-normal">
+                  Active + Inactive required
+                </Badge>
+              )}
+            </div>
+
+            {doorSlot1 ? (
+              <ItemSlotCard
+                item={doorSlot1}
+                slotLabel={slot1Label}
+                addFieldFormOpenForId={addFieldFormOpenForId}
+                onClear={() => setDoorSlot1(null)}
+                onUpdateField={handleSlot1UpdateField}
+                onDeleteField={slot1Ops.deleteField}
+                onAddField={slot1Ops.addField}
+                onToggleAddFieldForm={setAddFieldFormOpenForId}
+              />
+            ) : (
+              <Button
+                variant="outline"
+                className="w-full border-dashed text-muted-foreground hover:text-foreground"
+                onClick={() => setDoor1ModalOpen(true)}
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Select {slot1Label}
+              </Button>
+            )}
+
+            {isPair && (
+              doorSlot2 ? (
+                <ItemSlotCard
+                  item={doorSlot2}
+                  slotLabel={slot2Label}
+                  addFieldFormOpenForId={addFieldFormOpenForId}
+                  onClear={() => setDoorSlot2(null)}
+                  onUpdateField={handleSlot2UpdateField}
+                  onDeleteField={slot2Ops.deleteField}
+                  onAddField={slot2Ops.addField}
+                  onToggleAddFieldForm={setAddFieldFormOpenForId}
+                />
+              ) : (
+                <Button
+                  variant="outline"
+                  className="w-full border-dashed text-muted-foreground hover:text-foreground"
+                  onClick={() => setDoor2ModalOpen(true)}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Select {slot2Label}
+                </Button>
+              )
+            )}
+          </div>
+
+          <Separator className="mb-6" />
+
+          {/* Frame */}
+          <div className="space-y-3 mb-6">
+            <div className="flex items-center gap-2">
+              <Square className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-semibold">Frame</span>
+            </div>
+
+            {frameSlot ? (
+              <ItemSlotCard
+                item={frameSlot}
+                slotLabel="Frame"
+                addFieldFormOpenForId={addFieldFormOpenForId}
+                onClear={() => setFrameSlot(null)}
+                onUpdateField={frameOps.updateField}
+                onDeleteField={frameOps.deleteField}
+                onAddField={frameOps.addField}
+                onToggleAddFieldForm={setAddFieldFormOpenForId}
+              />
+            ) : (
+              <Button
+                variant="outline"
+                className="w-full border-dashed text-muted-foreground hover:text-foreground"
+                onClick={() => setFrameModalOpen(true)}
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Select Frame
+              </Button>
+            )}
+          </div>
+
+          {/* Panel — shown only for _with_panel template types */}
+          {hasPanel && (
+            <>
+              <Separator className="mb-6" />
+
+              <div className="space-y-3 mb-6">
+                <div className="flex items-center gap-2">
+                  <LayoutPanelLeft className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm font-semibold">Panel</span>
+                </div>
+
+                {panelSlot ? (
+                  <ItemSlotCard
+                    item={panelSlot}
+                    slotLabel="Panel"
+                    addFieldFormOpenForId={addFieldFormOpenForId}
+                    onClear={() => setPanelSlot(null)}
+                    onUpdateField={panelOps.updateField}
+                    onDeleteField={panelOps.deleteField}
+                    onAddField={panelOps.addField}
+                    onToggleAddFieldForm={setAddFieldFormOpenForId}
+                  />
+                ) : (
+                  <Button
+                    variant="outline"
+                    className="w-full border-dashed text-muted-foreground hover:text-foreground"
+                    onClick={() => setPanelModalOpen(true)}
+                  >
+                    <Plus className="h-4 w-4 mr-2" />
+                    Select Panel
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* Validation hint */}
+          {(!doorSlot1 || !frameSlot || (isPair && !doorSlot2) || (hasPanel && !panelSlot)) && (
+            <div className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/20 px-4 py-3 mb-6">
+              <AlertCircle className="h-4 w-4 text-muted-foreground/50 shrink-0" />
+              <p className="text-sm text-muted-foreground">
+                {isPair && hasPanel
+                  ? 'Select an active door, inactive door, a frame, and a panel to continue.'
+                  : isPair
+                  ? 'Select an active door, inactive door, and a frame to continue.'
+                  : hasPanel
+                  ? 'Select a door, a frame, and a panel to continue.'
+                  : 'Select a door and a frame to continue.'}
+              </p>
+            </div>
+          )}
+
+          <Separator className="mb-6" />
+
+          {/* Hardware */}
+          <div className="space-y-3 mb-8">
+            <div className="flex items-center gap-2">
+              <Wrench className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-semibold">Hardware</span>
+              {hardwareItems.length > 0 && (
+                <Badge variant="secondary" className="text-xs">
+                  {hardwareItems.length}
+                </Badge>
+              )}
+            </div>
+
+            <HardwareTabs
+              itemTypes={itemTypes}
+              loading={itemTypesLoading}
+              hardwareItems={hardwareItems}
+              activeTab={activeHwTab}
+              onActiveTabChange={setActiveHwTab}
+              hwSearchQuery={hwSearchQuery}
+              onHwSearchQueryChange={setHwSearchQuery}
+              addHwFieldFormOpenForId={addHwFieldFormOpenForId}
+              onDeleteHardware={handleDeleteHardware}
+              onUpdateHwField={handleUpdateHwField}
+              onDeleteHwField={handleDeleteHwField}
+              onAddHwField={handleAddHwField}
+              onToggleAddHwFieldForm={setAddHwFieldFormOpenForId}
+              onSelectHardware={handleSelectHardware}
+            />
+          </div>
+
+          {/* Save error */}
+          {saveError && (
+            <div className="flex items-center gap-1.5 mb-4 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              {saveError}
+            </div>
+          )}
+
+          {/* Footer actions */}
+          <div className="flex justify-between items-center pt-6 border-t">
+            <Button variant="outline" onClick={() => navigate(backUrl)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={!canSave || saving} size="lg">
+              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save Opening
+            </Button>
+          </div>
+
+        </div>
+      </div>
+
+      {/* AddItemModals */}
+      <AddItemModal
+        category="doors"
+        title={`Select ${slot1Label}`}
+        itemTypes={itemTypes}
+        itemTypesLoading={itemTypesLoading}
+        open={door1ModalOpen}
+        onOpenChange={setDoor1ModalOpen}
+        onSaveTopLevel={setDoorSlot1}
+        onSaveHardware={() => {}}
+      />
+      {isPair && (
+        <AddItemModal
+          category="doors"
+          title={`Select ${slot2Label}`}
+          itemTypes={itemTypes}
+          itemTypesLoading={itemTypesLoading}
+          open={door2ModalOpen}
+          onOpenChange={setDoor2ModalOpen}
+          onSaveTopLevel={setDoorSlot2}
+          onSaveHardware={() => {}}
+        />
+      )}
+      <AddItemModal
+        category="frames"
+        title="Select Frame"
+        itemTypes={itemTypes}
+        itemTypesLoading={itemTypesLoading}
+        open={frameModalOpen}
+        onOpenChange={setFrameModalOpen}
+        onSaveTopLevel={setFrameSlot}
+        onSaveHardware={() => {}}
+        passToFrameKeys={passToFrameKeys}
+        sourceDoor={doorSlot1 ?? doorSlot2}
+      />
+      <AddItemModal
+        category="panels"
+        title="Select Panel"
+        itemTypes={itemTypes}
+        itemTypesLoading={itemTypesLoading}
+        open={panelModalOpen}
+        onOpenChange={setPanelModalOpen}
+        onSaveTopLevel={setPanelSlot}
+        onSaveHardware={() => {}}
+      />
+      <AddItemModal
+        category="hardware"
+        title="Add Hardware"
+        itemTypes={itemTypes}
+        itemTypesLoading={itemTypesLoading}
+        open={hardwareModalOpen}
+        onOpenChange={handleHardwareModalOpenChange}
+        onSaveTopLevel={() => {}}
+        onSaveHardware={handleSaveHardwareFromModal}
+        initialFamilyCode={pendingFamilyCode}
+      />
+    </div>
+  );
+}

@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-05-11 (added pass_value_to_frame column to item_type_base_fields for door→frame field sync)
+Last updated: 2026-05-12 (hardware progressive-disclosure Phase 2 — seeded CloseIt CLOSER, LatchIt DEADBOLT/LOCKSET/PANIC, and ProtectIt WEATHERSTRIP/THRESHOLD families)
 
 ## Authentication Status
 
@@ -652,6 +652,7 @@ Tracks previously used values for each field definition, enabling smart dropdown
 - `usage_count` (INTEGER, NOT NULL, DEFAULT 1) - How many times this value has been used
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - User-defined display order within a field (drag-and-drop)
 - `is_default` (BOOLEAN, NOT NULL, DEFAULT false) - Whether this option is the default for the estimates wizard
+- `code_token` (TEXT, NULL) - Abbreviation contributed to a hardware canonical_code when this option is selected (e.g. `'FM'`, `'SS'`, `'80'`). NULL for options that produce no token.
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
 **Constraints:**
@@ -915,6 +916,7 @@ Per-item-type option list. When **any** row exists for `(canonical_code, field_d
 - `value` (TEXT, NOT NULL) - Option value string
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order
 - `is_default` (BOOLEAN, NOT NULL, DEFAULT false) - Whether this option is the default for estimates wizard
+- `code_token` (TEXT, NULL) - Abbreviation contributed to a hardware canonical_code when this option is selected. NULL for options that produce no token.
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
 **Constraints:**
@@ -1193,6 +1195,9 @@ Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_depen
 35. `add_update_policy_item_type_base_fields` - Added UPDATE RLS policy for admins on `item_type_base_fields` so `reorderItemTypeBaseFields` (sort_order updates) can persist; previously the table had SELECT/INSERT/DELETE policies but no UPDATE policy, causing silent no-ops on drag-to-reorder
 36. `add_item_type_field_dependencies` - Created `item_type_field_dependencies` (item-type-level defaults) and `item_type_field_dependency_overrides` (per-canonical-code copy-on-write) tables for conditional sub-field support; RLS mirroring `item_type_base_fields` (read = authenticated, write = admins) for the defaults table and full authenticated CRUD for overrides; `updated_at` triggers via `handle_updated_at()`; composite unique constraints and indexes on (item_type_slug/canonical_code, parent_id) and child_id
 37. `add_pass_value_to_frame_to_item_type_base_fields` - Added `pass_value_to_frame BOOLEAN NOT NULL DEFAULT false` column to `item_type_base_fields`; added partial index `idx_item_type_base_fields_pass_to_frame` on `item_type_slug` where `pass_value_to_frame = true` for efficient lookup of door→frame sync fields in the estimate wizard
+38. `add_hardware_progressive_disclosure_columns` - Added `is_family`, `is_legacy`, `code_prefix`, `code_field_keys`, `label_template` to `hardware_catalog`; added `code_token TEXT NULL` to `field_value_options` and `item_type_field_value_options`; backfilled `is_legacy = true` on all 66 existing leaf rows
+39. `seed_swing_it_hardware_families` - Seeded `hardware-hinge` and `hardware-cont-hinge` entries in `item_type_registry`; inserted HINGE and CONT-HINGE family rows in `hardware_catalog` (`is_family=true`); upserted 8 field_definitions (hinge_type, hinge_material, hinge_size, hinge_pin, hinge_gauge, material, mount, length) with `status='approved'`; seeded all field_value_options with `code_token` values; wired `item_type_base_fields` for both family slugs; added `hinge_gauge` depends-on-`hinge_type IN (Mechanical, Electrified)` rule to `item_type_field_dependencies`
+40. `seed_close_latch_protect_hardware_families` - Seeded 6 new configurable hardware families for the remaining three subcategories: CloseIt — `CLOSER` (hardware-closer, fields: closer_mount/closer_material/closer_arm_type); LatchIt — `DEADBOLT` (hardware-deadbolt, deadbolt_function), `LOCKSET` (hardware-lockset, lockset_type), `PANIC` (hardware-panic, panic_type); ProtectIt — `WEATHERSTRIP` (hardware-weatherstrip, weatherstrip_type), `THRESHOLD` (hardware-threshold, threshold_type). Inserted all 6 `item_type_registry` slugs, 6 `hardware_catalog` family rows, 8 new `field_definitions` (all approved), field_value_options with code_token values (HM/DM, CI/ALUM, CUSH/HOS/HOSP/FL/PA, KOS/KBS, CYLI/MORT, RIM/MORT/SVR/CVR, ADHES/KERF/SCREW/ALUM, FLAT/PANIC/NOTCH), and `item_type_base_fields` wiring for all 6 family slugs
 
 ## Edge Functions
 
@@ -1331,11 +1336,16 @@ Pre-defined hardware catalog seeded from the DOOR_FRAME SHORTCUT_LOOKUP spreadsh
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `name` (TEXT, NOT NULL) - Display name of the hardware item
-- `canonical_code` (TEXT, NOT NULL, UNIQUE) - Unique item code (e.g., 'HINGE-MECH-SS-45X45-NRP-134')
+- `canonical_code` (TEXT, NOT NULL, UNIQUE) - Unique item code (e.g., 'HINGE-MECH-SS-45X45-NRP-134') for leaf rows; family identifier (e.g., 'HINGE', 'CONT-HINGE') for family rows
 - `subcategory` (TEXT, NOT NULL) - CHECK IN ('swing_it','close_it','latch_it','protect_it')
 - `description` (TEXT) - Optional description of the item
 - `active` (BOOLEAN, NOT NULL, DEFAULT true) - Whether the item appears in pickers
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display ordering within subcategory
+- `is_family` (BOOLEAN, NOT NULL, DEFAULT false) - True for new configurable family rows; false for legacy leaf rows
+- `is_legacy` (BOOLEAN, NOT NULL, DEFAULT false) - True on all 66 original leaf rows (backfilled); false on family rows
+- `code_prefix` (TEXT, NULL) - Required when is_family=true. Top-level prefix for the assembled canonical_code (e.g. 'HINGE', 'CONT-HINGE')
+- `code_field_keys` (JSONB, NULL) - Ordered list of field_definitions.field_key values whose selected option tokens build the rest of the code (e.g. `["hinge_type","hinge_material","hinge_size","hinge_pin","hinge_gauge"]`)
+- `label_template` (TEXT, NULL) - Optional human-readable template for the item label (e.g. `'Hinge - {hinge_type} {material}'`). Falls back to name
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 - `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
@@ -1354,13 +1364,28 @@ Pre-defined hardware catalog seeded from the DOOR_FRAME SHORTCUT_LOOKUP spreadsh
 **Triggers:**
 - `set_hardware_catalog_updated_at` - Automatically updates updated_at timestamp via handle_updated_at()
 
-**Seed data (66 rows total):**
-- **swing_it** (25 rows): Mechanical SS hinges (4.5×4.5 and 5×4.5 NRP .134"/.180"), Spring SS 4.5×4.5", Electrified SS variants, Continuous Aluminum and SS 630 Full Mortise/Half Mortise/Full Surface × 80"/84"/96"
-- **close_it** (21 rows): Header Mount and Door Mount closers × Cast Iron/Aluminum × Cushioned/Hold Open Stop/Hold Open Spring/Fusible Link/Parallel Arm; plus Slide Track Hold Open
-- **latch_it** (11 rows): Active — Deadbolt KOS/KBS, Lockset Cylindrical/Mortise, Panic Bar Rim/Mortise/SVR/CVR; Inactive (active=false) — Surface Bolt, Flush Bolt, Surface Vertical Rod
-- **protect_it** (9 rows): Weatherstrip Adhesive/Kerf/Screw-On/Aluminum, Threshold Flat/Panic/Notched, Drip Cap, Door Sweep
+**Seed data (66 legacy rows + 2 family rows):**
+- **swing_it legacy (25 rows):** Mechanical SS hinges (4.5×4.5 and 5×4.5 NRP .134"/.180"), Spring SS 4.5×4.5", Electrified SS variants, Continuous Aluminum and SS 630 Full Mortise/Half Mortise/Full Surface × 80"/84"/96"
+- **close_it legacy (21 rows):** Header Mount and Door Mount closers × Cast Iron/Aluminum × Cushioned/Hold Open Stop/Hold Open Spring/Fusible Link/Parallel Arm; plus Slide Track Hold Open
+- **latch_it legacy (11 rows):** Active — Deadbolt KOS/KBS, Lockset Cylindrical/Mortise, Panic Bar Rim/Mortise/SVR/CVR; Inactive (active=false) — Surface Bolt, Flush Bolt, Surface Vertical Rod
+- **protect_it legacy (9 rows):** Weatherstrip Adhesive/Kerf/Screw-On/Aluminum, Threshold Flat/Panic/Notched, Drip Cap, Door Sweep
+- **swing_it family rows (Phase 1):**
+  - `HINGE` — `code_prefix='HINGE'`, `code_field_keys=["hinge_type","hinge_material","hinge_size","hinge_pin","hinge_gauge"]`, item_type_slug=`hardware-hinge`
+  - `CONT-HINGE` — `code_prefix='CONT-HINGE'`, `code_field_keys=["material","mount","length"]`, item_type_slug=`hardware-cont-hinge`
+- **close_it family rows (Phase 2):**
+  - `CLOSER` — `code_prefix='CLOSER'`, `code_field_keys=["closer_mount","closer_material","closer_arm_type"]`, item_type_slug=`hardware-closer`; options: Header Mount (HM), Door Mount (DM) × Cast Iron (CI), Aluminum (ALUM) × Cushioned Arm (CUSH), Hold Open Stop Arm (HOS), Hold Open Spring Arm (HOSP), Fusible Link Arm (FL), Parallel Arm (PA)
+- **latch_it family rows (Phase 2):**
+  - `DEADBOLT` — `code_prefix='DEADBOLT'`, `code_field_keys=["deadbolt_function"]`, item_type_slug=`hardware-deadbolt`; options: Key On Side (KOS), Key Both Sides (KBS)
+  - `LOCKSET` — `code_prefix='LOCKSET'`, `code_field_keys=["lockset_type"]`, item_type_slug=`hardware-lockset`; options: Cylindrical (CYLI), Mortise (MORT)
+  - `PANIC` — `code_prefix='PANIC'`, `code_field_keys=["panic_type"]`, item_type_slug=`hardware-panic`; options: Rim (RIM), Mortise (MORT), SVR (SVR), CVR (CVR)
+- **protect_it family rows (Phase 2):**
+  - `WEATHERSTRIP` — `code_prefix='WSTRIP'`, `code_field_keys=["weatherstrip_type"]`, item_type_slug=`hardware-weatherstrip`; options: Adhesive (ADHES), Kerf (KERF), Screw-On (SCREW), Aluminum (ALUM)
+  - `THRESHOLD` — `code_prefix='THRESH'`, `code_field_keys=["threshold_type"]`, item_type_slug=`hardware-threshold`; options: Flat (FLAT), Panic (PANIC), Notched (NOTCH)
 
 **Migration:** `create_hardware_catalog_table` (applied 2026-04-07)
+**Migration:** `add_hardware_progressive_disclosure_columns` (applied 2026-05-12) — added `is_family`, `is_legacy`, `code_prefix`, `code_field_keys`, `label_template`; backfilled `is_legacy=true` on all 66 existing rows
+**Migration:** `seed_swing_it_hardware_families` (applied 2026-05-12) — seeded HINGE and CONT-HINGE family rows; field_definitions (hinge_type, hinge_material, hinge_size, hinge_pin, hinge_gauge, mount, length) with code_token options; item_type_registry slugs `hardware-hinge` / `hardware-cont-hinge`; item_type_base_fields wiring; gauge-depends-on-type dependency
+**Migration:** `seed_close_latch_protect_hardware_families` (applied 2026-05-12) — seeded 6 new family rows for CloseIt/LatchIt/ProtectIt (CLOSER, DEADBOLT, LOCKSET, PANIC, WEATHERSTRIP, THRESHOLD); 8 new field_definitions; all field_value_options with code_tokens; item_type_registry slugs; item_type_base_fields wiring
 
 ## Security Status
 

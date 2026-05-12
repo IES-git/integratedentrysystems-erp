@@ -37,12 +37,9 @@ import {
   addItemField,
   removeItemField,
   reorderItemFields,
-  BIG_FIVE_KEYS,
 } from '@/lib/item-fields-api';
 import { getFieldDefinitions } from '@/lib/estimates-api';
 import { FieldOptionsPanel } from './FieldOptionsPanel';
-
-const BIG_FIVE_SET = new Set<string>(BIG_FIVE_KEYS);
 
 // ---------------------------------------------------------------------------
 // Sortable base-field row (grip handle only — no delete for base fields)
@@ -81,7 +78,7 @@ function SortableBaseFieldRow({ field, canonicalCode }: SortableBaseFieldRowProp
           field={field.definition}
           dataSource={{ canonicalCode }}
           isAdder={field.isAdder}
-          isBigFive={BIG_FIVE_SET.has(field.definition.fieldKey)}
+          isBigFive={true}
           overrideLabel={effectiveLabelOverride}
         />
       </div>

@@ -35,7 +35,13 @@ import { mergeDependencies } from './field-dependencies';
 // ---------------------------------------------------------------------------
 
 export const BIG_FIVE_KEYS = ['series', 'gauge', 'opening_width', 'opening_height'] as const;
-const BIG_FIVE_SET = new Set<string>(BIG_FIVE_KEYS);
+
+/**
+ * Sort-order threshold that separates "base" fields from "other" fields in
+ * item_type_base_fields.  Must match the value in CategoryFieldsWizard.tsx
+ * so both pages show the same BASE / OTHER split.
+ */
+const OTHER_FIELDS_SORT_OFFSET = 100;
 
 // ---------------------------------------------------------------------------
 // Row mappers
@@ -67,6 +73,7 @@ function mapFieldValueOption(row: any): FieldValueOption {
     usageCount: row.usage_count ?? 0,
     sortOrder: row.sort_order ?? 0,
     isDefault: row.is_default ?? false,
+    codeToken: row.code_token ?? null,
     createdAt: row.created_at,
   };
 }
@@ -80,6 +87,7 @@ function mapItemTypeFieldValueOption(row: any): ItemTypeFieldValueOption {
     value: row.value,
     sortOrder: row.sort_order ?? 0,
     isDefault: row.is_default ?? false,
+    codeToken: row.code_token ?? null,
     createdAt: row.created_at,
   };
 }
@@ -170,12 +178,18 @@ async function ensureOverrideRow(
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the merged field view for a specific door item type.
+ * Returns the merged field view for a specific catalog item.
+ *
+ * BASE FIELDS vs OTHER FIELDS mirrors the split in CategoryFieldsWizard:
+ * fields from item_type_base_fields with sort_order < 100 appear as base fields;
+ * those with sort_order >= 100 appear as other fields.  This ensures the Items
+ * page (per-item view) always shows the same grouping as the Item Fields /
+ * Item Management page (type-level view).
  *
  * Resolution order:
- * 1. Global field set: Big Five + any field_definitions linked via item_type_fields
- *    for this canonical code. Fields locally added only in item_type_field_overrides
- *    (is_added_locally = true) are appended at the end.
+ * 1. Type-level base fields from item_type_base_fields (master default for the
+ *    item's type).  Fields locally added via item_type_field_overrides
+ *    (is_added_locally = true) are appended at the end of other fields.
  * 2. Per-item overrides from item_type_field_overrides win over global defaults
  *    for label, required, adder, hidden, sortOrder.
  * 3. Options: if any item_type_field_value_options rows exist for the
@@ -198,7 +212,6 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
 
   // Fetch all data in parallel
   const [
-    bigFiveResult,
     typeBaseFieldsResult,
     itemTypeFieldsResult,
     overridesResult,
@@ -209,11 +222,6 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
     typeDepsResult,
     depOverridesResult,
   ] = await Promise.all([
-    // Big Five are structural — fetch regardless of approval status
-    supabase
-      .from('field_definitions')
-      .select('*')
-      .in('field_key', [...BIG_FIVE_KEYS]),
     // Type-level base fields — the master default set for this item type
     itemTypeSlug
       ? supabase
@@ -267,7 +275,6 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
       .eq('canonical_code', canonicalCode),
   ]);
 
-  if (bigFiveResult.error) throw new Error(`Failed to fetch Big Five fields: ${bigFiveResult.error.message}`);
   if (itemTypeFieldsResult.error) throw new Error(`Failed to fetch item type fields: ${itemTypeFieldsResult.error.message}`);
   if (overridesResult.error) throw new Error(`Failed to fetch overrides: ${overridesResult.error.message}`);
 
@@ -362,62 +369,54 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
     };
   }
 
-  // Build Big Five views (sort by the BIG_FIVE_KEYS order)
-  const bigFiveDefs = new Map<string, FieldDefinition>();
-  for (const row of bigFiveResult.data ?? []) {
-    const def = mapFieldDefinition(row);
-    bigFiveDefs.set(def.fieldKey, def);
-  }
+  // Build base and other field views from item_type_base_fields, using the same
+  // sort_order threshold as CategoryFieldsWizard:
+  //   sort_order 0–99  (<  OTHER_FIELDS_SORT_OFFSET) → BASE FIELDS
+  //   sort_order 100+  (>= OTHER_FIELDS_SORT_OFFSET) → OTHER FIELDS
+  // Per-item overrides (item_type_field_overrides) are applied on top for both sections.
+  const seenIds = new Set<string>();
+  const baseFieldViews: ItemFieldView[] = [];
+  const otherFromTypeBase: ItemFieldView[] = [];
 
-  const baseFields: ItemFieldView[] = BIG_FIVE_KEYS.flatMap((key, i) => {
-    const def = bigFiveDefs.get(key);
-    if (!def) return [];
-    const view = buildFieldView(def, i);
-    return view.isHidden ? [] : [view];
-  }).sort((a, b) => a.sortOrder - b.sortOrder);
-
-  // Build "other" fields by merging two sources (deduplicated):
-  //   1. Type-level base fields from item_type_base_fields (the master default for this type)
-  //   2. Per-item legacy fields from item_type_fields (for existing/discovered items)
-  // Per-item overrides (item_type_field_overrides) are applied on top for both sources.
-  const seenIds = new Set<string>(baseFields.map((f) => f.definition.id));
-  // Track insertion order with sort keys
-  const mergedOther = new Map<string, { def: FieldDefinition; sortOrder: number }>();
-
-  // 1. Type-level base fields (non-Big-Five) — inherit for ALL items of this type
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const row of (typeBaseFieldsResult.data ?? []) as any[]) {
     if (!row.field_definitions) continue;
     const def = mapFieldDefinition(row.field_definitions);
-    if (seenIds.has(def.id) || BIG_FIVE_SET.has(def.fieldKey)) continue;
-    if (!mergedOther.has(def.id)) {
-      mergedOther.set(def.id, { def, sortOrder: row.sort_order ?? 9999 });
+    if (seenIds.has(def.id)) continue;
+    seenIds.add(def.id);
+
+    const globalSortOrder: number = row.sort_order ?? 9999;
+    const view = buildFieldView(def, globalSortOrder);
+    if (view.isHidden) continue;
+
+    if (globalSortOrder < OTHER_FIELDS_SORT_OFFSET) {
+      baseFieldViews.push(view);
+    } else {
+      otherFromTypeBase.push(view);
     }
   }
 
-  // 2. Legacy per-item fields from item_type_fields (backward compat for existing items)
+  const baseFields: ItemFieldView[] = baseFieldViews.sort((a, b) => a.sortOrder - b.sortOrder);
+
+  // Legacy per-item fields from item_type_fields (backward compat for items that predate
+  // item_type_base_fields, or that have extra fields discovered during data import).
+  const legacyOther: ItemFieldView[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const row of (itemTypeFieldsResult.data ?? []) as any[]) {
     if (!row.field_definitions) continue;
     const def = mapFieldDefinition(row.field_definitions);
-    if (seenIds.has(def.id) || BIG_FIVE_SET.has(def.fieldKey)) continue;
-    if (!mergedOther.has(def.id)) {
-      mergedOther.set(def.id, { def, sortOrder: def.sortOrder });
-    }
+    if (seenIds.has(def.id)) continue;
+    seenIds.add(def.id);
+
+    const view = buildFieldView(def, def.sortOrder);
+    if (!view.isHidden) legacyOther.push(view);
   }
 
-  const otherFromSources: ItemFieldView[] = Array.from(mergedOther.values())
-    .map(({ def, sortOrder }) => {
-      const view = buildFieldView(def, sortOrder);
-      return view;
-    })
-    .filter((v) => !v.isHidden);
-
-  // 3. Append locally-added fields (is_added_locally = true, not in type template or legacy)
+  // Locally-added fields (is_added_locally = true in item_type_field_overrides, not yet
+  // in the type template or legacy set).
   const locallyAdded: ItemFieldView[] = [];
   for (const override of overridesByFieldId.values()) {
-    if (!override.isAddedLocally || mergedOther.has(override.fieldDefinitionId) || seenIds.has(override.fieldDefinitionId)) continue;
-    // Fetch the field_definition for this override
+    if (!override.isAddedLocally || seenIds.has(override.fieldDefinitionId)) continue;
     const { data: defRow } = await supabase
       .from('field_definitions')
       .select('*')
@@ -429,7 +428,7 @@ export async function getItemFieldsView(canonicalCode: string): Promise<ItemFiel
     if (!view.isHidden) locallyAdded.push(view);
   }
 
-  const otherFields = [...otherFromSources, ...locallyAdded].sort(
+  const otherFields = [...otherFromTypeBase, ...legacyOther, ...locallyAdded].sort(
     (a, b) => a.sortOrder - b.sortOrder
   );
 
@@ -904,6 +903,7 @@ function mapItemTypeRegistryEntry(row: any): ItemTypeRegistryEntry {
     description: row.description ?? null,
     sortOrder: row.sort_order ?? 0,
     isSystem: row.is_system ?? false,
+    parentSlug: row.parent_slug ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -922,11 +922,17 @@ function mapItemTypeBaseField(row: any): ItemTypeBaseField {
   };
 }
 
-/** Returns all item types from item_type_registry ordered by sort_order. */
+/**
+ * Returns top-level item types from item_type_registry ordered by sort_order.
+ * Hardware sub-family slugs (hardware-hinge, hardware-closer, etc.) are
+ * intentionally excluded — they are internal to the progressive-disclosure
+ * wizard and should not appear in the Item Fields, Items, or Pricing pages.
+ */
 export async function getItemTypeRegistry(): Promise<ItemTypeRegistryEntry[]> {
   const { data, error } = await supabase
     .from('item_type_registry')
     .select('*')
+    .not('slug', 'like', 'hardware-%')
     .order('sort_order', { ascending: true })
     .order('name', { ascending: true });
   if (error) throw new Error(`Failed to fetch item type registry: ${error.message}`);

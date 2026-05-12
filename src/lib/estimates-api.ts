@@ -413,6 +413,7 @@ export async function addEstimateItem(
     openingId?: string | null;
     parentItemId?: string | null;
     subcategory?: string | null;
+    itemType?: string | null;
   }
 ): Promise<EstimateItem> {
   const { data, error } = await supabase
@@ -426,6 +427,7 @@ export async function addEstimateItem(
       opening_id: item.openingId ?? null,
       parent_item_id: item.parentItemId ?? null,
       subcategory: item.subcategory ?? null,
+      item_type: item.itemType ?? null,
     })
     .select()
     .single();
@@ -1073,8 +1075,76 @@ function mapFieldValueOptionRow(row: any): FieldValueOption {
     usageCount: row.usage_count ?? 0,
     sortOrder: row.sort_order ?? 0,
     isDefault: row.is_default ?? false,
+    codeToken: row.code_token ?? null,
     createdAt: row.created_at,
   };
+}
+
+/**
+ * For a set of field definitions, returns the best default value for each field.
+ * Priority:
+ *   1. item-specific is_default from item_type_field_value_options
+ *   2. global is_default from field_value_options
+ *   3. first option by sort_order from field_value_options
+ *
+ * Returns a map of fieldKey → default value string (only populated entries included).
+ */
+export async function getDefaultValuesForFields(
+  fieldDefinitionIds: string[],
+  canonicalCode: string,
+  fieldKeyById: Record<string, string>
+): Promise<Record<string, string>> {
+  if (fieldDefinitionIds.length === 0) return {};
+
+  const [globalResult, itemResult] = await Promise.all([
+    supabase
+      .from('field_value_options')
+      .select('field_definition_id, value, is_default, sort_order')
+      .in('field_definition_id', fieldDefinitionIds)
+      .order('sort_order', { ascending: true })
+      .order('value', { ascending: true }),
+    supabase
+      .from('item_type_field_value_options')
+      .select('field_definition_id, value, is_default, sort_order')
+      .eq('canonical_code', canonicalCode)
+      .in('field_definition_id', fieldDefinitionIds)
+      .order('sort_order', { ascending: true }),
+  ]);
+
+  if (globalResult.error) throw new Error(`Failed to fetch field options: ${globalResult.error.message}`);
+  if (itemResult.error) throw new Error(`Failed to fetch item field options: ${itemResult.error.message}`);
+
+  const globalByDef = new Map<string, Array<{ value: string; isDefault: boolean }>>();
+  for (const row of (globalResult.data ?? []) as any[]) {
+    const list = globalByDef.get(row.field_definition_id) ?? [];
+    list.push({ value: row.value, isDefault: row.is_default ?? false });
+    globalByDef.set(row.field_definition_id, list);
+  }
+
+  const itemByDef = new Map<string, Array<{ value: string; isDefault: boolean }>>();
+  for (const row of (itemResult.data ?? []) as any[]) {
+    const list = itemByDef.get(row.field_definition_id) ?? [];
+    list.push({ value: row.value, isDefault: row.is_default ?? false });
+    itemByDef.set(row.field_definition_id, list);
+  }
+
+  const result: Record<string, string> = {};
+  for (const defId of fieldDefinitionIds) {
+    const fieldKey = fieldKeyById[defId];
+    if (!fieldKey) continue;
+
+    const itemOpts = itemByDef.get(defId) ?? [];
+    const itemDefault = itemOpts.find((o) => o.isDefault);
+    if (itemDefault) { result[fieldKey] = itemDefault.value; continue; }
+
+    const globalOpts = globalByDef.get(defId) ?? [];
+    const globalDefault = globalOpts.find((o) => o.isDefault);
+    if (globalDefault) { result[fieldKey] = globalDefault.value; continue; }
+
+    if (globalOpts.length > 0) { result[fieldKey] = globalOpts[0].value; }
+  }
+
+  return result;
 }
 
 /** Fetch options for a field definition, ordered by sort_order then alphabetically. */
@@ -1371,7 +1441,7 @@ export async function createManualItem(input: {
 export async function getItemTypes(): Promise<ItemType[]> {
   const KEY_FIELDS = ['series', 'material', 'gauge', 'opening_width', 'opening_height'] as const;
 
-  const [itemsResult, keyFieldsResult, catalogResult] = await Promise.all([
+  const [itemsResult, keyFieldsResult, catalogResult, registryResult] = await Promise.all([
     supabase.from('estimate_items').select('canonical_code, item_label, item_type'),
     supabase
       .from('item_fields')
@@ -1382,6 +1452,12 @@ export async function getItemTypes(): Promise<ItemType[]> {
       .select('*')
       .eq('active', true)
       .order('sort_order', { ascending: true }),
+    supabase
+      .from('item_type_registry')
+      .select('slug, name')
+      .is('parent_slug', null)
+      .not('slug', 'in', '("doors","frames","hardware")')
+      .eq('is_system', false),
   ]);
 
   if (itemsResult.error) throw new Error(`Failed to fetch item types: ${itemsResult.error.message}`);
@@ -1519,21 +1595,40 @@ export async function getItemTypes(): Promise<ItemType[]> {
 
   // Merge hardware catalog items into the hardware category, de-duped by canonical_code.
   // Catalog items that already appear as discovered items are skipped to avoid duplication.
+  // Legacy leaf rows (is_legacy = true) are excluded so they no longer surface in the picker;
+  // they still exist in the DB so old estimates round-trip correctly.
   const discoveredCodes = new Set(
     discoveredItems.flatMap((i) => i.canonicalCodes)
   );
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const catalogItems: ItemType[] = (catalogResult.data ?? []).map((row: any) => ({
+  const catalogItems: ItemType[] = (catalogResult.data ?? []).filter((row: any) => !(row.is_legacy ?? false)).map((row: any) => ({
     canonicalCode: row.canonical_code,
     canonicalCodes: [row.canonical_code],
     itemLabel: row.name,
     usageCount: 0,
     category: 'hardware' as ItemCategory,
     subcategory: row.subcategory as HardwareSubcategory,
+    isFamily: row.is_family ?? false,
   })).filter((item) => !discoveredCodes.has(item.canonicalCode));
 
-  return [...discoveredItems, ...catalogItems];
+  // Add virtual catalog entries for registry-defined categories (e.g. panels) that
+  // don't yet have any estimate_items rows. This ensures the AddItemModal can show
+  // at least one selectable item for each registered non-hardware category.
+  const discoveredCategories = new Set(discoveredItems.map((i) => i.category));
+  const registryVirtualItems: ItemType[] = (registryResult.data ?? [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((reg: any) => !discoveredCategories.has(reg.slug))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((reg: any) => ({
+      canonicalCode: reg.slug.toUpperCase(),
+      canonicalCodes: [reg.slug.toUpperCase()],
+      itemLabel: reg.name,
+      usageCount: 0,
+      category: reg.slug as ItemCategory,
+    }));
+
+  return [...discoveredItems, ...catalogItems, ...registryVirtualItems];
 }
 
 /**
@@ -1690,6 +1785,69 @@ export async function getMostRecentFieldValuesForItem(
     }
   }
   return result;
+}
+
+/**
+ * Returns all field definitions for a given item-type category slug
+ * (from item_type_base_fields), plus any item-specific additions
+ * (from item_type_field_overrides) for the given canonical code.
+ * This is the primary source of fields when building a new item in the wizard.
+ */
+export async function getBaseFieldsForCategory(
+  categorySlug: string,
+  canonicalCode: string
+): Promise<ItemTypeField[]> {
+  const [baseResult, overrideResult] = await Promise.all([
+    supabase
+      .from('item_type_base_fields')
+      .select('id, field_definition_id, sort_order, created_at, field_definitions(*)')
+      .eq('item_type_slug', categorySlug)
+      .order('sort_order', { ascending: true }),
+    supabase
+      .from('item_type_field_overrides')
+      .select('id, canonical_code, field_definition_id, is_required, is_hidden, sort_order, created_at, updated_at, field_definitions(*)')
+      .eq('canonical_code', canonicalCode)
+      .eq('is_hidden', false)
+      .order('sort_order', { ascending: true }),
+  ]);
+
+  if (baseResult.error) throw new Error(`Failed to fetch base fields: ${baseResult.error.message}`);
+  if (overrideResult.error) throw new Error(`Failed to fetch field overrides: ${overrideResult.error.message}`);
+
+  const seen = new Set<string>();
+  const results: ItemTypeField[] = [];
+
+  for (const row of (baseResult.data ?? []) as any[]) {
+    const fd = row.field_definitions;
+    if (!fd || seen.has(row.field_definition_id)) continue;
+    seen.add(row.field_definition_id);
+    results.push({
+      id: row.id,
+      canonicalCode: categorySlug,
+      fieldDefinitionId: row.field_definition_id,
+      isRequired: false,
+      createdAt: row.created_at,
+      updatedAt: row.created_at,
+      fieldDefinition: mapFieldDefinitionRow(fd),
+    });
+  }
+
+  for (const row of (overrideResult.data ?? []) as any[]) {
+    const fd = row.field_definitions;
+    if (!fd || seen.has(row.field_definition_id)) continue;
+    seen.add(row.field_definition_id);
+    results.push({
+      id: row.id,
+      canonicalCode: row.canonical_code,
+      fieldDefinitionId: row.field_definition_id,
+      isRequired: row.is_required ?? false,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      fieldDefinition: mapFieldDefinitionRow(fd),
+    });
+  }
+
+  return results;
 }
 
 /**
@@ -1913,6 +2071,23 @@ export async function getHardwareCatalog(
   return (data ?? []).map(mapHardwareCatalogRow);
 }
 
+/**
+ * Returns active hardware family rows (is_family = true), ordered by sort_order.
+ * These are the configurable "builder" entries that drive the progressive-disclosure
+ * picker in AddItemModal: Subcategory → Family → (cascading fields) → assembled code.
+ */
+export async function getHardwareFamilies(): Promise<HardwareCatalogItem[]> {
+  const { data, error } = await supabase
+    .from('hardware_catalog')
+    .select('*')
+    .eq('is_family', true)
+    .eq('active', true)
+    .order('sort_order', { ascending: true });
+
+  if (error) throw new Error(`Failed to fetch hardware families: ${error.message}`);
+  return (data ?? []).map(mapHardwareCatalogRow);
+}
+
 /** Admin: create a new hardware catalog item. */
 export async function createHardwareCatalogItem(
   item: Omit<HardwareCatalogItem, 'id'>
@@ -2116,5 +2291,10 @@ function mapHardwareCatalogRow(row: any): HardwareCatalogItem {
     description: row.description ?? undefined,
     active: row.active,
     sortOrder: row.sort_order,
+    isFamily: row.is_family ?? false,
+    isLegacy: row.is_legacy ?? false,
+    codePrefix: row.code_prefix ?? null,
+    codeFieldKeys: row.code_field_keys ?? null,
+    labelTemplate: row.label_template ?? null,
   };
 }

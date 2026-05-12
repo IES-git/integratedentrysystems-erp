@@ -35,7 +35,9 @@ export default function PricingPage() {
   // /app/pricing → category dashboard
   return (
     <div className="flex flex-col min-h-full p-6 max-w-4xl mx-auto w-full">
-      <PricingCategoryDashboard onSelectDoors={() => navigate('/app/pricing/doors')} />
+      <PricingCategoryDashboard
+        onSelectCategory={(slug) => navigate(`/app/pricing/${slug}`)}
+      />
     </div>
   );
 }

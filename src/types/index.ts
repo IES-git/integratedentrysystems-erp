@@ -146,6 +146,8 @@ export interface FieldValueOption {
   usageCount: number;
   sortOrder: number;
   isDefault: boolean;
+  /** Abbreviation contributed to a hardware canonical_code when this option is selected (e.g. 'FM', 'SS', '80'). Null for options that produce no token. */
+  codeToken?: string | null;
   createdAt: string;
 }
 
@@ -224,6 +226,8 @@ export interface ItemTypeRegistryEntry {
   description: string | null;
   sortOrder: number;
   isSystem: boolean;
+  /** If set, this is a sub-type of the referenced parent slug and should not appear as a top-level category. */
+  parentSlug: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -250,6 +254,16 @@ export interface HardwareCatalogItem {
   description?: string;
   active: boolean;
   sortOrder: number;
+  /** True for new configurable family rows; false for legacy leaf rows. */
+  isFamily?: boolean;
+  /** True for the original 66 leaf rows seeded before progressive-disclosure. */
+  isLegacy?: boolean;
+  /** Required when isFamily=true. Top-level prefix for the assembled canonical_code (e.g. 'HINGE', 'CONT-HINGE'). */
+  codePrefix?: string | null;
+  /** Ordered list of field_definitions.field_key values whose selected option tokens build the rest of the code. */
+  codeFieldKeys?: string[] | null;
+  /** Optional human-readable template for the item label (e.g. 'Hinge - {hinge_type} {material}'). Falls back to name. */
+  labelTemplate?: string | null;
 }
 
 export interface ItemType {
@@ -266,6 +280,8 @@ export interface ItemType {
   openingWidth?: string;
   openingHeight?: string;
   subcategory?: HardwareSubcategory;
+  /** True for hardware family rows that require the progressive-disclosure wizard. */
+  isFamily?: boolean;
 }
 
 export interface ItemTypeField {
@@ -538,6 +554,8 @@ export interface ItemTypeFieldValueOption {
   value: string;
   sortOrder: number;
   isDefault: boolean;
+  /** Abbreviation contributed to a hardware canonical_code when this option is selected. Null for options that produce no token. */
+  codeToken?: string | null;
   createdAt: string;
 }
 

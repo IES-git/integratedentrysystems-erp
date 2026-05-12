@@ -15,25 +15,25 @@ export const HARDWARE_SUBCATEGORY_LABEL: Record<HardwareSubcategory, string> = {
 };
 
 export interface HardwareGroup<T> {
-  key: HardwareSubcategory | 'other';
+  key: HardwareSubcategory;
   label: string;
   items: T[];
 }
 
 /**
  * Groups hardware items by subcategory in canonical display order.
- * Items without a subcategory (null / undefined) land in the "Other Hardware" bucket.
+ * Items without a subcategory (null / undefined) are excluded from the output.
  */
 export function groupHardwareBySubcategory<
   T extends { subcategory?: HardwareSubcategory | null },
 >(items: T[]): HardwareGroup<T>[] {
-  const buckets = new Map<HardwareSubcategory | 'other', T[]>();
+  const buckets = new Map<HardwareSubcategory, T[]>();
 
   for (const item of items) {
-    const key: HardwareSubcategory | 'other' = item.subcategory ?? 'other';
-    const existing = buckets.get(key) ?? [];
+    if (!item.subcategory) continue;
+    const existing = buckets.get(item.subcategory) ?? [];
     existing.push(item);
-    buckets.set(key, existing);
+    buckets.set(item.subcategory, existing);
   }
 
   const result: HardwareGroup<T>[] = [];
@@ -43,11 +43,6 @@ export function groupHardwareBySubcategory<
     if (group?.length) {
       result.push({ key: sub, label: HARDWARE_SUBCATEGORY_LABEL[sub], items: group });
     }
-  }
-
-  const other = buckets.get('other');
-  if (other?.length) {
-    result.push({ key: 'other', label: 'Other Hardware', items: other });
   }
 
   return result;

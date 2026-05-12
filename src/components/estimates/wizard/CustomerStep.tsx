@@ -406,7 +406,7 @@ export function CustomerStep({
       {/* Action */}
       <div className="flex justify-end pt-6 border-t mt-6">
         <Button onClick={onNext} disabled={!canProceed} size="lg">
-          Continue to Line Items
+          Continue to Openings
         </Button>
       </div>
     </div>

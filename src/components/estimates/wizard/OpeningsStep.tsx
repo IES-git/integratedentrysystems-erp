@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Plus,
   Layers,
@@ -7,6 +8,7 @@ import {
   DoorOpen,
   Square,
   Wrench,
+  LayoutPanelLeft,
   AlertCircle,
   Copy,
   ChevronDown,
@@ -31,7 +33,6 @@ import {
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import { BuildOpeningDialog } from './BuildOpeningDialog';
 import { ChooseExistingOpeningDialog } from './ChooseExistingOpeningDialog';
-import { TemplateOpeningDialog } from './TemplateOpeningDialog';
 import type { EstimateOpeningWithItems, OpeningTemplateType } from '@/types';
 
 interface OpeningsStepProps {
@@ -54,13 +55,19 @@ interface OpeningCardProps {
   deleting: boolean;
 }
 
-// Label-based category detection is best-effort — item labels stored in the DB
-// come from ItemType.itemLabel (the series name) and may not contain "door"/"frame".
+// Detect item category from the stored item_type first, then fall back to label heuristics.
 // opening.items already contains ONLY top-level items; hardware is nested in item.hardware.
-function getItemCategory(label: string): 'door' | 'frame' | 'item' {
+function getItemCategory(
+  label: string,
+  itemType?: string | null
+): 'door' | 'frame' | 'panel' | 'item' {
+  if (itemType === 'panels') return 'panel';
+  if (itemType === 'doors') return 'door';
+  if (itemType === 'frames') return 'frame';
   const l = label.toLowerCase();
   if (l.includes('door')) return 'door';
   if (l.includes('frame')) return 'frame';
+  if (l.includes('panel')) return 'panel';
   return 'item';
 }
 
@@ -206,9 +213,15 @@ function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting }: 
           ) : (
             <>
               {opening.items.map((item) => {
-                const cat = getItemCategory(item.itemLabel);
+                const cat = getItemCategory(item.itemLabel, item.itemType);
                 const Icon =
-                  cat === 'door' ? DoorOpen : cat === 'frame' ? Square : Layers;
+                  cat === 'door'
+                    ? DoorOpen
+                    : cat === 'frame'
+                    ? Square
+                    : cat === 'panel'
+                    ? LayoutPanelLeft
+                    : Layers;
                 return (
                   <div key={item.id} className="space-y-1">
                     <div className="flex items-center gap-2 rounded-md bg-background border px-3 py-2">
@@ -301,6 +314,7 @@ export function OpeningsStep({
   finishLoading = false,
   backLabel = 'Back to Customer',
 }: OpeningsStepProps) {
+  const navigate = useNavigate();
   const [openings, setOpenings] = useState<EstimateOpeningWithItems[]>([]);
   // resolvedId tracks the actual DB estimate ID once it exists. It starts from
   // the prop (real for existing estimates, null for new ones) and is updated
@@ -310,8 +324,6 @@ export function OpeningsStep({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [buildDialogOpen, setBuildDialogOpen] = useState(false);
   const [chooseDialogOpen, setChooseDialogOpen] = useState(false);
-  const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
-  const [selectedTemplateType, setSelectedTemplateType] = useState<OpeningTemplateType>('single');
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editingOpening, setEditingOpening] = useState<EstimateOpeningWithItems | null>(null);
   const [creatingEstimate, setCreatingEstimate] = useState(false);
@@ -349,7 +361,7 @@ export function OpeningsStep({
     }
   };
 
-  // Open a dialog, lazily creating the estimate first if needed.
+  // Navigate to the new opening page or open a dialog, lazily creating the estimate first.
   const openDialog = async (
     type: 'template' | 'build' | 'choose',
     templateType?: OpeningTemplateType
@@ -357,8 +369,9 @@ export function OpeningsStep({
     const id = await getOrCreateId();
     if (!id) return;
     if (type === 'template') {
-      setSelectedTemplateType(templateType ?? 'single');
-      setTemplateDialogOpen(true);
+      navigate(
+        `/app/estimates/${id}/openings/new?type=${templateType ?? 'single'}&count=${openings.length}`
+      );
     } else if (type === 'build') {
       setBuildDialogOpen(true);
     } else {
@@ -420,15 +433,6 @@ export function OpeningsStep({
             onUpdated={handleOpeningUpdated}
             openingCount={openings.length}
             editingOpening={editingOpening ?? undefined}
-          />
-
-          <TemplateOpeningDialog
-            estimateId={resolvedId}
-            open={templateDialogOpen}
-            onOpenChange={setTemplateDialogOpen}
-            onSaved={handleOpeningSaved}
-            openingCount={openings.length}
-            initialTemplateType={selectedTemplateType}
           />
 
           <ChooseExistingOpeningDialog

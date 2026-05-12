@@ -242,9 +242,9 @@ export default function ItemManagementPage() {
     } catch {
       // best-effort — fallback to hardcoded system types if registry fails
       setItemTypeRegistry([
-        { id: 'doors', name: 'Doors', slug: 'doors', icon: 'DoorOpen', description: null, sortOrder: 0, isSystem: true, createdAt: '' , updatedAt: '' },
-        { id: 'frames', name: 'Frames', slug: 'frames', icon: 'Square', description: null, sortOrder: 1, isSystem: true, createdAt: '', updatedAt: '' },
-        { id: 'hardware', name: 'Hardware', slug: 'hardware', icon: 'Wrench', description: null, sortOrder: 2, isSystem: true, createdAt: '', updatedAt: '' },
+        { id: 'doors', name: 'Doors', slug: 'doors', icon: 'DoorOpen', description: null, sortOrder: 0, isSystem: true, parentSlug: null, createdAt: '' , updatedAt: '' },
+        { id: 'frames', name: 'Frames', slug: 'frames', icon: 'Square', description: null, sortOrder: 1, isSystem: true, parentSlug: null, createdAt: '', updatedAt: '' },
+        { id: 'hardware', name: 'Hardware', slug: 'hardware', icon: 'Wrench', description: null, sortOrder: 2, isSystem: true, parentSlug: null, createdAt: '', updatedAt: '' },
       ]);
     } finally {
       setRegistryLoading(false);
@@ -1039,7 +1039,7 @@ export default function ItemManagementPage() {
                 {label}
               </div>
             ))
-          : itemTypeRegistry.map((itemType) => {
+          : itemTypeRegistry.filter((t) => t.parentSlug === null).map((itemType) => {
               const Icon = ITEM_TYPE_ICON_MAP[itemType.icon ?? ''] ?? Package;
               const count = categoryCounts[itemType.slug] ?? 0;
               const isActive = activeCategory === itemType.slug;

@@ -149,7 +149,7 @@ export function CategoryDashboard({ onSelectCategory }: CategoryDashboardProps) 
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {entries.map((entry) => (
+            {entries.filter((e) => e.parentSlug === null).map((entry) => (
               <div
                 key={entry.slug}
                 className="group relative flex flex-col gap-4 rounded-2xl border bg-card p-6 text-left shadow-sm hover:border-primary hover:shadow-md transition-all cursor-pointer"
@@ -202,7 +202,7 @@ export function CategoryDashboard({ onSelectCategory }: CategoryDashboardProps) 
               </div>
             ))}
 
-            {entries.length === 0 && !loading && (
+            {entries.filter((e) => e.parentSlug === null).length === 0 && !loading && (
               <div className="col-span-full flex flex-col items-center gap-3 py-16 text-muted-foreground">
                 <Package className="h-10 w-10 opacity-30" />
                 <p className="text-sm">No item types yet. Add one to get started.</p>
