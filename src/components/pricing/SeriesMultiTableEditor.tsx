@@ -64,8 +64,11 @@ export function SeriesMultiTableEditor({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Manufacturer picker popover
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // Manufacturer picker — two separate open states so tab-bar and empty-state
+  // Popovers don't fight each other (shared state causes Radix to close both).
+  const [tabPickerOpen, setTabPickerOpen] = useState(false);
+  const [emptyPickerOpen, setEmptyPickerOpen] = useState(false);
+  const pickerOpen = tabPickerOpen || emptyPickerOpen;
   const [allManufacturers, setAllManufacturers] = useState<Company[]>([]);
   const [loadingMfr, setLoadingMfr] = useState(false);
   const [mfrSearch, setMfrSearch] = useState('');
@@ -110,6 +113,12 @@ export function SeriesMultiTableEditor({
       .finally(() => setLoadingMfr(false));
   }, [pickerOpen, allManufacturers.length, toast]);
 
+  const closeAllPickers = () => {
+    setTabPickerOpen(false);
+    setEmptyPickerOpen(false);
+    setMfrSearch('');
+  };
+
   // ---------------------------------------------------------------------------
   // Derive available manufacturers (not already assigned to any table)
   // ---------------------------------------------------------------------------
@@ -128,8 +137,7 @@ export function SeriesMultiTableEditor({
 
   async function handleSelectManufacturer(company: Company) {
     setCreating(true);
-    setPickerOpen(false);
-    setMfrSearch('');
+    closeAllPickers();
     try {
       const created = await createPricingTable(
         'doors',
@@ -250,7 +258,7 @@ export function SeriesMultiTableEditor({
             ))}
 
             {/* Add manufacturer tab — creates a new separate pricing table */}
-            <Popover open={pickerOpen} onOpenChange={(o) => { setPickerOpen(o); if (!o) setMfrSearch(''); }}>
+            <Popover open={tabPickerOpen} onOpenChange={(o) => { setTabPickerOpen(o); if (!o) setMfrSearch(''); }}>
               <PopoverTrigger asChild>
                 <button
                   className="flex items-center gap-1.5 px-3 py-2.5 text-sm text-muted-foreground hover:text-foreground transition-colors shrink-0 border-b-2 border-transparent disabled:opacity-50"
@@ -335,7 +343,7 @@ export function SeriesMultiTableEditor({
               <p className="text-sm text-muted-foreground mb-5">
                 Add a pricing table for each manufacturer that supplies this series.
               </p>
-              <Popover open={pickerOpen} onOpenChange={(o) => { setPickerOpen(o); if (!o) setMfrSearch(''); }}>
+              <Popover open={emptyPickerOpen} onOpenChange={(o) => { setEmptyPickerOpen(o); if (!o) setMfrSearch(''); }}>
                 <PopoverTrigger asChild>
                   <Button variant="outline" className="gap-1.5" title="Create a new pricing table for a manufacturer">
                     <Plus className="h-4 w-4" />
