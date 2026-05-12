@@ -436,8 +436,8 @@ export default function ItemManagementPage() {
       });
     } else {
       setExpandedCodes((prev) => new Set(prev).add(canonicalCode));
-      // Door items use ItemFieldsPanel which handles its own data loading
-      if (item.category !== 'doors' && !itemTypeFieldsMap.has(canonicalCode)) {
+      // Door and Frame items use ItemFieldsPanel which handles its own data loading
+      if (item.category !== 'doors' && item.category !== 'frames' && !itemTypeFieldsMap.has(canonicalCode)) {
         loadFieldsForCode(canonicalCode, canonicalCodes);
       }
     }
@@ -1425,7 +1425,7 @@ export default function ItemManagementPage() {
                 {/* Expanded Field Management Panel */}
                 {isExpanded && (
                   <div className="border-t">
-                    {item.category === 'doors' ? (
+                    {(item.category === 'doors' || item.category === 'frames') ? (
                       <ItemFieldsPanel canonicalCode={item.canonicalCode} />
                     ) : isFieldsLoading ? (
                       <div className="flex items-center justify-center py-8">
