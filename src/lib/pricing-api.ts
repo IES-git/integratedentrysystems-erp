@@ -9,6 +9,8 @@ import type {
   PricingTable,
   PricingTableVendor,
   PricingTableSummary,
+  PricingTableItem,
+  LitesLouversGlassGroupedListResult,
   PricingColumn,
   PricingRow,
   PricingCell,
@@ -16,6 +18,7 @@ import type {
   DimensionCriteria,
   ColumnCriteria,
   DoorSeriesSummary,
+  LitesLouversGlassItemSummary,
   Company,
 } from '@/types';
 
@@ -48,6 +51,7 @@ function mapColumn(row: Record<string, unknown>): PricingColumn {
     pricingTableId: row.pricing_table_id as string,
     label: row.label as string,
     criteria: (row.criteria ?? {}) as ColumnCriteria,
+    parentColumnId: (row.parent_column_id as string | null) ?? null,
     sortOrder: row.sort_order as number,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -212,6 +216,258 @@ export async function listDoorSeries(): Promise<DoorSeriesSummary[]> {
     fieldValueOptionId: opt.id,
     pricingTables: tableMap.get(opt.value) ?? [],
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Frame series list
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns all frame series, derived from estimate_items where item_type = 'frames'.
+ * Uses the same series-grouping logic as listDoorSeries but for frames.
+ */
+export async function listFrameSeries(): Promise<DoorSeriesSummary[]> {
+  // 1. Fetch the series field definition id (may not exist)
+  const { data: fieldDef, error: fieldDefError } = await supabase
+    .from('field_definitions')
+    .select('id')
+    .eq('field_key', 'series')
+    .maybeSingle();
+
+  if (fieldDefError) throw new Error(fieldDefError.message);
+
+  // 2. Fetch global series options
+  const globalOptions: { id: string; value: string }[] = [];
+  if (fieldDef) {
+    const { data: options, error: optionsError } = await supabase
+      .from('field_value_options')
+      .select('id, value')
+      .eq('field_definition_id', fieldDef.id)
+      .order('sort_order', { ascending: true })
+      .order('value', { ascending: true });
+
+    if (optionsError) throw new Error(optionsError.message);
+    globalOptions.push(...(options ?? []));
+  }
+
+  // 3. Fetch all frame items and derive series names
+  const { data: frameItems, error: frameItemsError } = await supabase
+    .from('estimate_items')
+    .select('canonical_code, item_label, item_fields(field_key, field_value)')
+    .eq('item_type', 'frames');
+
+  if (frameItemsError) throw new Error(frameItemsError.message);
+
+  const codeData = new Map<string, { itemLabel: string; seriesCounts: Map<string, number> }>();
+  for (const item of frameItems ?? []) {
+    if (!codeData.has(item.canonical_code)) {
+      codeData.set(item.canonical_code, { itemLabel: item.item_label, seriesCounts: new Map() });
+    }
+    const entry = codeData.get(item.canonical_code)!;
+    const fields = item.item_fields as { field_key: string; field_value: string | null }[] | null;
+    const seriesValue = fields?.find((f) => f.field_key === 'series')?.field_value;
+    if (seriesValue) {
+      entry.seriesCounts.set(seriesValue, (entry.seriesCounts.get(seriesValue) ?? 0) + 1);
+    }
+  }
+
+  const itemSeriesValues = new Set<string>();
+  for (const { itemLabel, seriesCounts } of codeData.values()) {
+    const name =
+      seriesCounts.size > 0
+        ? [...seriesCounts.entries()].reduce((a, b) => (b[1] > a[1] ? b : a))[0]
+        : itemLabel;
+    if (name) itemSeriesValues.add(name);
+  }
+
+  const globalValueSet = new Set(globalOptions.map((o) => o.value));
+  const extraOptions = [...itemSeriesValues]
+    .filter((v) => !globalValueSet.has(v))
+    .sort()
+    .map((v) => ({ id: null as string | null, value: v }));
+
+  const allOptions: { id: string | null; value: string }[] = [...globalOptions, ...extraOptions];
+
+  if (allOptions.length === 0) return [];
+
+  // 4. Fetch pricing tables for 'frames'
+  const { data: tables, error: tablesError } = await supabase
+    .from('pricing_tables')
+    .select(`
+      id,
+      series_value,
+      name,
+      updated_at,
+      pricing_table_vendors (
+        company_id,
+        companies ( id, name )
+      ),
+      pricing_columns ( id ),
+      pricing_rows ( id )
+    `)
+    .eq('category', 'frames');
+
+  if (tablesError) throw new Error(tablesError.message);
+
+  const tableMap = new Map<string, PricingTableSummary[]>();
+  for (const t of tables ?? []) {
+    const vendors = (t.pricing_table_vendors ?? []).map((v: { company_id: string; companies: { id: string; name: string } | null }) => ({
+      id: v.company_id,
+      name: v.companies?.name ?? '',
+    }));
+    const summary: PricingTableSummary = {
+      id: t.id,
+      name: t.name,
+      rowCount: (t.pricing_rows ?? []).length,
+      columnCount: (t.pricing_columns ?? []).length,
+      lastUpdatedAt: t.updated_at,
+      vendors,
+    };
+    const existing = tableMap.get(t.series_value) ?? [];
+    existing.push(summary);
+    tableMap.set(t.series_value, existing);
+  }
+
+  return allOptions.map((opt) => ({
+    seriesValue: opt.value,
+    label: opt.value,
+    fieldValueOptionId: opt.id,
+    pricingTables: tableMap.get(opt.value) ?? [],
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Category table list (non-door categories)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns all pricing tables for a given category (e.g. lites_louvers_glass),
+ * without any series grouping or item-derived series logic.
+ * Used for simple grid editors (height × width format).
+ */
+export async function listPricingTablesForCategory(
+  category: PricingTable['category'],
+): Promise<PricingTableSummary[]> {
+  const { data, error } = await supabase
+    .from('pricing_tables')
+    .select(`
+      id,
+      name,
+      updated_at,
+      pricing_table_vendors (
+        company_id,
+        companies ( id, name )
+      ),
+      pricing_columns ( id ),
+      pricing_rows ( id )
+    `)
+    .eq('category', category)
+    .order('created_at', { ascending: true });
+
+  if (error) throw new Error(error.message);
+
+  return (data ?? []).map((t) => {
+    const vendors = (t.pricing_table_vendors ?? []).map(
+      (v: { company_id: string; companies: { id: string; name: string } | null }) => ({
+        id: v.company_id,
+        name: v.companies?.name ?? '',
+      }),
+    );
+    return {
+      id: t.id,
+      name: t.name,
+      rowCount: (t.pricing_rows ?? []).length,
+      columnCount: (t.pricing_columns ?? []).length,
+      lastUpdatedAt: t.updated_at as string,
+      vendors,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Lites / Louvers / Glass item list
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns all distinct items from estimate_items where item_type = 'lites_louvers_glass',
+ * grouped by canonical_code, each enriched with their pricing table data (if any).
+ * The pricing table for each item uses series_value = canonical_code.
+ */
+export async function listLitesLouversGlassItems(): Promise<LitesLouversGlassItemSummary[]> {
+  // 1. Fetch all lites/louvers/glass items
+  const { data: items, error: itemsError } = await supabase
+    .from('estimate_items')
+    .select('canonical_code, item_label')
+    .eq('item_type', 'lites_louvers_glass');
+
+  if (itemsError) throw new Error(itemsError.message);
+
+  // Deduplicate by canonical_code, keeping the first encountered label
+  const codeMap = new Map<string, string>();
+  for (const item of items ?? []) {
+    if (!codeMap.has(item.canonical_code)) {
+      codeMap.set(item.canonical_code, item.item_label);
+    }
+  }
+
+  if (codeMap.size === 0) return [];
+
+  // 2. Fetch pricing tables for lites_louvers_glass, keyed by series_value = canonical_code
+  const { data: tables, error: tablesError } = await supabase
+    .from('pricing_tables')
+    .select(`
+      id,
+      series_value,
+      updated_at,
+      pricing_table_vendors (
+        company_id,
+        companies ( id, name )
+      ),
+      pricing_columns ( id ),
+      pricing_rows ( id )
+    `)
+    .eq('category', 'lites_louvers_glass');
+
+  if (tablesError) throw new Error(tablesError.message);
+
+  // Build a map from canonical_code → pricing table info
+  const tableMap = new Map<string, {
+    id: string;
+    rowCount: number;
+    columnCount: number;
+    lastUpdatedAt: string;
+    vendors: { id: string; name: string }[];
+  }>();
+
+  for (const t of tables ?? []) {
+    const vendors = (t.pricing_table_vendors ?? []).map(
+      (v: { company_id: string; companies: { id: string; name: string } | null }) => ({
+        id: v.company_id,
+        name: v.companies?.name ?? '',
+      }),
+    );
+    tableMap.set(t.series_value, {
+      id: t.id,
+      rowCount: (t.pricing_rows ?? []).length,
+      columnCount: (t.pricing_columns ?? []).length,
+      lastUpdatedAt: t.updated_at as string,
+      vendors,
+    });
+  }
+
+  // 3. Merge items with pricing table data
+  return [...codeMap.entries()].map(([canonicalCode, label]) => {
+    const tableInfo = tableMap.get(canonicalCode) ?? null;
+    return {
+      canonicalCode,
+      label,
+      pricingTableId: tableInfo?.id ?? null,
+      rowCount: tableInfo?.rowCount ?? 0,
+      columnCount: tableInfo?.columnCount ?? 0,
+      lastUpdatedAt: tableInfo?.lastUpdatedAt ?? null,
+      vendors: tableInfo?.vendors ?? [],
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +658,68 @@ export async function updatePricingTable(
 // Vendors
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns all manufacturer companies that have at least one pricing table
+ * for the given category + series value.
+ * Used to filter the manufacturer picker in the estimate wizard so users
+ * only see vendors that actually have prices set up for the selected item.
+ */
+export async function listManufacturersForSeries(
+  category: PricingTable['category'],
+  seriesValue: string,
+): Promise<Company[]> {
+  // Find all table IDs for this category + series
+  const { data: tables, error: tablesErr } = await supabase
+    .from('pricing_tables')
+    .select('id')
+    .eq('category', category)
+    .eq('series_value', seriesValue);
+
+  if (tablesErr) throw new Error(tablesErr.message);
+  if (!tables || tables.length === 0) return [];
+
+  const tableIds = tables.map((t: Record<string, unknown>) => t.id as string);
+
+  // Find all vendors linked to those tables
+  const { data: vendors, error: vendorsErr } = await supabase
+    .from('pricing_table_vendors')
+    .select('company_id')
+    .in('pricing_table_id', tableIds);
+
+  if (vendorsErr) throw new Error(vendorsErr.message);
+  if (!vendors || vendors.length === 0) return [];
+
+  const companyIds = [...new Set((vendors as { company_id: string }[]).map((v) => v.company_id))];
+
+  // Fetch the full company rows
+  const { data: companies, error: companiesErr } = await supabase
+    .from('companies')
+    .select('*')
+    .in('id', companyIds)
+    .order('name', { ascending: true });
+
+  if (companiesErr) throw new Error(companiesErr.message);
+
+  return (companies ?? []).map((c: Record<string, unknown>) => ({
+    id: c.id as string,
+    name: c.name as string,
+    companyType: c.company_type as Company['companyType'],
+    billingAddress: c.billing_address as string | null,
+    billingCity: c.billing_city as string | null,
+    billingState: c.billing_state as string | null,
+    billingZip: c.billing_zip as string | null,
+    shippingAddress: c.shipping_address as string | null,
+    shippingCity: c.shipping_city as string | null,
+    shippingState: c.shipping_state as string | null,
+    shippingZip: c.shipping_zip as string | null,
+    notes: c.notes as string | null,
+    active: c.active as boolean,
+    settings: c.settings as Company['settings'],
+    createdAt: c.created_at as string,
+    updatedAt: c.updated_at as string,
+  }));
+}
+
 /** Returns all companies that are manufacturers (company_type IN 'manufacturer','both'), sorted by name. */
 export async function listManufacturerCompanies(): Promise<Company[]> {
   const { data, error } = await supabase
@@ -465,6 +783,234 @@ export async function detachPricingTableVendor(tableId: string, companyId: strin
 }
 
 // ---------------------------------------------------------------------------
+// Lites / Louvers / Glass — grouped list view
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the lites/louvers/glass list data for the grouped list view:
+ *  - pricingTables: each pricing table with all its tagged items
+ *  - untaggedItems: items from estimate_items not tagged to any pricing table
+ */
+export async function getLitesLouversGlassGroupedList(): Promise<LitesLouversGlassGroupedListResult> {
+  // 1. Fetch all pricing tables for lites_louvers_glass with vendor + size data
+  const { data: tables, error: tablesError } = await supabase
+    .from('pricing_tables')
+    .select(`
+      id,
+      name,
+      updated_at,
+      pricing_table_vendors (
+        company_id,
+        companies ( id, name )
+      ),
+      pricing_columns ( id ),
+      pricing_rows ( id )
+    `)
+    .eq('category', 'lites_louvers_glass')
+    .order('created_at', { ascending: true });
+
+  if (tablesError) throw new Error(tablesError.message);
+
+  const tableIds = (tables ?? []).map((t: Record<string, unknown>) => t.id as string);
+
+  // 2. Fetch all pricing_table_items for these tables
+  const taggedItemRows: { pricing_table_id: string; canonical_code: string; sort_order: number }[] = [];
+  if (tableIds.length > 0) {
+    const { data: ptiData, error: ptiError } = await supabase
+      .from('pricing_table_items')
+      .select('pricing_table_id, canonical_code, sort_order')
+      .in('pricing_table_id', tableIds)
+      .order('sort_order', { ascending: true });
+
+    if (ptiError) throw new Error(ptiError.message);
+    taggedItemRows.push(...(ptiData ?? []));
+  }
+
+  // 3. Fetch all lites/louvers/glass items to resolve labels
+  const { data: allItems, error: itemsError } = await supabase
+    .from('estimate_items')
+    .select('canonical_code, item_label')
+    .eq('item_type', 'lites_louvers_glass');
+
+  if (itemsError) throw new Error(itemsError.message);
+
+  // Build label map (first encountered label per code)
+  const labelMap = new Map<string, string>();
+  for (const item of allItems ?? []) {
+    if (!labelMap.has(item.canonical_code)) {
+      labelMap.set(item.canonical_code, item.item_label);
+    }
+  }
+
+  // Build set of all tagged canonical_codes
+  const taggedCodes = new Set(taggedItemRows.map((r) => r.canonical_code));
+
+  // 4. Build pricing table groups
+  const pricingTables = (tables ?? []).map((t: Record<string, unknown>) => {
+    const vendors = ((t.pricing_table_vendors as { company_id: string; companies: { id: string; name: string } | null }[]) ?? []).map((v) => ({
+      id: v.company_id,
+      name: v.companies?.name ?? '',
+    }));
+
+    const tableItems = taggedItemRows
+      .filter((r) => r.pricing_table_id === (t.id as string))
+      .map((r) => ({
+        canonicalCode: r.canonical_code,
+        label: labelMap.get(r.canonical_code) ?? r.canonical_code,
+      }));
+
+    return {
+      tableId: t.id as string,
+      tableName: t.name as string,
+      items: tableItems,
+      rowCount: ((t.pricing_rows as unknown[]) ?? []).length,
+      columnCount: ((t.pricing_columns as unknown[]) ?? []).length,
+      lastUpdatedAt: t.updated_at as string,
+      vendors,
+    };
+  });
+
+  // 5. Untagged items: in estimate_items but not in any pricing_table_items
+  const untaggedItems = [...labelMap.entries()]
+    .filter(([code]) => !taggedCodes.has(code))
+    .map(([canonicalCode, label]) => ({ canonicalCode, label }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  return { pricingTables, untaggedItems };
+}
+
+// ---------------------------------------------------------------------------
+// Pricing Table Items (many-to-many junction)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns all items tagged to a pricing table, enriched with display labels
+ * fetched from estimate_items.
+ */
+export async function listPricingTableItems(tableId: string): Promise<PricingTableItem[]> {
+  const { data, error } = await supabase
+    .from('pricing_table_items')
+    .select('*')
+    .eq('pricing_table_id', tableId)
+    .order('sort_order', { ascending: true })
+    .order('created_at', { ascending: true });
+
+  if (error) throw new Error(error.message);
+  if (!data || data.length === 0) return [];
+
+  // Fetch labels from estimate_items for all canonical codes
+  const codes = [...new Set((data as Record<string, unknown>[]).map((r) => r.canonical_code as string))];
+  const { data: itemRows, error: itemsError } = await supabase
+    .from('estimate_items')
+    .select('canonical_code, item_label')
+    .in('canonical_code', codes);
+
+  if (itemsError) throw new Error(itemsError.message);
+
+  // Build a label map (first encountered label per code)
+  const labelMap = new Map<string, string>();
+  for (const item of itemRows ?? []) {
+    if (!labelMap.has(item.canonical_code)) {
+      labelMap.set(item.canonical_code, item.item_label);
+    }
+  }
+
+  return (data as Record<string, unknown>[]).map((r) => ({
+    id: r.id as string,
+    pricingTableId: r.pricing_table_id as string,
+    canonicalCode: r.canonical_code as string,
+    itemType: r.item_type as string,
+    itemLabel: labelMap.get(r.canonical_code as string) ?? (r.canonical_code as string),
+    sortOrder: r.sort_order as number,
+    createdAt: r.created_at as string,
+  }));
+}
+
+/**
+ * Attaches an item (canonical_code) to a pricing table.
+ * No-ops if already linked (UNIQUE constraint).
+ */
+export async function addPricingTableItem(
+  tableId: string,
+  canonicalCode: string,
+  itemType: string,
+): Promise<PricingTableItem> {
+  // Determine next sort_order
+  const { data: existing } = await supabase
+    .from('pricing_table_items')
+    .select('sort_order')
+    .eq('pricing_table_id', tableId)
+    .order('sort_order', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const sortOrder = existing ? (existing.sort_order as number) + 1 : 0;
+
+  const { data, error } = await supabase
+    .from('pricing_table_items')
+    .insert({ pricing_table_id: tableId, canonical_code: canonicalCode, item_type: itemType, sort_order: sortOrder })
+    .select('*')
+    .single();
+
+  if (error) throw new Error(error.message);
+  const r = data as Record<string, unknown>;
+
+  // Fetch the item label
+  const { data: itemRow } = await supabase
+    .from('estimate_items')
+    .select('item_label')
+    .eq('canonical_code', canonicalCode)
+    .limit(1)
+    .maybeSingle();
+
+  return {
+    id: r.id as string,
+    pricingTableId: r.pricing_table_id as string,
+    canonicalCode: r.canonical_code as string,
+    itemType: r.item_type as string,
+    itemLabel: itemRow?.item_label ?? canonicalCode,
+    sortOrder: r.sort_order as number,
+    createdAt: r.created_at as string,
+  };
+}
+
+/** Removes an item from a pricing table. */
+export async function removePricingTableItem(tableId: string, canonicalCode: string): Promise<void> {
+  const { error } = await supabase
+    .from('pricing_table_items')
+    .delete()
+    .eq('pricing_table_id', tableId)
+    .eq('canonical_code', canonicalCode);
+
+  if (error) throw new Error(error.message);
+}
+
+/**
+ * Returns all distinct items for a given item_type slug from estimate_items,
+ * deduplicated by canonical_code. Used to populate the "Add Item" dropdown.
+ */
+export async function listItemsForCategory(
+  itemTypeSlug: string,
+): Promise<{ canonicalCode: string; label: string }[]> {
+  const { data, error } = await supabase
+    .from('estimate_items')
+    .select('canonical_code, item_label')
+    .eq('item_type', itemTypeSlug)
+    .order('item_label', { ascending: true });
+
+  if (error) throw new Error(error.message);
+
+  const seen = new Map<string, string>();
+  for (const row of data ?? []) {
+    if (!seen.has(row.canonical_code)) {
+      seen.set(row.canonical_code, row.item_label);
+    }
+  }
+
+  return [...seen.entries()].map(([canonicalCode, label]) => ({ canonicalCode, label }));
+}
+
+// ---------------------------------------------------------------------------
 // Columns
 // ---------------------------------------------------------------------------
 
@@ -472,7 +1018,8 @@ export async function detachPricingTableVendor(tableId: string, companyId: strin
 export async function addPricingColumn(
   tableId: string,
   label: string,
-  criteria: ColumnCriteria = {}
+  criteria: ColumnCriteria = {},
+  parentColumnId?: string | null
 ): Promise<PricingColumn> {
   // Determine the next sort_order
   const { data: existing } = await supabase
@@ -485,9 +1032,17 @@ export async function addPricingColumn(
 
   const sortOrder = existing ? (existing.sort_order as number) + 1 : 0;
 
+  const insertPayload: Record<string, unknown> = {
+    pricing_table_id: tableId,
+    label,
+    criteria,
+    sort_order: sortOrder,
+  };
+  if (parentColumnId) insertPayload.parent_column_id = parentColumnId;
+
   const { data, error } = await supabase
     .from('pricing_columns')
-    .insert({ pricing_table_id: tableId, label, criteria, sort_order: sortOrder })
+    .insert(insertPayload)
     .select('*')
     .single();
 

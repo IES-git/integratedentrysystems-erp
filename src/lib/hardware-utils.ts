@@ -5,6 +5,7 @@ export const HARDWARE_SUBCATEGORY_ORDER: HardwareSubcategory[] = [
   'close_it',
   'latch_it',
   'protect_it',
+  'mount_it',
 ];
 
 export const HARDWARE_SUBCATEGORY_LABEL: Record<HardwareSubcategory, string> = {
@@ -12,6 +13,7 @@ export const HARDWARE_SUBCATEGORY_LABEL: Record<HardwareSubcategory, string> = {
   close_it: 'Close It',
   latch_it: 'Latch It',
   protect_it: 'Protect It',
+  mount_it: 'Mount It',
 };
 
 export interface HardwareGroup<T> {

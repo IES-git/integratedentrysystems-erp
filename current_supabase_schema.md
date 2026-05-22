@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-05-12 (hardware progressive-disclosure Phase 2 — seeded CloseIt CLOSER, LatchIt DEADBOLT/LOCKSET/PANIC, and ProtectIt WEATHERSTRIP/THRESHOLD families)
+Last updated: 2026-05-21 (wizard rules & hardware Phase 3 — extended subcategory CHECK constraints to include mount_it, seeded ANCHOR hardware family, added door_role field definition)
 
 ## Authentication Status
 
@@ -296,8 +296,11 @@ Line items extracted from estimates.
 - `manufacturer_id` (UUID, nullable) - FK to companies.id, SET NULL on delete — the manufacturer associated with this line item
 - `opening_id` (UUID, nullable) - FK to estimate_openings.id, SET NULL on delete — the opening this item belongs to
 - `parent_item_id` (UUID, nullable) - FK to estimate_items.id, CASCADE on delete — for hardware items, points to the parent door or frame item
-- `subcategory` (TEXT, nullable) - CHECK IN ('swing_it','close_it','latch_it','protect_it') — hardware subcategory for display grouping; NULL for non-hardware items
+- `subcategory` (TEXT, nullable) - CHECK IN ('swing_it','close_it','latch_it','protect_it','mount_it') — hardware subcategory for display grouping; NULL for non-hardware items
 - `item_type` (TEXT, nullable) - Top-level category tag matching a slug in `item_type_registry`; used by Item Fields to resolve which field definitions apply to this item. The original CHECK IN ('doors','frames','hardware') constraint has been dropped — app logic validates against `item_type_registry`.
+- `price_source` (TEXT, nullable) - CHECK IN ('lookup','manual','ocr') — how the unit_price was populated: 'lookup' = matched from pricing tables, 'manual' = user typed an override on the Review step, 'ocr' = extracted from uploaded document
+- `price_lookup_metadata` (JSONB, nullable) - Snapshot of the pricing resolution result; shape: `{ tableId, rowId, columnId, parentColumnId, adderCellIds: string[], vendorId, computedAt, status, warnings: string[] }`
+- `is_manual_price_override` (BOOLEAN, NOT NULL, DEFAULT false) - True when the user manually edited the price on the Review step; Refresh Prices will skip this item
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 
 **Indexes:**
@@ -307,6 +310,7 @@ Line items extracted from estimates.
 - `idx_estimate_items_opening_id` on opening_id
 - `idx_estimate_items_parent_item_id` on parent_item_id
 - `idx_estimate_items_item_type` on item_type
+- `idx_estimate_items_price_source` on price_source
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
@@ -711,8 +715,8 @@ One row per pricing series (e.g. "CH"). Category-scoped with a soft-link to `fie
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
-- `category` (TEXT, NOT NULL) - CHECK IN ('doors','frames','hardware')
-- `series_value` (TEXT, NOT NULL) - e.g. `'CH'`, mirrors a value from `field_value_options` for the `series` field
+- `category` (TEXT, NOT NULL) - CHECK IN ('doors','frames','hardware','lites_louvers_glass')
+- `series_value` (TEXT, NOT NULL) - e.g. `'CH'` for doors (mirrors a value from `field_value_options`); for `lites_louvers_glass` tables this equals the item's `canonical_code` from `estimate_items`
 - `field_value_option_id` (UUID, NULLABLE, FK → field_value_options.id ON DELETE SET NULL) - Soft-link for traceability
 - `name` (TEXT, NOT NULL) - Display name (defaults to the series value)
 - `description` (TEXT, NULLABLE) - Optional description
@@ -766,21 +770,52 @@ Junction table: many-to-many between `pricing_tables` and `companies` (manufactu
 
 ---
 
+### public.pricing_table_items
+
+Junction table: many-to-many between `pricing_tables` and items (identified by `canonical_code`). Allows a single pricing table to be shared across multiple items of the same item type (e.g., one lites/louvers/glass price grid for several similar items).
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `pricing_table_id` (UUID, NOT NULL, FK → pricing_tables.id ON DELETE CASCADE)
+- `canonical_code` (TEXT, NOT NULL) - The item's canonical code (matches `estimate_items.canonical_code`)
+- `item_type` (TEXT, NOT NULL) - The item type slug (e.g. `lites_louvers_glass`), mirrors `estimate_items.item_type`
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order in the tagged items list
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Constraints:**
+- UNIQUE `(pricing_table_id, canonical_code)` — one item can only be tagged once per table
+
+**Indexes:**
+- `idx_pricing_table_items_table_id` on pricing_table_id
+- `idx_pricing_table_items_canonical_code` on canonical_code
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing table items` - All authenticated users can SELECT
+- `Admins can insert pricing table items` - Only admins can INSERT
+- `Admins can delete pricing table items` - Only admins can DELETE
+
+**Migration:** `add_pricing_table_items` (applied 2026-05-14)
+
+---
+
 ### public.pricing_columns
 
-Column definitions for a pricing table (e.g. "18 Gauge / CRS").
+Column definitions for a pricing table (e.g. "18 Gauge / CRS"). Supports hierarchical columns via `parent_column_id` for frame pricing (gauge → depth sub-columns).
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `pricing_table_id` (UUID, NOT NULL, FK → pricing_tables.id ON DELETE CASCADE)
 - `label` (TEXT, NOT NULL) - e.g. `'18 Gauge / CRS'`
 - `criteria` (JSONB, NOT NULL, DEFAULT `{}`) - Column criteria shape: `Record<string, string | { type: 'in'; values: string[] }>`
+- `parent_column_id` (UUID, NULLABLE, FK → pricing_columns.id ON DELETE CASCADE) - If set, this column is a sub-column (depth) under the given parent (gauge group)
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 - `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
 **Indexes:**
 - `idx_pricing_columns_table_sort` on (pricing_table_id, sort_order)
+- `idx_pricing_columns_parent` on (parent_column_id)
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
@@ -1198,6 +1233,13 @@ Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_depen
 38. `add_hardware_progressive_disclosure_columns` - Added `is_family`, `is_legacy`, `code_prefix`, `code_field_keys`, `label_template` to `hardware_catalog`; added `code_token TEXT NULL` to `field_value_options` and `item_type_field_value_options`; backfilled `is_legacy = true` on all 66 existing leaf rows
 39. `seed_swing_it_hardware_families` - Seeded `hardware-hinge` and `hardware-cont-hinge` entries in `item_type_registry`; inserted HINGE and CONT-HINGE family rows in `hardware_catalog` (`is_family=true`); upserted 8 field_definitions (hinge_type, hinge_material, hinge_size, hinge_pin, hinge_gauge, material, mount, length) with `status='approved'`; seeded all field_value_options with `code_token` values; wired `item_type_base_fields` for both family slugs; added `hinge_gauge` depends-on-`hinge_type IN (Mechanical, Electrified)` rule to `item_type_field_dependencies`
 40. `seed_close_latch_protect_hardware_families` - Seeded 6 new configurable hardware families for the remaining three subcategories: CloseIt — `CLOSER` (hardware-closer, fields: closer_mount/closer_material/closer_arm_type); LatchIt — `DEADBOLT` (hardware-deadbolt, deadbolt_function), `LOCKSET` (hardware-lockset, lockset_type), `PANIC` (hardware-panic, panic_type); ProtectIt — `WEATHERSTRIP` (hardware-weatherstrip, weatherstrip_type), `THRESHOLD` (hardware-threshold, threshold_type). Inserted all 6 `item_type_registry` slugs, 6 `hardware_catalog` family rows, 8 new `field_definitions` (all approved), field_value_options with code_token values (HM/DM, CI/ALUM, CUSH/HOS/HOSP/FL/PA, KOS/KBS, CYLI/MORT, RIM/MORT/SVR/CVR, ADHES/KERF/SCREW/ALUM, FLAT/PANIC/NOTCH), and `item_type_base_fields` wiring for all 6 family slugs
+41. `add_lites_louvers_glass_to_pricing_category` - Updated `pricing_tables_category_check` CHECK constraint on `pricing_tables.category` to include `'lites_louvers_glass'` alongside existing `'doors'`, `'frames'`, `'hardware'` values; enables Lites, Louvers & Glass pricing tables with the new simple height × width grid editor
+42. `add_pricing_table_items` - Created `pricing_table_items` junction table for many-to-many linking between `pricing_tables` and items (by `canonical_code`); allows a single pricing table to be shared across multiple items of the same item type; full RLS (read = authenticated, write = admins via `is_admin()`); indexes on `pricing_table_id` and `canonical_code`; UNIQUE constraint on `(pricing_table_id, canonical_code)`
+43. `add_parent_column_id_to_pricing_columns` - Added `parent_column_id UUID NULLABLE FK → pricing_columns.id ON DELETE CASCADE` to `pricing_columns` to support hierarchical two-level column headers for frame pricing (gauge group → depth sub-columns); added `idx_pricing_columns_parent` index on `parent_column_id`
+44. `extend_subcategory_check_constraints` - Updated CHECK constraints on `hardware_catalog.subcategory` and `estimate_items.subcategory` to include `'mount_it'` alongside existing values for the new Mount It hardware category
+45. `seed_anchor_hardware_family` - Seeded ANCHOR family row in `hardware_catalog` (`subcategory='mount_it'`, `is_family=true`, `code_prefix='ANCHOR'`, `label_template='Anchor - {anchor_type}'`)
+46. `add_door_role_field_definition` - Added `door_role` field definition (`value_type='string'`) to `field_definitions` for tagging active/inactive doors in pair openings at save time
+47. `add_pricing_metadata_to_estimate_items` - Added `price_source TEXT CHECK ('lookup'|'manual'|'ocr')`, `price_lookup_metadata JSONB`, and `is_manual_price_override BOOLEAN DEFAULT false` columns to `estimate_items` for the pricing integration feature; index on `price_source`
 
 ## Edge Functions
 
@@ -1337,7 +1379,7 @@ Pre-defined hardware catalog seeded from the DOOR_FRAME SHORTCUT_LOOKUP spreadsh
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `name` (TEXT, NOT NULL) - Display name of the hardware item
 - `canonical_code` (TEXT, NOT NULL, UNIQUE) - Unique item code (e.g., 'HINGE-MECH-SS-45X45-NRP-134') for leaf rows; family identifier (e.g., 'HINGE', 'CONT-HINGE') for family rows
-- `subcategory` (TEXT, NOT NULL) - CHECK IN ('swing_it','close_it','latch_it','protect_it')
+- `subcategory` (TEXT, NOT NULL) - CHECK IN ('swing_it','close_it','latch_it','protect_it','mount_it')
 - `description` (TEXT) - Optional description of the item
 - `active` (BOOLEAN, NOT NULL, DEFAULT true) - Whether the item appears in pickers
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display ordering within subcategory

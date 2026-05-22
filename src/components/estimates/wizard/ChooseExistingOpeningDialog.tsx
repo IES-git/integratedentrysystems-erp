@@ -20,7 +20,14 @@ import {
 import type { EstimateOpeningWithItems } from '@/types';
 
 interface ChooseExistingOpeningDialogProps {
-  estimateId: string;
+  /** Existing estimate ID, if already created. Provide this OR resolveEstimateId. */
+  estimateId?: string;
+  /**
+   * Async callback that creates (or returns) the estimate ID.
+   * Called inside handleCopy so the estimate is only created when the user
+   * actually copies an opening, not when they open the browser dialog.
+   */
+  resolveEstimateId?: () => Promise<string | null>;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCopied: (openings: EstimateOpeningWithItems[]) => void;
@@ -39,6 +46,7 @@ function countByCategory(opening: EstimateOpeningWithItems) {
 
 export function ChooseExistingOpeningDialog({
   estimateId,
+  resolveEstimateId,
   open,
   onOpenChange,
   onCopied,
@@ -79,8 +87,14 @@ export function ChooseExistingOpeningDialog({
     setCopyingId(opening.id);
     setCopyError(null);
     try {
-      await copyOpeningToEstimate(opening.id, estimateId);
-      const updated = await getEstimateOpenings(estimateId);
+      // Resolve estimate ID — creates the estimate only when the user actually copies.
+      const eid = estimateId ?? (resolveEstimateId ? await resolveEstimateId() : null);
+      if (!eid) {
+        setCopyError('Unable to create estimate. Please try again.');
+        return;
+      }
+      await copyOpeningToEstimate(opening.id, eid);
+      const updated = await getEstimateOpenings(eid);
       onCopied(updated);
       onOpenChange(false);
     } catch (err) {

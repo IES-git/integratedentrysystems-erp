@@ -35,6 +35,31 @@ import { BuildOpeningDialog } from './BuildOpeningDialog';
 import { ChooseExistingOpeningDialog } from './ChooseExistingOpeningDialog';
 import type { EstimateOpeningWithItems, OpeningTemplateType } from '@/types';
 
+// ---------------------------------------------------------------------------
+// Pricing total helpers
+// ---------------------------------------------------------------------------
+
+function formatCurrency(n: number): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+}
+
+/** Sum of (unitPrice * quantity) for all top-level items in an opening. */
+function openingItemsTotal(opening: EstimateOpeningWithItems): number {
+  return opening.items.reduce((sum, item) => {
+    return sum + (item.unitPrice ?? 0) * item.quantity;
+  }, 0);
+}
+
+/** Total for an opening including the quantity multiplier. */
+function openingTotal(opening: EstimateOpeningWithItems): number {
+  return openingItemsTotal(opening) * opening.quantity;
+}
+
+/** Count of items with no price set across all openings. */
+function countMissingPrices(openings: EstimateOpeningWithItems[]): number {
+  return openings.flatMap((o) => o.items).filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
+}
+
 interface OpeningsStepProps {
   estimateId: string | null;
   /** Provided for new (unsaved) estimates — lazily creates the DB record the
@@ -53,6 +78,8 @@ interface OpeningCardProps {
   onEdit: (opening: EstimateOpeningWithItems) => void;
   onQuantityChange: (id: string, quantity: number) => Promise<void>;
   deleting: boolean;
+  /** Whether any item in this opening has a price (for showing total vs dash). */
+  hasAnyPrice: boolean;
 }
 
 // Detect item category from the stored item_type first, then fall back to label heuristics.
@@ -79,11 +106,12 @@ function countItems(opening: EstimateOpeningWithItems) {
   return { topLevel, hardware: openingHardware + nestedHardware };
 }
 
-function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting }: OpeningCardProps) {
+function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting, hasAnyPrice }: OpeningCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [updatingQty, setUpdatingQty] = useState(false);
 
   const { topLevel, hardware } = countItems(opening);
+  const total = openingTotal(opening);
 
   const handleQtyStep = async (e: React.MouseEvent, delta: number) => {
     e.stopPropagation();
@@ -181,6 +209,22 @@ function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting }: 
             >
               <Pencil className="h-4 w-4" />
             </Button>
+
+            {/* Per-opening subtotal */}
+            <div className="shrink-0 text-right min-w-[80px]" onClick={(e) => e.stopPropagation()}>
+              {hasAnyPrice ? (
+                <>
+                  <p className="text-sm font-semibold tabular-nums">
+                    {formatCurrency(total)}
+                  </p>
+                  {opening.quantity > 1 && (
+                    <p className="text-[10px] text-muted-foreground">×{opening.quantity}</p>
+                  )}
+                </>
+              ) : (
+                <p className="text-xs text-muted-foreground/40">no price</p>
+              )}
+            </div>
 
             <Button
               variant="ghost"
@@ -315,6 +359,7 @@ export function OpeningsStep({
   backLabel = 'Back to Customer',
 }: OpeningsStepProps) {
   const navigate = useNavigate();
+
   const [openings, setOpenings] = useState<EstimateOpeningWithItems[]>([]);
   // resolvedId tracks the actual DB estimate ID once it exists. It starts from
   // the prop (real for existing estimates, null for new ones) and is updated
@@ -361,17 +406,25 @@ export function OpeningsStep({
     }
   };
 
-  // Navigate to the new opening page or open a dialog, lazily creating the estimate first.
-  const openDialog = async (
+  // Open the appropriate opening editor. Template types navigate to the full-page
+  // NewOpeningPage (no estimate ID needed — it creates it lazily inside handleSave).
+  // Build/choose open dialogs with deferred estimate creation.
+  const openDialog = (
     type: 'template' | 'build' | 'choose',
     templateType?: OpeningTemplateType
   ) => {
-    const id = await getOrCreateId();
-    if (!id) return;
     if (type === 'template') {
-      navigate(
-        `/app/estimates/${id}/openings/new?type=${templateType ?? 'single'}&count=${openings.length}`
-      );
+      if (resolvedId) {
+        // Estimate already exists — navigate to the page with the ID in the URL.
+        navigate(
+          `/app/estimates/${resolvedId}/openings/new?type=${templateType ?? 'single'}&count=${openings.length}`
+        );
+      } else {
+        // No estimate yet — navigate to the no-ID route; the page creates it on save.
+        navigate(
+          `/app/estimates/openings/new?type=${templateType ?? 'single'}&count=${openings.length}`
+        );
+      }
     } else if (type === 'build') {
       setBuildDialogOpen(true);
     } else {
@@ -423,26 +476,34 @@ export function OpeningsStep({
 
   return (
     <>
-      {resolvedId && (
-        <>
-          <BuildOpeningDialog
-            estimateId={resolvedId}
-            open={buildDialogOpen}
-            onOpenChange={handleBuildDialogOpenChange}
-            onSaved={handleOpeningSaved}
-            onUpdated={handleOpeningUpdated}
-            openingCount={openings.length}
-            editingOpening={editingOpening ?? undefined}
-          />
+      {/* BuildOpeningDialog — estimate created lazily inside handleSave */}
+      <BuildOpeningDialog
+        estimateId={resolvedId}
+        resolveEstimateId={resolvedId ? undefined : getOrCreateId}
+        open={buildDialogOpen}
+        onOpenChange={handleBuildDialogOpenChange}
+        onSaved={(opening) => {
+          if (!resolvedId && opening.estimateId) setResolvedId(opening.estimateId);
+          handleOpeningSaved(opening);
+        }}
+        onUpdated={handleOpeningUpdated}
+        openingCount={openings.length}
+        editingOpening={editingOpening ?? undefined}
+      />
 
-          <ChooseExistingOpeningDialog
-            estimateId={resolvedId}
-            open={chooseDialogOpen}
-            onOpenChange={setChooseDialogOpen}
-            onCopied={handleOpeningsCopied}
-          />
-        </>
-      )}
+      {/* ChooseExistingOpeningDialog — estimate created lazily inside handleCopy */}
+      <ChooseExistingOpeningDialog
+        estimateId={resolvedId ?? undefined}
+        resolveEstimateId={resolvedId ? undefined : getOrCreateId}
+        open={chooseDialogOpen}
+        onOpenChange={setChooseDialogOpen}
+        onCopied={(updatedOpenings) => {
+          if (!resolvedId && updatedOpenings[0]?.estimateId) {
+            setResolvedId(updatedOpenings[0].estimateId);
+          }
+          handleOpeningsCopied(updatedOpenings);
+        }}
+      />
 
       <div className="space-y-6">
         {/* Header */}
@@ -475,16 +536,20 @@ export function OpeningsStep({
             {/* Opening cards */}
             {openings.length > 0 && (
               <div className="space-y-3">
-                {openings.map((opening) => (
-                  <OpeningCard
-                    key={opening.id}
-                    opening={opening}
-                    onDelete={handleDeleteOpening}
-                    onEdit={handleEditOpening}
-                    onQuantityChange={handleQuantityChange}
-                    deleting={deletingId === opening.id}
-                  />
-                ))}
+                {openings.map((opening) => {
+                  const hasAnyPrice = opening.items.some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
+                  return (
+                    <OpeningCard
+                      key={opening.id}
+                      opening={opening}
+                      onDelete={handleDeleteOpening}
+                      onEdit={handleEditOpening}
+                      onQuantityChange={handleQuantityChange}
+                      deleting={deletingId === opening.id}
+                      hasAnyPrice={hasAnyPrice}
+                    />
+                  );
+                })}
               </div>
             )}
 
@@ -554,6 +619,35 @@ export function OpeningsStep({
             </div>
           </>
         )}
+
+        {/* Grand total summary card */}
+        {openings.length > 0 && (() => {
+          const grandTotal = openings.reduce((sum, o) => sum + openingTotal(o), 0);
+          const missingCount = countMissingPrices(openings);
+          const hasAnyGrandPrice = openings.some((o) => o.items.some((i) => i.unitPrice !== null && i.unitPrice !== undefined));
+          if (!hasAnyGrandPrice) return null;
+          return (
+            <Card className="bg-primary/5 border-primary/20">
+              <CardContent className="py-3 px-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Estimated Total
+                    </p>
+                    {missingCount > 0 && (
+                      <p className="text-[11px] text-amber-600 mt-0.5">
+                        {missingCount} item{missingCount !== 1 ? 's' : ''} missing price — see Review step
+                      </p>
+                    )}
+                  </div>
+                  <p className="text-xl font-bold tabular-nums">
+                    {formatCurrency(grandTotal)}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })()}
 
         {/* Footer navigation */}
         <div className="flex justify-between pt-4 border-t">

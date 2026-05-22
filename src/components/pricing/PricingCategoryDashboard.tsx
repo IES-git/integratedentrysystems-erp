@@ -22,7 +22,7 @@ const ITEM_TYPE_ICON_MAP: Record<string, LucideIcon> = {
 };
 
 /** Slugs that have a real pricing flow wired up. */
-const ACTIVE_PRICING_SLUGS = new Set(['doors']);
+const ACTIVE_PRICING_SLUGS = new Set(['doors', 'frames', 'lites_louvers_glass']);
 
 interface PricingCategoryDashboardProps {
   onSelectCategory: (slug: string) => void;

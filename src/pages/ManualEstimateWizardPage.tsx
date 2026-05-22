@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { WizardSteps, type WizardStep } from '@/components/estimates/wizard/WizardSteps';
 import { CustomerStep } from '@/components/estimates/wizard/CustomerStep';
 import { OpeningsStep } from '@/components/estimates/wizard/OpeningsStep';
+import { ReviewStep } from '@/components/estimates/wizard/ReviewStep';
 import { useToast } from '@/hooks/use-toast';
 import {
   createManualEstimate,
@@ -16,6 +17,7 @@ import type { Company } from '@/types';
 const WIZARD_STEPS: WizardStep[] = [
   { id: 'customer', title: 'Customer', description: 'Assign a customer' },
   { id: 'openings', title: 'Openings', description: 'Build door and frame openings' },
+  { id: 'review', title: 'Review', description: 'Review pricing and totals' },
 ];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -156,24 +158,42 @@ export default function ManualEstimateWizardPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [estimateId]);
 
-  const handleFinish = async () => {
+  // Called from OpeningsStep — advances to Review step
+  const handleAdvanceToReview = async () => {
+    const finalId = estimateId ?? existingId ?? null;
+    if (!finalId) {
+      toast({
+        title: 'No openings added',
+        description: 'Add and save at least one opening before continuing.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    // Save customer assignment on the way through
     setSaving(true);
     try {
-      // If user never opened an add-opening dialog, no estimate exists yet.
-      // Create one now before saving the customer assignment.
-      let finalId = estimateId;
-      if (!finalId && !existingId) {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) { navigate('/login'); return; }
-        const { estimateId: id } = await createManualEstimate(user.id);
-        finalId = id;
-        setEstimateId(id);
-      }
+      await apiUpdateEstimate(finalId, { companyId: noCustomer ? null : selectedCustomerId });
+      // Store the ID so ReviewStep can use it
+      if (!estimateId && finalId) setEstimateId(finalId);
+      setCurrentStepIndex(2);
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'Failed to save.',
+        variant: 'destructive',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
 
-      if (!finalId) return;
+  // Called from ReviewStep — final save and navigate away
+  const handleFinish = async () => {
+    const finalId = estimateId ?? existingId ?? null;
+    if (!finalId) return;
 
+    setSaving(true);
+    try {
       await apiUpdateEstimate(finalId, {
         companyId: noCustomer ? null : selectedCustomerId,
       });
@@ -270,12 +290,21 @@ export default function ManualEstimateWizardPage() {
 
           {currentStepIndex === 1 && (
             <OpeningsStep
-              estimateId={estimateId}
+              estimateId={estimateId ?? existingId}
               createEstimate={!existingId ? createEstimate : undefined}
               onBack={existingId ? () => navigate('/app/estimates') : handlePrevStep}
               backLabel={existingId ? 'Back to Estimates' : 'Back to Customer'}
+              onFinish={handleAdvanceToReview}
+              finishLabel={saving ? 'Saving…' : 'Review & Pricing →'}
+              finishLoading={saving}
+            />
+          )}
+
+          {currentStepIndex === 2 && (
+            <ReviewStep
+              estimateId={(estimateId ?? existingId)!}
+              onBack={() => setCurrentStepIndex(1)}
               onFinish={handleFinish}
-              finishLabel={saving ? 'Saving…' : existingId ? 'Done' : 'Save as Draft'}
               finishLoading={saving}
             />
           )}

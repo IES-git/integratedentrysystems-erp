@@ -10,6 +10,8 @@ import {
   ChevronsUpDown,
   ChevronDown,
   AlertCircle,
+  Lock,
+  GlassWater,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -43,7 +45,7 @@ import {
   createEstimateOpening,
   addEstimateItem,
   addItemField,
-  getFieldValueOptions,
+  getItemFieldValueOptionsForWizard,
   recordFieldValueUsage,
   updateEstimateOpening,
   deleteEstimateItem,
@@ -52,6 +54,8 @@ import { getPassToFrameFieldKeys } from '@/lib/item-fields-api';
 import { evaluateDependency } from '@/lib/field-dependencies';
 import { syncDoorFieldToFrames } from '@/lib/door-frame-sync';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
+import { resolveAndPersistItemPrice } from '@/lib/pricing-lookup';
+import { parseDimensionToInches, calcHingeQty } from './opening-rules';
 import {
   AddItemModal,
   newLocalId,
@@ -59,6 +63,14 @@ import {
   type LocalTopLevelItem,
   type LocalHardwareItem,
 } from './AddItemModal';
+import {
+  GLASS_OR_LOUVER_FIELD_KEY,
+  GLASS_OR_LOUVER_TRIGGER_VALUE,
+  GLASS_OR_LOUVER_WIDTH_KEY,
+  GLASS_OR_LOUVER_HEIGHT_KEY,
+  LITES_ITEM_TYPE,
+  syncLiteDimensionsFromDoor,
+} from './lite-glass-utils';
 import type {
   ItemType,
   EstimateOpening,
@@ -71,7 +83,14 @@ import type {
 } from '@/types';
 
 interface BuildOpeningDialogProps {
-  estimateId: string;
+  /** Existing estimate ID, if already created. Provide this OR resolveEstimateId. */
+  estimateId: string | null;
+  /**
+   * Async callback that creates (or returns) the estimate ID.
+   * Called inside handleSave so the estimate record is only written when the
+   * user actually commits an opening, not when they merely open the dialog.
+   */
+  resolveEstimateId?: () => Promise<string | null>;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: (opening: EstimateOpeningWithItems) => void;
@@ -164,20 +183,27 @@ function AddFieldForm({ onAdd, onCancel }: AddFieldFormProps) {
 
 interface FieldRowProps {
   field: LocalField;
+  canonicalCode: string;
   onUpdate: (value: string) => void;
   onDelete: () => void;
 }
 
-function FieldRow({ field, onUpdate, onDelete }: FieldRowProps) {
+function FieldRow({ field, canonicalCode, onUpdate, onDelete }: FieldRowProps) {
   const [options, setOptions] = useState<FieldValueOption[]>([]);
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     if (!field.fieldDefinitionId) return;
-    getFieldValueOptions(field.fieldDefinitionId)
+    getItemFieldValueOptionsForWizard(canonicalCode, field.fieldDefinitionId)
       .then(setOptions)
       .catch(console.error);
-  }, [field.fieldDefinitionId]);
+  }, [canonicalCode, field.fieldDefinitionId]);
+
+  const handleOpenChange = (open: boolean) => {
+    setPopoverOpen(open);
+    if (open) setSearchQuery('');
+  };
 
   return (
     <div className="flex items-center gap-2 px-3 py-1.5">
@@ -195,8 +221,15 @@ function FieldRow({ field, onUpdate, onDelete }: FieldRowProps) {
         </p>
       </div>
 
-      {options.length > 0 ? (
-        <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+      {field.isLocked ? (
+        <div className="h-7 flex-1 flex items-center gap-1.5 rounded border bg-muted/30 px-2">
+          <Lock className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+          <span className="text-xs text-muted-foreground">
+            {field.fieldValue || '—'}
+          </span>
+        </div>
+      ) : options.length > 0 ? (
+        <Popover open={popoverOpen} onOpenChange={handleOpenChange}>
           <PopoverTrigger asChild>
             <Button
               variant="outline"
@@ -204,9 +237,11 @@ function FieldRow({ field, onUpdate, onDelete }: FieldRowProps) {
               aria-expanded={popoverOpen}
               className="h-7 flex-1 justify-between text-xs font-normal"
             >
-              <span className={cn(!field.fieldValue && 'text-muted-foreground')}>
-                {field.fieldValue || (field.isRequired ? 'Required' : '—')}
-              </span>
+              {field.fieldValue ? (
+                <span>{field.fieldValue}</span>
+              ) : (
+                <span className="text-muted-foreground/60 text-[10px]">Select an option</span>
+              )}
               <ChevronsUpDown className="h-3 w-3 ml-1 shrink-0 opacity-50" />
             </Button>
           </PopoverTrigger>
@@ -215,8 +250,11 @@ function FieldRow({ field, onUpdate, onDelete }: FieldRowProps) {
               <CommandInput
                 placeholder="Search or type…"
                 className="h-8 text-xs"
-                value={field.fieldValue}
-                onValueChange={onUpdate}
+                value={searchQuery}
+                onValueChange={(val) => {
+                  setSearchQuery(val);
+                  onUpdate(val);
+                }}
               />
               <CommandList>
                 <CommandEmpty className="py-1.5 text-center text-xs text-muted-foreground">
@@ -249,7 +287,7 @@ function FieldRow({ field, onUpdate, onDelete }: FieldRowProps) {
         />
       )}
 
-      {!field.isRequired && (
+      {!field.isRequired && !field.isLocked && (
         <Button
           variant="ghost"
           size="icon"
@@ -269,11 +307,12 @@ function FieldRow({ field, onUpdate, onDelete }: FieldRowProps) {
 
 interface FieldsListProps {
   fields: LocalField[];
+  canonicalCode: string;
   onUpdateField: (localId: string, value: string) => void;
   onDeleteField: (localId: string) => void;
 }
 
-function FieldsList({ fields, onUpdateField, onDeleteField }: FieldsListProps) {
+function FieldsList({ fields, canonicalCode, onUpdateField, onDeleteField }: FieldsListProps) {
   if (fields.length === 0) return null;
 
   // Separate top-level (parent) fields from conditional child fields
@@ -292,6 +331,7 @@ function FieldsList({ fields, onUpdateField, onDeleteField }: FieldsListProps) {
       <FieldRow
         key={field.localId}
         field={field}
+        canonicalCode={canonicalCode}
         onUpdate={(val) => onUpdateField(field.localId, val)}
         onDelete={() => onDeleteField(field.localId)}
       />
@@ -308,6 +348,7 @@ function FieldsList({ fields, onUpdateField, onDeleteField }: FieldsListProps) {
         <div key={child.localId} className="pl-4 ml-1 border-l-2 border-primary/20 bg-muted/20">
           <FieldRow
             field={child}
+            canonicalCode={canonicalCode}
             onUpdate={(val) => onUpdateField(child.localId, val)}
             onDelete={() => onDeleteField(child.localId)}
           />
@@ -375,6 +416,7 @@ function ItemCard({
       <div className="px-3 pb-2">
         <FieldsList
           fields={item.fields}
+          canonicalCode={item.canonicalCode}
           onUpdateField={(fid, val) => onUpdateField(item.localId, fid, val)}
           onDeleteField={(fid) => onDeleteField(item.localId, fid)}
         />
@@ -415,6 +457,7 @@ interface HardwareItemCardProps {
   onDeleteField: (hwLocalId: string, fieldLocalId: string) => void;
   onAddField: (hwLocalId: string, field: Omit<LocalField, 'localId'>) => void;
   onToggleAddFieldForm: (hwLocalId: string | null) => void;
+  onUpdateQuantity: (hwLocalId: string, quantity: number) => void;
 }
 
 function HardwareItemCard({
@@ -425,6 +468,7 @@ function HardwareItemCard({
   onDeleteField,
   onAddField,
   onToggleAddFieldForm,
+  onUpdateQuantity,
 }: HardwareItemCardProps) {
   const [expanded, setExpanded] = useState(false);
 
@@ -442,6 +486,16 @@ function HardwareItemCard({
         {hw.loadingFields && (
           <Loader2 className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />
         )}
+        <div className="flex items-center gap-1 shrink-0">
+          <span className="text-[10px] text-muted-foreground">Qty</span>
+          <Input
+            type="number"
+            min={1}
+            value={hw.quantity}
+            onChange={(e) => onUpdateQuantity(hw.localId, parseInt(e.target.value) || 1)}
+            className="h-6 w-14 text-xs px-1.5"
+          />
+        </div>
         <Button
           variant="ghost"
           size="icon"
@@ -467,6 +521,7 @@ function HardwareItemCard({
         <div className="border-t px-3 pb-2 pt-2">
           <FieldsList
             fields={hw.fields}
+            canonicalCode={hw.canonicalCode}
             onUpdateField={(fid, val) => onUpdateField(hw.localId, fid, val)}
             onDeleteField={(fid) => onDeleteField(hw.localId, fid)}
           />
@@ -502,6 +557,7 @@ function HardwareItemCard({
 
 export function BuildOpeningDialog({
   estimateId,
+  resolveEstimateId,
   open,
   onOpenChange,
   onSaved,
@@ -514,12 +570,14 @@ export function BuildOpeningDialog({
   const [doorItems, setDoorItems] = useState<LocalTopLevelItem[]>([]);
   const [frameItems, setFrameItems] = useState<LocalTopLevelItem[]>([]);
   const [panelItems, setPanelItems] = useState<LocalTopLevelItem[]>([]);
+  const [liteItems, setLiteItems] = useState<LocalTopLevelItem[]>([]);
   const [hardwareItems, setHardwareItems] = useState<LocalHardwareItem[]>([]);
   const [itemTypes, setItemTypes] = useState<ItemType[]>([]);
   const [itemTypesLoading, setItemTypesLoading] = useState(false);
   const [doorModalOpen, setDoorModalOpen] = useState(false);
   const [frameModalOpen, setFrameModalOpen] = useState(false);
   const [panelModalOpen, setPanelModalOpen] = useState(false);
+  const [liteModalOpen, setLiteModalOpen] = useState(false);
   const [hardwareModalOpen, setHardwareModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -528,6 +586,11 @@ export function BuildOpeningDialog({
 
   // Field keys from doors that should be mirrored to matching frame fields
   const [passToFrameKeys, setPassToFrameKeys] = useState<Set<string>>(new Set());
+
+  // Door and frame use different field keys for handing — map them explicitly.
+  // Door stores it as 'handing'; frame stores it as 'hand'.
+  const DOOR_HANDING_KEY = 'handing';
+  const FRAME_HANDING_KEY = 'hand';
 
   // Load item types and reset state when dialog opens
   useEffect(() => {
@@ -543,6 +606,7 @@ export function BuildOpeningDialog({
     setDoorItems([]);
     setFrameItems([]);
     setPanelItems([]);
+    setLiteItems([]);
     setHardwareItems([]);
     setSaveError(null);
     setAddFieldFormOpenForId(null);
@@ -571,9 +635,37 @@ export function BuildOpeningDialog({
     const doors: LocalTopLevelItem[] = [];
     const frames: LocalTopLevelItem[] = [];
     const panels: LocalTopLevelItem[] = [];
+    const lites: LocalTopLevelItem[] = [];
 
     for (const item of opening.items) {
       const matchedType = types.find((t) => t.canonicalCode === item.canonicalCode);
+
+      // Lites / Louvers / Glass are their own category
+      if (item.itemType === LITES_ITEM_TYPE || matchedType?.category === LITES_ITEM_TYPE) {
+        const existingFields = (item as unknown as { fields: ItemField[] }).fields ?? [];
+        const fields: LocalField[] = existingFields.map((f) => ({
+          localId: newLocalId(),
+          fieldKey: f.fieldKey,
+          fieldLabel: f.fieldLabel,
+          fieldValue: f.fieldValue,
+          valueType: f.valueType,
+          fieldDefinitionId: f.fieldDefinitionId ?? undefined,
+          isRequired: false,
+          // Lock width and height on lites — they are always driven by the door
+          isLocked: f.fieldKey === 'width' || f.fieldKey === 'height',
+        }));
+        lites.push({
+          localId: newLocalId(),
+          itemLabel: item.itemLabel,
+          canonicalCode: item.canonicalCode,
+          category: LITES_ITEM_TYPE,
+          loadingFields: false,
+          fields,
+          manufacturerId: item.manufacturerId ?? null,
+        });
+        continue;
+      }
+
       let category: 'doors' | 'frames' | 'panels' = 'doors';
       if (item.itemType === 'panels' || matchedType?.category === 'panels') {
         category = 'panels';
@@ -601,6 +693,7 @@ export function BuildOpeningDialog({
         category,
         loadingFields: false,
         fields,
+        manufacturerId: item.manufacturerId ?? null,
       };
 
       if (category === 'doors') {
@@ -615,6 +708,7 @@ export function BuildOpeningDialog({
     setDoorItems(doors);
     setFrameItems(frames);
     setPanelItems(panels);
+    setLiteItems(lites);
 
     // Collect all hardware: opening-level (new style) + nested under door/frame (legacy)
     const allHardware: LocalHardwareItem[] = [];
@@ -626,6 +720,7 @@ export function BuildOpeningDialog({
         itemLabel: hw.itemLabel,
         canonicalCode: hw.canonicalCode,
         subcategory: hw.subcategory ?? null,
+        quantity: hw.quantity ?? 1,
         loadingFields: false,
         fields: hwFields.map((f) => ({
           localId: newLocalId(),
@@ -648,6 +743,7 @@ export function BuildOpeningDialog({
           itemLabel: hw.itemLabel,
           canonicalCode: hw.canonicalCode,
           subcategory: hw.subcategory ?? null,
+          quantity: hw.quantity ?? 1,
           loadingFields: false,
           fields: hwFields.map((f) => ({
             localId: newLocalId(),
@@ -671,22 +767,105 @@ export function BuildOpeningDialog({
   };
 
   const handleSelectFrame = (item: LocalTopLevelItem) => {
-    setFrameItems((prev) => [...prev, item]);
+    // The active door is always index 0 — either the single door or the active
+    // leaf on a pair. Pre-fill the frame's 'hand' field from that door's 'handing'.
+    const activeDoor = doorItems[0] ?? null;
+    const handingValue = activeDoor?.fields.find((f) => f.fieldKey === DOOR_HANDING_KEY)?.fieldValue ?? '';
+
+    if (handingValue) {
+      const hasHandField = item.fields.some((f) => f.fieldKey === FRAME_HANDING_KEY);
+      const updatedItem: LocalTopLevelItem = hasHandField
+        ? {
+            ...item,
+            fields: item.fields.map((f) =>
+              f.fieldKey === FRAME_HANDING_KEY ? { ...f, fieldValue: handingValue } : f
+            ),
+          }
+        : item;
+      setFrameItems((prev) => [...prev, updatedItem]);
+    } else {
+      setFrameItems((prev) => [...prev, item]);
+    }
   };
 
   const handleSelectPanel = (item: LocalTopLevelItem) => {
     setPanelItems((prev) => [...prev, item]);
   };
 
-  const handleSelectHardware = (hw: LocalHardwareItem) => {
-    setHardwareItems((prev) => [...prev, hw]);
+  const handleSelectLite = (item: LocalTopLevelItem) => {
+    // Apply locked width/height from the first door that has "Yes Lite or Louver"
+    const sourceDoor = doorItems.find((d) =>
+      d.fields.find((f) => f.fieldKey === GLASS_OR_LOUVER_FIELD_KEY)?.fieldValue ===
+        GLASS_OR_LOUVER_TRIGGER_VALUE
+    );
+
+    if (!sourceDoor) {
+      setLiteItems((prev) => [...prev, item]);
+      return;
+    }
+
+    const widthValue =
+      sourceDoor.fields.find((f) => f.fieldKey === GLASS_OR_LOUVER_WIDTH_KEY)?.fieldValue ?? '';
+    const heightValue =
+      sourceDoor.fields.find((f) => f.fieldKey === GLASS_OR_LOUVER_HEIGHT_KEY)?.fieldValue ?? '';
+
+    // Override width/height fields with door's glass dimensions and lock them
+    let processedItem: LocalTopLevelItem = {
+      ...item,
+      fields: item.fields.map((f) => {
+        if (f.fieldKey === 'width') return { ...f, fieldValue: widthValue, isLocked: true };
+        if (f.fieldKey === 'height') return { ...f, fieldValue: heightValue, isLocked: true };
+        return f;
+      }),
+    };
+
+    // If width/height weren't already in the item's fields, add them at the front
+    const hasWidth = processedItem.fields.some((f) => f.fieldKey === 'width');
+    const hasHeight = processedItem.fields.some((f) => f.fieldKey === 'height');
+    const extraFields: LocalField[] = [];
+    if (!hasWidth && widthValue) {
+      extraFields.push({ localId: newLocalId(), fieldKey: 'width', fieldLabel: 'Width', fieldValue: widthValue, valueType: 'string', isRequired: false, isLocked: true });
+    }
+    if (!hasHeight && heightValue) {
+      extraFields.push({ localId: newLocalId(), fieldKey: 'height', fieldLabel: 'Height', fieldValue: heightValue, valueType: 'string', isRequired: false, isLocked: true });
+    }
+    if (extraFields.length > 0) {
+      processedItem = { ...processedItem, fields: [...extraFields, ...processedItem.fields] };
+    }
+
+    setLiteItems((prev) => [...prev, processedItem]);
   };
 
-  const handleDeleteItem = (category: 'doors' | 'frames' | 'panels', localId: string) => {
+  const handleSelectHardware = (hw: LocalHardwareItem) => {
+    const isHinge = hw.canonicalCode.startsWith('HINGE') || hw.canonicalCode.startsWith('CONT-HINGE');
+    const isAnchor = hw.canonicalCode.startsWith('ANCHOR');
+    if (isHinge || isAnchor) {
+      const isPair = doorItems.length >= 2;
+      const heightIn = parseDimensionToInches(
+        doorItems[0]?.fields.find((f) => f.fieldKey === 'opening_height')?.fieldValue
+      );
+      const autoQty = calcHingeQty(heightIn, isPair);
+      setHardwareItems((prev) => [...prev, { ...hw, quantity: autoQty }]);
+    } else {
+      setHardwareItems((prev) => [...prev, hw]);
+    }
+  };
+
+  const handleUpdateHwQuantity = (hwLocalId: string, qty: number) => {
+    setHardwareItems((prev) =>
+      prev.map((h) => (h.localId === hwLocalId ? { ...h, quantity: qty } : h))
+    );
+  };
+
+  const handleDeleteItem = (category: 'doors' | 'frames' | 'panels' | 'lites_louvers_glass', localId: string) => {
     if (category === 'doors') {
       setDoorItems((prev) => prev.filter((i) => i.localId !== localId));
+      // Remove any auto-generated lite item linked to this door
+      setLiteItems((prev) => prev.filter((l) => l.localId !== liteLocalIdForDoor(localId)));
     } else if (category === 'frames') {
       setFrameItems((prev) => prev.filter((i) => i.localId !== localId));
+    } else if (category === 'lites_louvers_glass') {
+      setLiteItems((prev) => prev.filter((i) => i.localId !== localId));
     } else {
       setPanelItems((prev) => prev.filter((i) => i.localId !== localId));
     }
@@ -713,7 +892,7 @@ export function BuildOpeningDialog({
 
   const handleUpdateField = (itemLocalId: string, fieldLocalId: string, value: string) => {
     // Detect if this update is for a door item, and find the changed field key
-    // before applying the update so we can sync to frames if needed.
+    // before applying the update so we can sync to frames and lites if needed.
     const doorItem = doorItems.find((i) => i.localId === itemLocalId);
     const changedFieldKey = doorItem?.fields.find((f) => f.localId === fieldLocalId)?.fieldKey;
 
@@ -739,6 +918,42 @@ export function BuildOpeningDialog({
     // Mirror the value to matching frame fields when pass_value_to_frame is set
     if (doorItem && changedFieldKey && passToFrameKeys.has(changedFieldKey)) {
       setFrameItems((prev) => syncDoorFieldToFrames(prev, changedFieldKey, value));
+    }
+
+    // Sync handing from the active door to all frames.
+    // Door uses field key 'handing'; frame uses 'hand' — handle the mapping here.
+    // Only the active door drives the frame: index 0 for single, index 0 (active
+    // leaf) for a pair.
+    if (doorItem && changedFieldKey === DOOR_HANDING_KEY) {
+      const isActiveDoor = doorItems[0]?.localId === doorItem.localId;
+      if (isActiveDoor) {
+        setFrameItems((prev) =>
+          prev.map((frame) => ({
+            ...frame,
+            fields: frame.fields.map((f) =>
+              f.fieldKey === FRAME_HANDING_KEY ? { ...f, fieldValue: value } : f
+            ),
+          }))
+        );
+      }
+    }
+
+    // When a door's glass dimensions change, sync the locked width/height on any
+    // lite items that were added with locked dimensions from this door.
+    if (
+      doorItem &&
+      (changedFieldKey === GLASS_OR_LOUVER_WIDTH_KEY ||
+        changedFieldKey === GLASS_OR_LOUVER_HEIGHT_KEY)
+    ) {
+      const updatedDoor: LocalTopLevelItem = {
+        ...doorItem,
+        fields: doorItem.fields.map((f) =>
+          f.localId === fieldLocalId ? { ...f, fieldValue: value } : f
+        ),
+      };
+      setLiteItems((prev) =>
+        prev.map((l) => syncLiteDimensionsFromDoor(l, updatedDoor))
+      );
     }
   };
 
@@ -787,6 +1002,40 @@ export function BuildOpeningDialog({
   };
 
   // ---------------------------------------------------------------------------
+  // Lite item field handlers
+  // ---------------------------------------------------------------------------
+
+  const handleUpdateLiteField = (liteLocalId: string, fieldLocalId: string, value: string) => {
+    setLiteItems((prev) =>
+      prev.map((l) =>
+        l.localId === liteLocalId
+          ? { ...l, fields: l.fields.map((f) => (f.localId === fieldLocalId ? { ...f, fieldValue: value } : f)) }
+          : l
+      )
+    );
+  };
+
+  const handleDeleteLiteField = (liteLocalId: string, fieldLocalId: string) => {
+    setLiteItems((prev) =>
+      prev.map((l) =>
+        l.localId === liteLocalId
+          ? { ...l, fields: l.fields.filter((f) => f.localId !== fieldLocalId) }
+          : l
+      )
+    );
+  };
+
+  const handleAddLiteField = (liteLocalId: string, field: Omit<LocalField, 'localId'>) => {
+    setLiteItems((prev) =>
+      prev.map((l) =>
+        l.localId === liteLocalId
+          ? { ...l, fields: [...l.fields, { ...field, localId: newLocalId() }] }
+          : l
+      )
+    );
+  };
+
+  // ---------------------------------------------------------------------------
   // Save
   // ---------------------------------------------------------------------------
 
@@ -796,6 +1045,13 @@ export function BuildOpeningDialog({
     setSaveError(null);
 
     try {
+      // Resolve estimate ID — create the estimate record only now, on first save.
+      const eid = estimateId ?? (resolveEstimateId ? await resolveEstimateId() : null);
+      if (!eid) {
+        setSaveError('Unable to create estimate. Please try again.');
+        return;
+      }
+
       let openingData: EstimateOpening;
 
       if (editingOpening) {
@@ -817,7 +1073,7 @@ export function BuildOpeningDialog({
           await deleteEstimateItem(item.id);
         }
       } else {
-        openingData = await createEstimateOpening(estimateId, name.trim(), quantity);
+        openingData = await createEstimateOpening(eid, name.trim(), quantity);
       }
 
       const saveLocalFields = async (
@@ -856,12 +1112,38 @@ export function BuildOpeningDialog({
         return saved;
       };
 
-      // Save door, frame, and panel items (no hardware children)
-      const allItems = [...doorItems, ...frameItems, ...panelItems];
-      const itemsWithHardware: EstimateItemWithHardware[] = [];
+      // Inject door_role fields for pair openings (2+ door items)
+      const isPair = doorItems.length >= 2;
+      const doorsWithRole: Array<{ item: LocalTopLevelItem; fieldsToSave: LocalField[] }> =
+        doorItems.map((door, idx) => ({
+          item: door,
+          fieldsToSave: isPair
+            ? [
+                ...door.fields.filter((f) => f.fieldKey !== 'door_role'),
+                {
+                  localId: newLocalId(),
+                  fieldKey: 'door_role',
+                  fieldLabel: 'Door Role',
+                  fieldValue: idx === 0 ? 'active' : 'inactive',
+                  valueType: 'string' as const,
+                  isRequired: false,
+                  isLocked: true,
+                },
+              ]
+            : door.fields,
+        }));
 
-      for (const localItem of allItems) {
-        const created = await addEstimateItem(estimateId, {
+      // Save door, frame, panel, and lite items (no hardware children)
+      const itemsWithHardware: EstimateItemWithHardware[] = [];
+      const allItemsToSave: Array<{ item: LocalTopLevelItem; fieldsToSave: LocalField[] }> = [
+        ...doorsWithRole,
+        ...frameItems.map((item) => ({ item, fieldsToSave: item.fields })),
+        ...panelItems.map((item) => ({ item, fieldsToSave: item.fields })),
+        ...liteItems.map((item) => ({ item, fieldsToSave: item.fields })),
+      ];
+
+      for (const { item: localItem, fieldsToSave } of allItemsToSave) {
+        const created = await addEstimateItem(eid, {
           itemLabel: localItem.itemLabel,
           canonicalCode: localItem.canonicalCode,
           quantity: 1,
@@ -869,8 +1151,14 @@ export function BuildOpeningDialog({
           openingId: openingData.id,
           parentItemId: null,
           itemType: localItem.category,
+          manufacturerId: localItem.manufacturerId ?? null,
         });
-        await saveLocalFields(created.id, localItem.fields);
+        const savedFields = await saveLocalFields(created.id, fieldsToSave);
+        // Await pricing lookup so price is persisted before the dialog closes.
+        // Wrapped in try/catch so a lookup failure never blocks the save.
+        try {
+          await resolveAndPersistItemPrice(created.id, { ...created, manufacturerId: localItem.manufacturerId ?? null }, savedFields);
+        } catch { /* pricing errors never block save */ }
         itemsWithHardware.push({ ...created, hardware: [] });
       }
 
@@ -878,10 +1166,10 @@ export function BuildOpeningDialog({
       const savedHardware = [];
       for (let i = 0; i < hardwareItems.length; i++) {
         const hw = hardwareItems[i];
-        const created = await addEstimateItem(estimateId, {
+        const created = await addEstimateItem(eid, {
           itemLabel: hw.itemLabel,
           canonicalCode: hw.canonicalCode,
-          quantity: 1,
+          quantity: hw.quantity ?? 1,
           sortOrder: i,
           openingId: openingData.id,
           parentItemId: null,
@@ -913,7 +1201,51 @@ export function BuildOpeningDialog({
   };
 
   const totalItems = doorItems.length + frameItems.length + panelItems.length;
-  const canSave = name.trim().length > 0;
+
+  // True when at least one door in this opening has "Yes Lite or Louver" selected
+  const anyDoorNeedsLite = doorItems.some(
+    (d) =>
+      d.fields.find((f) => f.fieldKey === GLASS_OR_LOUVER_FIELD_KEY)?.fieldValue ===
+      GLASS_OR_LOUVER_TRIGGER_VALUE
+  );
+
+  // Compute pre-fill fields for the lite modal from the first door with glass/louver
+  const litePrefillFields = (() => {
+    const sourceDoor = doorItems.find((d) =>
+      d.fields.find((f) => f.fieldKey === GLASS_OR_LOUVER_FIELD_KEY)?.fieldValue ===
+        GLASS_OR_LOUVER_TRIGGER_VALUE
+    );
+    if (!sourceDoor) return undefined;
+    const w = sourceDoor.fields.find((f) => f.fieldKey === GLASS_OR_LOUVER_WIDTH_KEY)?.fieldValue ?? '';
+    const h = sourceDoor.fields.find((f) => f.fieldKey === GLASS_OR_LOUVER_HEIGHT_KEY)?.fieldValue ?? '';
+    return [
+      { fieldKey: 'width', fieldLabel: 'Width', value: w, locked: true },
+      { fieldKey: 'height', fieldLabel: 'Height', value: h, locked: true },
+    ];
+  })();
+  // Frame dimension validation
+  const firstDoor = doorItems[0] ?? null;
+  const firstFrame = frameItems[0] ?? null;
+  const isPairOpening = doorItems.length >= 2;
+  const doorWidthIn = parseDimensionToInches(
+    firstDoor?.fields.find((f) => f.fieldKey === 'opening_width')?.fieldValue
+  );
+  const doorHeightIn = parseDimensionToInches(
+    firstDoor?.fields.find((f) => f.fieldKey === 'opening_height')?.fieldValue
+  );
+  const frameWidthIn = parseDimensionToInches(
+    firstFrame?.fields.find((f) => f.fieldKey === 'opening_width')?.fieldValue
+  );
+  const frameHeightIn = parseDimensionToInches(
+    firstFrame?.fields.find((f) => f.fieldKey === 'opening_height')?.fieldValue
+  );
+  const doorWidthTotal = doorWidthIn != null ? (isPairOpening ? doorWidthIn * 2 : doorWidthIn) : null;
+  const frameWidthTooSmall =
+    frameWidthIn != null && doorWidthTotal != null && frameWidthIn < doorWidthTotal;
+  const frameHeightTooShort =
+    frameHeightIn != null && doorHeightIn != null && frameHeightIn < doorHeightIn;
+
+  const canSave = name.trim().length > 0 && !frameWidthTooSmall && !frameHeightTooShort;
 
   // Group hardware by subcategory for display
   const hardwareGroups = groupHardwareBySubcategory(hardwareItems);
@@ -996,6 +1328,48 @@ export function BuildOpeningDialog({
               </Button>
             </div>
 
+            {/* ── Lites / Louvers / Glass — appears right after Doors when glass trigger is active ── */}
+            {anyDoorNeedsLite && (
+              <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-800/40 dark:bg-amber-900/10 p-3">
+                <div className="flex items-center gap-2">
+                  <GlassWater className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                  <span className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                    Lites / Louvers / Glass
+                  </span>
+                  {liteItems.length > 0 && (
+                    <Badge variant="secondary" className="text-xs">
+                      {liteItems.length}
+                    </Badge>
+                  )}
+                  <span className="text-xs text-amber-600/80 dark:text-amber-400/80 ml-auto">
+                    Required — door has "Yes Lite or Louver"
+                  </span>
+                </div>
+
+                {liteItems.map((item) => (
+                  <ItemCard
+                    key={item.localId}
+                    item={item}
+                    addFieldFormOpenForId={addFieldFormOpenForId}
+                    onDelete={(lid) => handleDeleteItem('lites_louvers_glass', lid)}
+                    onUpdateField={handleUpdateLiteField}
+                    onDeleteField={handleDeleteLiteField}
+                    onAddField={handleAddLiteField}
+                    onToggleAddFieldForm={setAddFieldFormOpenForId}
+                  />
+                ))}
+
+                <Button
+                  variant="outline"
+                  className="w-full border-dashed border-amber-300 text-amber-700 hover:bg-amber-50 hover:text-amber-900 dark:border-amber-700/50 dark:text-amber-400 dark:hover:bg-amber-900/20"
+                  onClick={() => setLiteModalOpen(true)}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Select Lite / Louver / Glass Item
+                </Button>
+              </div>
+            )}
+
             <Separator />
 
             {/* ── Frame ── */}
@@ -1009,6 +1383,20 @@ export function BuildOpeningDialog({
                   </Badge>
                 )}
               </div>
+
+              {/* Frame dimension warnings */}
+              {frameWidthTooSmall && (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  Frame width ({frameWidthIn}&quot;) is narrower than the door{isPairOpening ? 's' : ''} ({doorWidthTotal}&quot; total). Please adjust.
+                </div>
+              )}
+              {frameHeightTooShort && (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  Frame height ({frameHeightIn}&quot;) is too short for the door height ({doorHeightIn}&quot;). Please adjust.
+                </div>
+              )}
 
               {frameItems.map((item) => (
                 <ItemCard
@@ -1108,6 +1496,7 @@ export function BuildOpeningDialog({
                       onDeleteField={handleDeleteHwField}
                       onAddField={handleAddHwField}
                       onToggleAddFieldForm={setAddHwFieldFormOpenForId}
+                      onUpdateQuantity={handleUpdateHwQuantity}
                     />
                   ))}
                 </div>
@@ -1153,7 +1542,7 @@ export function BuildOpeningDialog({
           onSaveTopLevel={handleSelectFrame}
           onSaveHardware={() => {}}
           passToFrameKeys={passToFrameKeys}
-          sourceDoor={doorItems[doorItems.length - 1]}
+          sourceDoor={doorItems[0] ?? null}
         />
         <AddItemModal
           category="panels"
@@ -1164,6 +1553,17 @@ export function BuildOpeningDialog({
           onOpenChange={setPanelModalOpen}
           onSaveTopLevel={handleSelectPanel}
           onSaveHardware={() => {}}
+        />
+        <AddItemModal
+          category="lites_louvers_glass"
+          title="Select Lite / Louver / Glass"
+          itemTypes={itemTypes}
+          itemTypesLoading={itemTypesLoading}
+          open={liteModalOpen}
+          onOpenChange={setLiteModalOpen}
+          onSaveTopLevel={handleSelectLite}
+          onSaveHardware={() => {}}
+          preFillFields={litePrefillFields}
         />
         <AddItemModal
           category="hardware"

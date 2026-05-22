@@ -329,7 +329,7 @@ export async function updateEstimate(
 export async function updateEstimateItem(
   id: string,
   updates: Partial<
-    Pick<EstimateItem, 'itemLabel' | 'canonicalCode' | 'quantity' | 'unitPrice' | 'sortOrder' | 'openingId'>
+    Pick<EstimateItem, 'itemLabel' | 'canonicalCode' | 'quantity' | 'unitPrice' | 'sortOrder' | 'openingId' | 'manufacturerId' | 'priceSource' | 'priceLookupMetadata' | 'isManualPriceOverride'>
   >
 ): Promise<EstimateItem> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -341,6 +341,10 @@ export async function updateEstimateItem(
   if (updates.unitPrice !== undefined) row.unit_price = updates.unitPrice;
   if (updates.sortOrder !== undefined) row.sort_order = updates.sortOrder;
   if (updates.openingId !== undefined) row.opening_id = updates.openingId;
+  if (updates.manufacturerId !== undefined) row.manufacturer_id = updates.manufacturerId;
+  if (updates.priceSource !== undefined) row.price_source = updates.priceSource;
+  if (updates.priceLookupMetadata !== undefined) row.price_lookup_metadata = updates.priceLookupMetadata;
+  if (updates.isManualPriceOverride !== undefined) row.is_manual_price_override = updates.isManualPriceOverride;
 
   const { data, error } = await supabase
     .from('estimate_items')
@@ -414,6 +418,10 @@ export async function addEstimateItem(
     parentItemId?: string | null;
     subcategory?: string | null;
     itemType?: string | null;
+    manufacturerId?: string | null;
+    unitPrice?: number | null;
+    priceSource?: 'lookup' | 'manual' | 'ocr' | null;
+    priceLookupMetadata?: Record<string, unknown> | null;
   }
 ): Promise<EstimateItem> {
   const { data, error } = await supabase
@@ -428,6 +436,10 @@ export async function addEstimateItem(
       parent_item_id: item.parentItemId ?? null,
       subcategory: item.subcategory ?? null,
       item_type: item.itemType ?? null,
+      manufacturer_id: item.manufacturerId ?? null,
+      unit_price: item.unitPrice ?? null,
+      price_source: item.priceSource ?? null,
+      price_lookup_metadata: item.priceLookupMetadata ?? null,
     })
     .select()
     .single();
@@ -1133,18 +1145,61 @@ export async function getDefaultValuesForFields(
     const fieldKey = fieldKeyById[defId];
     if (!fieldKey) continue;
 
+    // Only pre-select if an item-specific default is starred on the items page.
+    // Global field_value_options defaults (from the master item fields page) are
+    // intentionally ignored so that dropdowns start blank unless the user has
+    // explicitly starred an option for this particular item.
     const itemOpts = itemByDef.get(defId) ?? [];
     const itemDefault = itemOpts.find((o) => o.isDefault);
     if (itemDefault) { result[fieldKey] = itemDefault.value; continue; }
-
-    const globalOpts = globalByDef.get(defId) ?? [];
-    const globalDefault = globalOpts.find((o) => o.isDefault);
-    if (globalDefault) { result[fieldKey] = globalDefault.value; continue; }
-
-    if (globalOpts.length > 0) { result[fieldKey] = globalOpts[0].value; }
   }
 
   return result;
+}
+
+/**
+ * Returns the effective option list for a (canonicalCode, fieldDefinitionId) pair
+ * as used by the estimate wizard.
+ *
+ * If item-specific options exist in item_type_field_value_options for this item,
+ * those are returned (respecting any per-item ordering / additions the user made
+ * on the Items page).  Otherwise falls back to the global field_value_options set.
+ */
+export async function getItemFieldValueOptionsForWizard(
+  canonicalCode: string,
+  fieldDefinitionId: string
+): Promise<FieldValueOption[]> {
+  const [perItemResult, globalResult] = await Promise.all([
+    supabase
+      .from('item_type_field_value_options')
+      .select('*')
+      .eq('canonical_code', canonicalCode)
+      .eq('field_definition_id', fieldDefinitionId)
+      .order('sort_order', { ascending: true }),
+    supabase
+      .from('field_value_options')
+      .select('*')
+      .eq('field_definition_id', fieldDefinitionId)
+      .order('sort_order', { ascending: true })
+      .order('value', { ascending: true }),
+  ]);
+
+  const perItemRows = perItemResult.data ?? [];
+  if (perItemRows.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return perItemRows.map((row: any) => ({
+      id: row.id,
+      fieldDefinitionId: row.field_definition_id,
+      value: row.value,
+      usageCount: 0,
+      sortOrder: row.sort_order ?? 0,
+      isDefault: row.is_default ?? false,
+      codeToken: row.code_token ?? null,
+      createdAt: row.created_at,
+    }));
+  }
+
+  return (globalResult.data ?? []).map(mapFieldValueOptionRow);
 }
 
 /** Fetch options for a field definition, ordered by sort_order then alphabetically. */
@@ -1610,6 +1665,7 @@ export async function getItemTypes(): Promise<ItemType[]> {
     category: 'hardware' as ItemCategory,
     subcategory: row.subcategory as HardwareSubcategory,
     isFamily: row.is_family ?? false,
+    hwCodePrefix: row.code_prefix ?? null,
   })).filter((item) => !discoveredCodes.has(item.canonicalCode));
 
   // Add virtual catalog entries for registry-defined categories (e.g. panels) that
@@ -1803,23 +1859,33 @@ export async function getBaseFieldsForCategory(
       .select('id, field_definition_id, sort_order, created_at, field_definitions(*)')
       .eq('item_type_slug', categorySlug)
       .order('sort_order', { ascending: true }),
+    // Fetch ALL overrides (including hidden) so we know which base fields to exclude
     supabase
       .from('item_type_field_overrides')
-      .select('id, canonical_code, field_definition_id, is_required, is_hidden, sort_order, created_at, updated_at, field_definitions(*)')
+      .select('id, canonical_code, field_definition_id, is_required, is_hidden, is_added_locally, sort_order, created_at, updated_at, field_definitions(*)')
       .eq('canonical_code', canonicalCode)
-      .eq('is_hidden', false)
       .order('sort_order', { ascending: true }),
   ]);
 
   if (baseResult.error) throw new Error(`Failed to fetch base fields: ${baseResult.error.message}`);
   if (overrideResult.error) throw new Error(`Failed to fetch field overrides: ${overrideResult.error.message}`);
 
+  // Build a set of field_definition_ids hidden for this specific item
+  const hiddenIds = new Set<string>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const row of (overrideResult.data ?? []) as any[]) {
+    if (row.is_hidden) hiddenIds.add(row.field_definition_id);
+  }
+
   const seen = new Set<string>();
   const results: ItemTypeField[] = [];
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const row of (baseResult.data ?? []) as any[]) {
     const fd = row.field_definitions;
     if (!fd || seen.has(row.field_definition_id)) continue;
+    // Skip base fields that have been hidden for this specific item on the Items page
+    if (hiddenIds.has(row.field_definition_id)) continue;
     seen.add(row.field_definition_id);
     results.push({
       id: row.id,
@@ -1832,9 +1898,12 @@ export async function getBaseFieldsForCategory(
     });
   }
 
+  // Include locally-added fields (not hidden) and required-override fields
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const row of (overrideResult.data ?? []) as any[]) {
     const fd = row.field_definitions;
     if (!fd || seen.has(row.field_definition_id)) continue;
+    if (row.is_hidden) continue;
     seen.add(row.field_definition_id);
     results.push({
       id: row.id,
@@ -2088,6 +2157,25 @@ export async function getHardwareFamilies(): Promise<HardwareCatalogItem[]> {
   return (data ?? []).map(mapHardwareCatalogRow);
 }
 
+/**
+ * Returns active non-family (leaf) hardware catalog items for a given family.
+ * Matches items both by the explicit `code_prefix` column AND by canonical_code
+ * LIKE prefix (covering legacy leaf rows that have code_prefix = null but whose
+ * canonical codes start with the family prefix, e.g. 'HINGE-MECH-SS-45X45-...').
+ */
+export async function getHardwareLeafItems(codePrefix: string): Promise<HardwareCatalogItem[]> {
+  const { data, error } = await supabase
+    .from('hardware_catalog')
+    .select('*')
+    .eq('is_family', false)
+    .eq('active', true)
+    .or(`code_prefix.eq.${codePrefix},canonical_code.like.${codePrefix}-%`)
+    .order('sort_order', { ascending: true });
+
+  if (error) throw new Error(`Failed to fetch hardware leaf items: ${error.message}`);
+  return (data ?? []).map(mapHardwareCatalogRow);
+}
+
 /** Admin: create a new hardware catalog item. */
 export async function createHardwareCatalogItem(
   item: Omit<HardwareCatalogItem, 'id'>
@@ -2185,6 +2273,9 @@ function mapEstimateItemRow(row: any): EstimateItem {
     parentItemId: row.parent_item_id ?? null,
     subcategory: row.subcategory ?? null,
     itemType: row.item_type ?? null,
+    priceSource: row.price_source ?? null,
+    priceLookupMetadata: row.price_lookup_metadata ?? null,
+    isManualPriceOverride: row.is_manual_price_override ?? false,
     createdAt: row.created_at,
   };
 }

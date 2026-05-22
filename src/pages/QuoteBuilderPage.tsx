@@ -14,6 +14,8 @@ import {
   Wrench,
   ChevronDown,
   ChevronRight,
+  RefreshCw,
+  Info,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -25,6 +27,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import { getEstimateWithItems } from '@/lib/estimates-api';
+import { refreshEstimatePricing } from '@/lib/pricing-lookup';
 import { getCompany } from '@/lib/companies-api';
 import { createQuote } from '@/lib/quotes-api';
 import { generateQuoteSummary } from '@/lib/gemini-api';
@@ -134,10 +137,24 @@ function CustomerLineItemsTable({
     const hasBulkOverride = bulkOverride !== undefined;
     const stripe = rowIdx++ % 2 === 0 ? 'bg-background' : 'bg-muted/20';
 
+    const priceMeta = item.estimateItem.priceLookupMetadata;
+    const snapshotDate = priceMeta?.computedAt ? new Date(priceMeta.computedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : null;
+
     return (
       <tr key={item.estimateItem.id} className={stripe}>
         <td className="px-4 py-3">
-          <span className="font-medium">{item.estimateItem.itemLabel}</span>
+          <div>
+            <span className="font-medium">{item.estimateItem.itemLabel}</span>
+            {item.estimateItem.priceSource === 'lookup' && snapshotDate && (
+              <p className="flex items-center gap-1 text-[10px] text-muted-foreground mt-0.5">
+                <Info className="h-2.5 w-2.5 shrink-0" />
+                Pricing table snapshot {snapshotDate}
+              </p>
+            )}
+            {item.estimateItem.priceSource === 'manual' && (
+              <p className="text-[10px] text-amber-600 mt-0.5">Manual price override</p>
+            )}
+          </div>
         </td>
         <td className="px-4 py-3 text-center text-muted-foreground">
           {item.estimateItem.quantity}
@@ -459,6 +476,8 @@ export default function QuoteBuilderPage() {
   const [itemMultipliers, setItemMultipliers] = useState<Record<string, number>>({});
   // Bulk markup overrides stored on the company (for display hints)
   const [bulkOverrides, setBulkOverrides] = useState<Record<string, number>>({});
+  // Pricing table refresh state
+  const [refreshingPrices, setRefreshingPrices] = useState(false);
 
   // ── Load data ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -564,6 +583,30 @@ export default function QuoteBuilderPage() {
       return next;
     });
   }, [estimateItems, bulkOverrides, companyDefaultMultiplier]);
+
+  // Refresh pricing from the pricing tables (re-runs lookup for non-overridden items)
+  const handleRefreshPricingTables = useCallback(async () => {
+    if (!estimateId) return;
+    setRefreshingPrices(true);
+    try {
+      const result = await refreshEstimatePricing(estimateId);
+      // Reload estimate items to pick up updated prices
+      const updated = await getEstimateWithItems(estimateId);
+      if (updated) setEstimateItems(updated.items);
+      toast({
+        title: `Prices refreshed`,
+        description: `${result.updated} item price${result.updated !== 1 ? 's' : ''} updated from pricing tables.`,
+      });
+    } catch (err) {
+      toast({
+        title: 'Refresh failed',
+        description: err instanceof Error ? err.message : 'Could not refresh pricing.',
+        variant: 'destructive',
+      });
+    } finally {
+      setRefreshingPrices(false);
+    }
+  }, [estimateId, toast]);
 
   const subtotal = useMemo(
     () => lineItems.reduce((sum, li) => sum + li.lineTotal, 0),
@@ -950,6 +993,19 @@ export default function QuoteBuilderPage() {
                   </p>
                 )}
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRefreshPricingTables}
+                disabled={refreshingPrices}
+                className="shrink-0"
+              >
+                {refreshingPrices ? (
+                  <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Refreshing…</>
+                ) : (
+                  <><RefreshCw className="h-3.5 w-3.5 mr-1.5" />Refresh from Pricing Tables</>
+                )}
+              </Button>
             </div>
 
             {/* Markup banner (customer or both) */}

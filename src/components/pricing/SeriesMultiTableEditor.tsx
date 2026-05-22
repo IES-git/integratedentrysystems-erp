@@ -29,6 +29,7 @@ import {
 } from '@/lib/pricing-api';
 import { useToast } from '@/hooks/use-toast';
 import { PricingTableEditor } from './PricingTableEditor';
+import { FramePricingTableEditor } from './FramePricingTableEditor';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,6 +47,7 @@ function tabLabel(t: PricingTableSummary): string {
 interface SeriesMultiTableEditorProps {
   seriesValue: string;
   fieldValueOptionId?: string;
+  category?: 'doors' | 'frames';
   onBack: () => void;
 }
 
@@ -56,6 +58,7 @@ interface SeriesMultiTableEditorProps {
 export function SeriesMultiTableEditor({
   seriesValue,
   fieldValueOptionId,
+  category = 'doors',
   onBack,
 }: SeriesMultiTableEditorProps) {
   const { toast } = useToast();
@@ -85,7 +88,7 @@ export function SeriesMultiTableEditor({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await listPricingTablesForSeries('doors', seriesValue);
+      const data = await listPricingTablesForSeries(category, seriesValue);
       setTables(data);
       setActiveId((prev) => {
         if (prev && data.find((t) => t.id === prev)) return prev;
@@ -96,7 +99,7 @@ export function SeriesMultiTableEditor({
     } finally {
       setLoading(false);
     }
-  }, [seriesValue, toast]);
+  }, [seriesValue, category, toast]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -140,7 +143,7 @@ export function SeriesMultiTableEditor({
     closeAllPickers();
     try {
       const created = await createPricingTable(
-        'doors',
+        category,
         seriesValue,
         company.name,
         fieldValueOptionId,
@@ -325,17 +328,31 @@ export function SeriesMultiTableEditor({
           {/* Active table editor                                                  */}
           {/* ------------------------------------------------------------------ */}
           {activeId ? (
-            <PricingTableEditor
-              key={activeId}
-              tableId={activeId}
-              seriesValue={seriesValue}
-              embedded
-              onVendorSync={(vendors) => handleVendorSync(activeId, vendors)}
-              onDelete={() => {
-                const t = tables.find((x) => x.id === activeId);
-                if (t) setDeleteTarget(t);
-              }}
-            />
+            category === 'frames' ? (
+              <FramePricingTableEditor
+                key={activeId}
+                tableId={activeId}
+                seriesValue={seriesValue}
+                embedded
+                onVendorSync={(vendors) => handleVendorSync(activeId, vendors)}
+                onDelete={() => {
+                  const t = tables.find((x) => x.id === activeId);
+                  if (t) setDeleteTarget(t);
+                }}
+              />
+            ) : (
+              <PricingTableEditor
+                key={activeId}
+                tableId={activeId}
+                seriesValue={seriesValue}
+                embedded
+                onVendorSync={(vendors) => handleVendorSync(activeId, vendors)}
+                onDelete={() => {
+                  const t = tables.find((x) => x.id === activeId);
+                  if (t) setDeleteTarget(t);
+                }}
+              />
+            )
           ) : (
             <div className="flex flex-col items-center justify-center py-24 text-center border rounded-2xl border-dashed">
               <Building2 className="h-12 w-12 text-muted-foreground/25 mb-4" />

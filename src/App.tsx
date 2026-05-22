@@ -66,6 +66,8 @@ const App = () => (
                 <Route path="estimates/new" element={<EstimateUploadPage />} />
                 <Route path="estimates/create" element={<ManualEstimateWizardPage />} />
                 <Route path="estimates/wizard" element={<EstimateWizardPage />} />
+                {/* Specific route first so "openings" isn't matched as :estimateId */}
+                <Route path="estimates/openings/new" element={<NewOpeningPage />} />
                 <Route path="estimates/:estimateId/openings/new" element={<NewOpeningPage />} />
                 
                 {/* Quotes */}
@@ -85,6 +87,11 @@ const App = () => (
                   <Route path="pricing" element={<PricingPage />} />
                   <Route path="pricing/doors" element={<PricingPage />} />
                   <Route path="pricing/doors/:seriesValue" element={<PricingPage />} />
+                  <Route path="pricing/frames" element={<PricingPage />} />
+                  <Route path="pricing/frames/:seriesValue" element={<PricingPage />} />
+                  <Route path="pricing/lites_louvers_glass" element={<PricingPage />} />
+                  <Route path="pricing/lites_louvers_glass/table/:tableId" element={<PricingPage />} />
+                  <Route path="pricing/lites_louvers_glass/:itemCode" element={<PricingPage />} />
 
                   {/* Templates */}
                   <Route path="templates" element={<TemplatesPage />} />

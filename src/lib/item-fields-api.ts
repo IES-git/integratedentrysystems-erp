@@ -665,12 +665,37 @@ export async function updateItemFieldOption(
   if (error) throw new Error(`Failed to update option: ${error.message}`);
 }
 
-/** Delete a per-item option. */
+/** Delete a per-item option by its row ID. */
 export async function deleteItemFieldOption(id: string): Promise<void> {
   const { error } = await supabase
     .from('item_type_field_value_options')
     .delete()
     .eq('id', id);
+  if (error) throw new Error(`Failed to delete option: ${error.message}`);
+}
+
+/**
+ * Delete a field option for a specific item, identified by value.
+ *
+ * If no per-item options exist yet, this first snapshots the global
+ * field_value_options into item_type_field_value_options (copy-on-write),
+ * then deletes the row whose value matches. This is the correct path when
+ * the user is deleting a global option that has not yet been copied to the
+ * per-item table.
+ */
+export async function deleteItemFieldOptionByValue(
+  canonicalCode: string,
+  fieldDefinitionId: string,
+  value: string
+): Promise<void> {
+  await _snapshotGlobalOptionsIfNeeded(canonicalCode, fieldDefinitionId);
+
+  const { error } = await supabase
+    .from('item_type_field_value_options')
+    .delete()
+    .eq('canonical_code', canonicalCode)
+    .eq('field_definition_id', fieldDefinitionId)
+    .eq('value', value);
   if (error) throw new Error(`Failed to delete option: ${error.message}`);
 }
 

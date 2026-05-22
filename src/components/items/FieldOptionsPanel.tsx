@@ -47,6 +47,7 @@ import {
   addItemFieldOption,
   updateItemFieldOption,
   deleteItemFieldOption,
+  deleteItemFieldOptionByValue,
   setDefaultItemFieldOption,
   reorderItemFieldOptions,
   setItemFieldLabel,
@@ -360,8 +361,16 @@ export function FieldOptionsPanel({
 
   async function handleDeleteOption(id: string) {
     try {
-      if (isPerItem) {
-        await deleteItemFieldOption(id);
+      if (isPerItem && canonicalCode) {
+        const option = options.find((o) => o.id === id);
+        if (!option) return;
+        // If the option has no canonicalCode property it's a global FieldValueOption
+        // that hasn't been snapshotted yet — use value-based delete which snapshots first.
+        if (!('canonicalCode' in option)) {
+          await deleteItemFieldOptionByValue(canonicalCode, field.id, option.value);
+        } else {
+          await deleteItemFieldOption(id);
+        }
       } else {
         await deleteFieldValueOption(id);
       }

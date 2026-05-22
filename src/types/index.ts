@@ -93,6 +93,58 @@ export interface Estimate {
   updatedAt: string;
 }
 
+/** How a unit_price was set on an estimate item. */
+export type PriceSource = 'lookup' | 'manual' | 'ocr';
+
+/**
+ * Status codes returned by the pricing lookup engine.
+ * - matched: a cell price was found and used
+ * - no_table: no pricing table exists for this series/category
+ * - no_vendor: manufacturer is not linked to any table for this series
+ * - no_row: no row matched the width/height dimensions
+ * - no_column: no column matched the field values (gauge, material, depth)
+ * - no_cell: row+column pair exists but no price has been entered
+ * - category_unsupported: item category has no lookup logic yet (e.g. hardware)
+ */
+export type PriceLookupStatus =
+  | 'matched'
+  | 'no_table'
+  | 'no_vendor'
+  | 'no_row'
+  | 'no_column'
+  | 'no_cell'
+  | 'category_unsupported';
+
+/** Snapshot data stored in estimate_items.price_lookup_metadata */
+export interface PriceLookupMetadata {
+  tableId: string | null;
+  rowId: string | null;
+  columnId: string | null;
+  parentColumnId: string | null;
+  adderCellIds: string[];
+  vendorId: string | null;
+  computedAt: string;
+  status: PriceLookupStatus;
+  warnings: string[];
+}
+
+/** Result of a single pricing lookup call. */
+export interface PriceResult {
+  basePrice: number | null;
+  adders: {
+    fieldKey: string;
+    fieldLabel: string;
+    optionValue: string;
+    price: number;
+    cellId: string;
+  }[];
+  totalUnitPrice: number | null;
+  vendorId: string | null;
+  status: PriceLookupStatus;
+  warnings: string[];
+  metadata: PriceLookupMetadata;
+}
+
 export interface EstimateItem {
   id: string;
   estimateId: string | null;
@@ -106,6 +158,12 @@ export interface EstimateItem {
   parentItemId?: string | null;
   subcategory?: HardwareSubcategory | null;
   itemType?: ItemCategory | null;
+  /** How unit_price was populated. Null means not yet looked up. */
+  priceSource?: PriceSource | null;
+  /** Snapshot of the last pricing lookup for this item. */
+  priceLookupMetadata?: PriceLookupMetadata | null;
+  /** True when the user manually entered a price override on the Review step. */
+  isManualPriceOverride?: boolean;
   createdAt: string;
 }
 
@@ -244,7 +302,7 @@ export interface ItemTypeBaseField {
   fieldDefinition?: FieldDefinition;
 }
 
-export type HardwareSubcategory = 'swing_it' | 'close_it' | 'latch_it' | 'protect_it';
+export type HardwareSubcategory = 'swing_it' | 'close_it' | 'latch_it' | 'protect_it' | 'mount_it';
 
 export interface HardwareCatalogItem {
   id: string;
@@ -282,6 +340,12 @@ export interface ItemType {
   subcategory?: HardwareSubcategory;
   /** True for hardware family rows that require the progressive-disclosure wizard. */
   isFamily?: boolean;
+  /**
+   * For hardware family rows: the canonical code prefix used in leaf item codes
+   * (e.g. 'WSTRIP' for the 'WEATHERSTRIP' family, 'CONT-HINGE' for 'CONT-HINGE').
+   * Used to query leaf items even when they are keyed differently from the family.
+   */
+  hwCodePrefix?: string | null;
 }
 
 export interface ItemTypeField {
@@ -440,7 +504,7 @@ export interface QuickBooksSync {
 }
 
 // Pricing Types
-export type PricingCategory = 'doors' | 'frames' | 'hardware';
+export type PricingCategory = 'doors' | 'frames' | 'hardware' | 'lites_louvers_glass';
 
 export interface PricingTable {
   id: string;
@@ -479,6 +543,8 @@ export interface PricingColumn {
   pricingTableId: string;
   label: string;
   criteria: ColumnCriteria;
+  /** If set, this column is a sub-column (depth) under the given parent (gauge group). */
+  parentColumnId: string | null;
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
@@ -524,6 +590,51 @@ export interface DoorSeriesSummary {
   fieldValueOptionId: string | null;
   /** All pricing tables that have been created for this series. */
   pricingTables: PricingTableSummary[];
+}
+
+/** A row in pricing_table_items — links an item (by canonical_code) to a pricing table. */
+export interface PricingTableItem {
+  id: string;
+  pricingTableId: string;
+  canonicalCode: string;
+  itemType: string;
+  /** Display label fetched from estimate_items.item_label */
+  itemLabel: string;
+  sortOrder: number;
+  createdAt: string;
+}
+
+export interface LitesLouversGlassItemSummary {
+  /** canonical_code from estimate_items — used as series_value on pricing_tables */
+  canonicalCode: string;
+  /** Display label (item_label from estimate_items) */
+  label: string;
+  /** The pricing table id if one exists for this item, otherwise null */
+  pricingTableId: string | null;
+  rowCount: number;
+  columnCount: number;
+  lastUpdatedAt: string | null;
+  vendors: { id: string; name: string }[];
+}
+
+/** A pricing table group as shown in the lites/louvers/glass list view. */
+export interface LitesLouversGlassPricingGroup {
+  tableId: string;
+  tableName: string;
+  /** All items tagged to this pricing table */
+  items: { canonicalCode: string; label: string }[];
+  rowCount: number;
+  columnCount: number;
+  lastUpdatedAt: string;
+  vendors: { id: string; name: string }[];
+}
+
+/** Result shape for the grouped lites/louvers/glass list view. */
+export interface LitesLouversGlassGroupedListResult {
+  /** Pricing tables that have at least one item tagged */
+  pricingTables: LitesLouversGlassPricingGroup[];
+  /** Items that have no pricing table association yet */
+  untaggedItems: { canonicalCode: string; label: string }[];
 }
 
 // ---------------------------------------------------------------------------
