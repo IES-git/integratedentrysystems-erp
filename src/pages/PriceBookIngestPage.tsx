@@ -18,6 +18,7 @@ import { listManufacturerCompanies } from '@/lib/pricing-api';
 import {
   uploadPriceBook, ingestPriceBook, pollBookStatus, extractPriceBookTable, listPriceBooks, listExtractionsForBook,
   approveExtraction, discardExtraction, deletePriceBook,
+  extractAllPriceBookTables, pollExtractAllStatus, hasPriceBookWorker,
   type ColumnMapping, type RowMapping,
 } from '@/lib/price-books-api';
 import { getProposalForExtraction } from '@/lib/pricing-proposals-api';
@@ -137,6 +138,11 @@ export default function PriceBookIngestPage() {
       setReviewBook(book);
       setBookExtractions(list);
       setExtraction(null);
+      // If a background extract-all is still running, reattach the progress poller.
+      if (hasPriceBookWorker && book.extractStatus === 'processing') {
+        setExtractProgress({ done: book.extractDone, failed: book.extractFailed, total: book.extractTotal });
+        void trackExtractAll(book);
+      }
     } catch (err) {
       toast({ title: 'Failed to open review', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
     }
@@ -150,6 +156,7 @@ export default function PriceBookIngestPage() {
 
   const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set());
   const [extractingAll, setExtractingAll] = useState(false);
+  const [extractProgress, setExtractProgress] = useState<{ done: number; failed: number; total: number } | null>(null);
 
   const extractGrid = async (ext: PriceBookExtraction) => {
     if (!reviewBook) return;
@@ -165,12 +172,61 @@ export default function PriceBookIngestPage() {
     }
   };
 
-  /** Extract all not-yet-pulled grids with bounded concurrency. */
+  /** Poll a running background extract-all job to completion, updating UI. */
+  const trackExtractAll = async (book: PriceBook) => {
+    setExtractingAll(true);
+    let lastReload = 0;
+    try {
+      const finalBook = await pollExtractAllStatus(book.id, {
+        onProgress: (b) => {
+          setExtractProgress({ done: b.extractDone, failed: b.extractFailed, total: b.extractTotal });
+          // Refresh the table periodically so rows flip to "Ready to map".
+          const now = Date.now();
+          if (now - lastReload > 6000) { lastReload = now; void reloadBookExtractions(book); }
+        },
+      });
+      await reloadBookExtractions(book);
+      toast({
+        title: 'Grids extracted',
+        description: `Pulled ${finalBook.extractDone} grid(s)${finalBook.extractFailed ? `, ${finalBook.extractFailed} failed (retry those individually or re-run).` : '.'}`,
+        variant: finalBook.extractFailed ? 'destructive' : undefined,
+      });
+    } catch (err) {
+      toast({ title: 'Extraction failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+      await reloadBookExtractions(book);
+    } finally {
+      setExtractingAll(false);
+      setExtractProgress(null);
+    }
+  };
+
+  /**
+   * Extract every not-yet-pulled grid. With the Render worker this runs as a
+   * background job (survives closing the tab) and we just poll progress; the
+   * book keeps extracting even if the user navigates away. Without a worker it
+   * falls back to a client-driven, bounded-concurrency loop.
+   */
   const extractAllGrids = async () => {
     if (!reviewBook) return;
     const pending = bookExtractions.filter((e) => e.status === 'pending' && !e.gridExtracted);
     if (pending.length === 0) return;
     setExtractingAll(true);
+
+    if (hasPriceBookWorker) {
+      setExtractProgress({ done: 0, failed: 0, total: pending.length });
+      try {
+        await extractAllPriceBookTables(reviewBook.id);
+        await trackExtractAll(reviewBook);
+      } catch (err) {
+        toast({ title: 'Extraction failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+        await reloadBookExtractions(reviewBook);
+        setExtractingAll(false);
+        setExtractProgress(null);
+      }
+      return;
+    }
+
+    // Fallback: no worker configured — drive it from the browser.
     const CONCURRENCY = 3;
     try {
       for (let i = 0; i < pending.length; i += CONCURRENCY) {
@@ -485,10 +541,14 @@ export default function PriceBookIngestPage() {
                 <CardTitle className="text-base">Extracted pricing tables</CardTitle>
                 <CardDescription>Every table found in the book. Pull each grid, then map &amp; approve it into a pricing table.</CardDescription>
               </div>
-              {bookExtractions.some((e) => e.status === 'pending' && !e.gridExtracted) && (
+              {(extractingAll || bookExtractions.some((e) => e.status === 'pending' && !e.gridExtracted)) && (
                 <Button size="sm" variant="outline" onClick={extractAllGrids} disabled={extractingAll}>
                   {extractingAll ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
-                  Extract all grids
+                  {extractingAll
+                    ? (extractProgress
+                        ? `Extracting ${extractProgress.done}/${extractProgress.total}${extractProgress.failed ? ` (${extractProgress.failed} failed)` : ''}…`
+                        : 'Extracting…')
+                    : 'Extract all grids'}
                 </Button>
               )}
             </div>

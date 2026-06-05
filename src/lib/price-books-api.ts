@@ -38,6 +38,13 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
  */
 const WORKER_URL = (import.meta.env.VITE_PRICE_BOOK_WORKER_URL as string | undefined)?.replace(/\/$/, '');
 
+/**
+ * True when a Render worker is configured. The background "extract all" job
+ * only exists on the worker; without it the UI falls back to a client-driven
+ * per-table loop.
+ */
+export const hasPriceBookWorker = !!WORKER_URL;
+
 /** POSTs to the Render worker with the current user's Supabase access token. */
 async function callWorker<T>(path: string, body: Record<string, unknown>): Promise<T> {
   const { data: { session } } = await supabase.auth.getSession();
@@ -72,6 +79,11 @@ function mapPriceBook(row: Record<string, unknown>): PriceBook {
     ocrError: (row.ocr_error as string | null) ?? null,
     uploadedByUserId: (row.uploaded_by_user_id as string | null) ?? null,
     extractedAt: (row.extracted_at as string | null) ?? null,
+    extractStatus: (row.extract_status as PriceBook['extractStatus']) ?? null,
+    extractTotal: (row.extract_total as number) ?? 0,
+    extractDone: (row.extract_done as number) ?? 0,
+    extractFailed: (row.extract_failed as number) ?? 0,
+    extractError: (row.extract_error as string | null) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -200,6 +212,41 @@ export async function extractPriceBookTable(extractionId: string): Promise<{
   });
   if (error) throw new Error(error.message || 'Grid extraction failed');
   return data;
+}
+
+/**
+ * Step 2 (bulk, background) — EXTRACT ALL pending grids for a book on the
+ * Render worker. Returns immediately (202); the worker extracts every
+ * not-yet-pulled table with bounded concurrency and records progress on the
+ * price book (`extractStatus`/`extractTotal`/`extractDone`/`extractFailed`).
+ * Poll with `pollExtractAllStatus`. Worker-only (see `hasPriceBookWorker`).
+ */
+export async function extractAllPriceBookTables(priceBookId: string): Promise<{ success: boolean; started: boolean }> {
+  if (!WORKER_URL) throw new Error('Background extract-all requires the price-book worker (VITE_PRICE_BOOK_WORKER_URL).');
+  return callWorker('/extract-all', { priceBookId });
+}
+
+/**
+ * Polls a price book while a background extract-all run is in progress. Calls
+ * `onProgress` with the latest book on each tick. Resolves when the run leaves
+ * 'processing' (returns the final book) or rejects on error/timeout.
+ */
+export async function pollExtractAllStatus(
+  priceBookId: string,
+  opts: { intervalMs?: number; timeoutMs?: number; onProgress?: (book: PriceBook) => void } = {},
+): Promise<PriceBook> {
+  const intervalMs = opts.intervalMs ?? 3000;
+  const timeoutMs = opts.timeoutMs ?? 90 * 60 * 1000;
+  const start = Date.now();
+  for (;;) {
+    const book = await getPriceBook(priceBookId);
+    if (!book) throw new Error('Price book not found.');
+    opts.onProgress?.(book);
+    if (book.extractStatus === 'done') return book;
+    if (book.extractStatus === 'error') throw new Error(book.extractError || 'Extraction failed.');
+    if (Date.now() - start > timeoutMs) throw new Error('Extraction is taking longer than expected. Check back shortly.');
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 // ---------------------------------------------------------------------------

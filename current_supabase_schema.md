@@ -1248,6 +1248,7 @@ Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_depen
 52. `add_price_book_extraction_table_fields` - Multi-table price-book ingestion. Added `title`, `kind`, and `sort_order` columns to `price_book_extractions` so each detected table in a book is its own extraction row (with index on `(price_book_id, sort_order)`).
 53. `add_price_book_gemini_file_and_grid_extracted` - Decoupled ingestion (catalog + per-table grid). Added `gemini_file_uri` / `gemini_file_name` to `price_books` (Gemini Files API reference reused across per-table extraction) and `grid_extracted BOOLEAN DEFAULT false` to `price_book_extractions`.
 54. `add_page_hint_to_price_book_extractions` - Exhaustive cataloging. Added `page_hint TEXT` to `price_book_extractions` so the catalog pass records where each table lives and the per-table grid extraction can target the correct page/table (fixes wrong/merged grids).
+55. `add_extract_all_progress_to_price_books` - Background "extract all grids" job. Added `extract_status` / `extract_total` / `extract_done` / `extract_failed` / `extract_error` to `price_books` so the Render worker's `/extract-all` background job can report progress and the frontend can poll instead of holding the browser open. (Catalog round cap also raised 8→10 in the worker.)
 
 ## Edge Functions
 
@@ -1267,7 +1268,9 @@ CPQ Phase 1b — **STEP 2 (grid)**. `verify_jwt: false`.
 
 **Request:** POST `{ "extractionId": "uuid" }`
 
-**Flow:** loads the extraction + its `price_books` row → reuses the stored `gemini_file_uri` (re-uploads from storage and updates the row if the reference expired; CSV re-reads text) → **one** Gemini call extracts the full grid for THAT table only, **targeted by the extraction's `page_hint`** so it pulls the right table/page and doesn't merge neighbors (`column_labels, row_labels, cells[], column_field_hints, warnings`; truncated responses attempt partial cell recovery) → updates the extraction's `grid` + `grid_extracted=true` and refreshes the linked proposal's counts. The review UI fires these per table or via "Extract all grids" (bounded concurrency). **Runs on the Render `price-book-worker` when `VITE_PRICE_BOOK_WORKER_URL` is set; Edge Function is the fallback.**
+**Flow:** loads the extraction + its `price_books` row → reuses the stored `gemini_file_uri` (re-uploads from storage and updates the row if the reference expired; CSV re-reads text) → **one** Gemini call extracts the full grid for THAT table only, **targeted by the extraction's `page_hint`** so it pulls the right table/page and doesn't merge neighbors (`column_labels, row_labels, cells[], column_field_hints, warnings`; truncated responses attempt partial cell recovery) → updates the extraction's `grid` + `grid_extracted=true` and refreshes the linked proposal's counts. The review UI fires these per table or via "Extract all grids". **Runs on the Render `price-book-worker` when `VITE_PRICE_BOOK_WORKER_URL` is set; Edge Function is the fallback.**
+
+**Worker `/extract-all` (background bulk extraction):** for large books, "Extract all grids" calls the Render worker's `POST /extract-all { priceBookId }`, which returns 202 immediately and then extracts EVERY pending (`status='pending' AND grid_extracted=false`) table with bounded concurrency (default 4). Progress is written to `price_books.extract_status`/`extract_total`/`extract_done`/`extract_failed` after each table; the frontend polls these (it does NOT need to stay open — the job runs server-side). Per-table failures are counted and left un-extracted (retry individually or re-run; re-running only picks up what's still pending). Without a worker the UI falls back to a client-driven bounded-concurrency loop.
 
 **Response:** `{ success, extractionId, rowCount, colCount, cellCount, warnings }`
 
@@ -1544,6 +1547,11 @@ One row per uploaded vendor price book (manufacturer price list).
 - `extracted_at` (TIMESTAMPTZ, NULLABLE)
 - `gemini_file_uri` (TEXT, NULLABLE) - Gemini Files API URI for the uploaded book; set by the catalog step and reused by per-table grid extraction.
 - `gemini_file_name` (TEXT, NULLABLE) - Gemini Files API resource name (e.g. `files/abc`).
+- `extract_status` (TEXT, NULLABLE) - Background "extract all grids" job state: null (never run) | 'processing' | 'done' | 'error'. Set by the worker `/extract-all` job; the frontend polls it.
+- `extract_total` (INTEGER, NOT NULL, DEFAULT 0) - Tables targeted by the most recent extract-all run.
+- `extract_done` (INTEGER, NOT NULL, DEFAULT 0) - Tables successfully extracted so far in the current/last extract-all run.
+- `extract_failed` (INTEGER, NOT NULL, DEFAULT 0) - Tables that errored in the current/last extract-all run (retryable individually or by re-running).
+- `extract_error` (TEXT, NULLABLE) - Fatal error message if the extract-all job itself failed.
 - `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
 **Indexes:** on `company_id`, `ocr_status`, `created_at DESC`

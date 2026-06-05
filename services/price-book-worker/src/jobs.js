@@ -21,7 +21,9 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_TABLES = 200;
 // Catalog enumeration is repeated until the model reports no new tables (or it
 // stops being truncated). Bounded so a misbehaving model can't loop forever.
-const MAX_CATALOG_ROUNDS = 8;
+const MAX_CATALOG_ROUNDS = 10;
+// Default fan-out for the background "extract all grids" job.
+const EXTRACT_ALL_CONCURRENCY = 4;
 
 const BUCKET = 'price-book-files';
 
@@ -150,6 +152,68 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[catalog] error for ' + priceBookId + ':', message);
     await sb.from('price_books').update({ ocr_status: 'error', ocr_error: message }).eq('id', priceBookId);
+    throw err;
+  }
+}
+
+/**
+ * STEP 2 (bulk) — Extract EVERY not-yet-pulled grid for a book in the
+ * background with bounded concurrency, recording progress on the price_books
+ * row (`extract_status`/`extract_total`/`extract_done`/`extract_failed`) so the
+ * frontend can poll instead of holding the browser open. Per-table failures are
+ * tolerated (counted, left un-extracted) so the run always completes; re-running
+ * only picks up whatever is still pending.
+ */
+export async function runExtractAll(sb, geminiKey, priceBookId, { concurrency = EXTRACT_ALL_CONCURRENCY } = {}) {
+  try {
+    const { data: pendingRows, error } = await sb
+      .from('price_book_extractions')
+      .select('id')
+      .eq('price_book_id', priceBookId)
+      .eq('status', 'pending')
+      .eq('grid_extracted', false)
+      .order('sort_order', { ascending: true });
+    if (error) throw new Error(error.message);
+
+    const ids = (pendingRows || []).map((r) => r.id);
+    await sb.from('price_books').update({
+      extract_status: 'processing', extract_total: ids.length, extract_done: 0, extract_failed: 0, extract_error: null,
+    }).eq('id', priceBookId);
+
+    if (ids.length === 0) {
+      await sb.from('price_books').update({ extract_status: 'done' }).eq('id', priceBookId);
+      return { total: 0, done: 0, failed: 0 };
+    }
+
+    let done = 0;
+    let failed = 0;
+    let next = 0;
+
+    const worker = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= ids.length) return;
+        try {
+          await runExtractTable(sb, geminiKey, ids[i]);
+          done++;
+        } catch (e) {
+          failed++;
+          console.error(`[extract-all] table ${ids[i]} failed:`, e instanceof Error ? e.message : e);
+        }
+        // Best-effort progress ping after each table (races are harmless here).
+        await sb.from('price_books').update({ extract_done: done, extract_failed: failed }).eq('id', priceBookId);
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker));
+
+    await sb.from('price_books').update({ extract_status: 'done', extract_done: done, extract_failed: failed }).eq('id', priceBookId);
+    console.log(`[extract-all] ${priceBookId}: ${done} ok, ${failed} failed of ${ids.length}`);
+    return { total: ids.length, done, failed };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[extract-all] fatal for ' + priceBookId + ':', message);
+    await sb.from('price_books').update({ extract_status: 'error', extract_error: message }).eq('id', priceBookId);
     throw err;
   }
 }

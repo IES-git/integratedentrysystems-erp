@@ -2,16 +2,17 @@
 //
 // Endpoints (all require a valid Supabase user access token in
 // `Authorization: Bearer <token>`):
-//   GET  /health                 -> liveness
-//   POST /catalog  { priceBookId }   -> kicks off cataloging in the background, returns 202
-//   POST /extract  { extractionId }  -> extracts one table's grid (synchronous), returns counts
+//   GET  /health                     -> liveness
+//   POST /catalog     { priceBookId }   -> kicks off cataloging in the background, returns 202
+//   POST /extract-all { priceBookId }   -> extracts ALL pending grids in the background, returns 202 (poll price_books.extract_*)
+//   POST /extract     { extractionId }  -> extracts one table's grid (synchronous), returns counts
 //
 // Runs the long Gemini passes without the Edge Function wall-clock limit.
 
 import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
-import { runCatalog, runExtractTable } from './jobs.js';
+import { runCatalog, runExtractTable, runExtractAll } from './jobs.js';
 
 const {
   SUPABASE_URL,
@@ -69,6 +70,21 @@ app.post('/catalog', requireUser, async (req, res) => {
 
   // Fire-and-forget; runCatalog sets ocr_status done/error. The frontend polls.
   runCatalog(admin, GEMINI_API_KEY, priceBookId).catch((e) => console.error('[catalog] background error:', e));
+});
+
+// Extract ALL pending grids for a book: respond immediately, run in the
+// background (no timeout pressure), record progress on the price_books row.
+app.post('/extract-all', requireUser, async (req, res) => {
+  const { priceBookId } = req.body || {};
+  if (!priceBookId) return res.status(400).json({ error: 'Missing priceBookId' });
+  const { data: book, error } = await admin.from('price_books').select('id').eq('id', priceBookId).single();
+  if (error || !book) return res.status(404).json({ error: 'Price book not found' });
+
+  await admin.from('price_books').update({ extract_status: 'processing', extract_error: null }).eq('id', priceBookId);
+  res.status(202).json({ success: true, started: true, priceBookId });
+
+  // Fire-and-forget; runExtractAll sets extract_status done/error. The frontend polls.
+  runExtractAll(admin, GEMINI_API_KEY, priceBookId).catch((e) => console.error('[extract-all] background error:', e));
 });
 
 // Extract one table's grid (synchronous — Render has no request wall-clock cap).

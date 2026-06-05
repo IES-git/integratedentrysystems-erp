@@ -775,6 +775,15 @@ export interface PriceBook {
   ocrError: string | null;
   uploadedByUserId: string | null;
   extractedAt: string | null;
+  /** Background "extract all grids" job state. Null = never run. */
+  extractStatus: 'processing' | 'done' | 'error' | null;
+  /** Tables targeted by the most recent extract-all run. */
+  extractTotal: number;
+  /** Tables successfully extracted so far in the current/last extract-all run. */
+  extractDone: number;
+  /** Tables that errored in the current/last extract-all run. */
+  extractFailed: number;
+  extractError: string | null;
   createdAt: string;
   updatedAt: string;
 }
