@@ -7,6 +7,7 @@ import {
   uploadToGeminiFiles,
   callGemini,
   recoverCells,
+  recoverCatalogTables,
   buildCatalogPrompt,
   getCatalogSchema,
   buildGridPrompt,
@@ -14,10 +15,13 @@ import {
   loadAliasHints,
 } from './gemini.js';
 
-const CATALOG_MAX_TOKENS = 8192;
+const CATALOG_MAX_TOKENS = 16384;
 const GRID_MAX_TOKENS = 24576;
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
-const MAX_TABLES = 120;
+const MAX_TABLES = 200;
+// Catalog enumeration is repeated until the model reports no new tables (or it
+// stops being truncated). Bounded so a misbehaving model can't loop forever.
+const MAX_CATALOG_ROUNDS = 8;
 
 const BUCKET = 'price-book-files';
 
@@ -25,6 +29,55 @@ async function downloadBytes(sb, path) {
   const { data: blob, error } = await sb.storage.from(BUCKET).download(path);
   if (error || !blob) throw new Error('File download failed: ' + (error?.message || 'no data'));
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+/**
+ * Enumerate EVERY table in the book. A single Gemini pass over a large
+ * multi-page PDF often truncates (unparseable JSON) or under-lists, so we:
+ *   1. salvage tables from truncated responses, and
+ *   2. keep asking for tables NOT already listed until the model returns
+ *      nothing new (or the response is no longer truncated), bounded by
+ *      MAX_CATALOG_ROUNDS / MAX_TABLES.
+ * Returns { tables, vendorName, truncated } where `truncated` flags that we
+ * stopped while the model was still being cut off (i.e. possibly incomplete).
+ */
+async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart) {
+  const all = [];
+  const seen = new Set();
+  let vendorName = null;
+  let lastTruncated = false;
+
+  for (let round = 0; round < MAX_CATALOG_ROUNDS && all.length < MAX_TABLES; round++) {
+    const excludeTitles = all.map((t) => t.title);
+    const prompt = buildCatalogPrompt(book.category, aliasHints, csvText, excludeTitles);
+    const { parsed, truncated, raw } = await callGemini(geminiKey, prompt, getCatalogSchema(), CATALOG_MAX_TOKENS, filePart);
+    lastTruncated = truncated;
+
+    if (vendorName == null && parsed?.vendor_name) vendorName = parsed.vendor_name;
+
+    let tables = parsed?.tables ?? [];
+    if ((!tables || tables.length === 0) && raw) tables = recoverCatalogTables(raw);
+    tables = (tables || []).filter((t) => t && typeof t.title === 'string' && t.title.trim());
+
+    let added = 0;
+    for (const t of tables) {
+      const key = `${t.title.trim().toLowerCase()}|${(t.page_hint ?? '').toString().trim().toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      all.push(t);
+      added++;
+      if (all.length >= MAX_TABLES) break;
+    }
+
+    console.log(`[catalog] round ${round + 1}: +${added} (total ${all.length})${truncated ? ' [truncated]' : ''}`);
+
+    // Done when the model produced nothing new AND was not cut off mid-list.
+    if (added === 0 && !truncated) break;
+    // Defensive: if a round adds nothing yet keeps claiming truncation, stop.
+    if (added === 0) break;
+  }
+
+  return { tables: all, vendorName, truncated: lastTruncated };
 }
 
 /**
@@ -61,31 +114,37 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
       await sb.from('price_books').update({ gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
     }
 
-    const { parsed: catalog } = await callGemini(geminiKey, buildCatalogPrompt(book.category, aliasHints, csvText), getCatalogSchema(), CATALOG_MAX_TOKENS, filePart);
-    const vendorName = catalog?.vendor_name ?? null;
-    let tables = (catalog?.tables ?? []).filter((t) => t.title);
-    if (tables.length === 0) tables = [{ title: book.name, category: book.category ?? undefined, kind: 'size_grid' }];
-    if (tables.length > MAX_TABLES) tables = tables.slice(0, MAX_TABLES);
+    const { tables, vendorName, truncated } = await catalogAllTables(geminiKey, book, aliasHints, csvText, filePart);
+
+    // Fail loudly rather than silently degrading to a single bogus "whole book"
+    // table (the old behavior that made it look like only one table existed).
+    if (tables.length === 0) {
+      throw new Error('Cataloging found no pricing tables. The document may be image-only/low quality or the model response was empty — retry, or re-upload a clearer PDF.');
+    }
 
     const emptyGrid = { columnLabels: [], rowLabels: [], cells: [], columnFieldHints: {} };
     for (let i = 0; i < tables.length; i++) {
       const t = tables[i];
       const detectedCategory = ALLOWED_CATEGORIES.includes(t.category ?? '') ? t.category : (book.category ?? null);
+      const pageHint = t.page_hint ?? null;
       const { data: extraction, error: extErr } = await sb.from('price_book_extractions').insert({
         price_book_id: priceBookId, status: 'pending', title: t.title, kind: t.kind ?? null, sort_order: i,
         detected_category: detectedCategory, detected_series: t.series ?? null, detected_vendor_name: vendorName,
-        grid: emptyGrid, warnings: [], grid_extracted: false,
+        page_hint: pageHint, grid: emptyGrid, warnings: [], grid_extracted: false,
       }).select('id').single();
       if (extErr || !extraction) { console.error('[catalog] extraction insert failed:', extErr); continue; }
       await sb.from('pricing_change_proposals').insert({
         proposal_type: 'table', source: 'ingestion', price_book_id: priceBookId, target_ids: { extractionId: extraction.id },
-        payload: { title: t.title, kind: t.kind ?? null, detectedCategory, detectedSeries: t.series ?? null, detectedVendorName: vendorName, pageHint: t.page_hint ?? null },
-        confidence: 0.5, explanation: `"${t.title}" detected${t.page_hint ? ` (${t.page_hint})` : ''}. Extract its grid, then map to approve.`, status: 'pending',
+        payload: { title: t.title, kind: t.kind ?? null, detectedCategory, detectedSeries: t.series ?? null, detectedVendorName: vendorName, pageHint },
+        confidence: 0.5, explanation: `"${t.title}" detected${pageHint ? ` (${pageHint})` : ''}. Extract its grid, then map to approve.`, status: 'pending',
       });
     }
 
-    await sb.from('price_books').update({ ocr_status: 'done', extracted_at: new Date().toISOString(), gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
-    console.log(`[catalog] Cataloged ${tables.length} table(s) for ${priceBookId}`);
+    // Surface a soft warning when enumeration may have been cut off so the user
+    // knows to re-run if a category looks incomplete.
+    const ocrError = truncated ? `Cataloged ${tables.length} tables, but the index may be incomplete (hit the table cap or output limit). Re-run if a section is missing.` : null;
+    await sb.from('price_books').update({ ocr_status: 'done', ocr_error: ocrError, extracted_at: new Date().toISOString(), gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
+    console.log(`[catalog] Cataloged ${tables.length} table(s) for ${priceBookId}${truncated ? ' (possibly incomplete)' : ''}`);
     return { tableCount: tables.length };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -118,7 +177,7 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
     await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
   }
 
-  const prompt = buildGridPrompt(ext.title ?? book.name, ext.detected_category, ext.detected_series, ext.kind, null, aliasHints, csvText);
+  const prompt = buildGridPrompt(ext.title ?? book.name, ext.detected_category, ext.detected_series, ext.kind, ext.page_hint ?? null, aliasHints, csvText);
 
   let res;
   try {

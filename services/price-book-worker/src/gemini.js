@@ -105,11 +105,50 @@ export function recoverCells(jsonText) {
   return cells;
 }
 
-export function buildCatalogPrompt(categoryHint, aliasHints, csvText) {
+/**
+ * Salvage completed table objects from a truncated/invalid catalog response.
+ * Catalog table objects are flat (string fields only), so a non-greedy
+ * brace match recovers every fully-written entry even when the array was cut
+ * off mid-stream. Keeps anything with a usable title.
+ */
+export function recoverCatalogTables(jsonText) {
+  const tables = [];
+  const re = /\{[^{}]*\}/g;
+  let m;
+  while ((m = re.exec(jsonText)) !== null) {
+    try {
+      const o = JSON.parse(m[0]);
+      if (typeof o.title === 'string' && o.title.trim()) tables.push(o);
+    } catch { /* skip */ }
+  }
+  return tables;
+}
+
+export function buildCatalogPrompt(categoryHint, aliasHints, csvText, excludeTitles = []) {
   const aliasSection = aliasHints ? `\nKNOWN FIELD ALIASES (context):\n${aliasHints}\n` : '';
-  const catSection = categoryHint ? `\nThe user expects this book to be primarily "${categoryHint}", but it may contain other categories.` : '';
+  const catSection = categoryHint ? `\nThe user expects this book to be primarily "${categoryHint}", but it WILL contain other categories too (frames, hardware, adders). Include them all.` : '';
   const source = csvText ? `\nPRICE BOOK CONTENT (CSV/text):\n\n${csvText.slice(0, 80000)}\n` : '';
-  return `You are cataloging a manufacturer price book for commercial doors, frames, hardware, glass/lites, and panels.${catSection}${aliasSection}${source}\nList EVERY distinct pricing table or priced section in this document, from the FIRST page to the LAST. Be exhaustive — do NOT stop after the first table. A single book typically has MANY: multiple door series, multiple frame series, header tables, transom/lite/glass tables, hardware lists, and option/adder/surcharge tables (e.g. "add for fire label", "add for header", finish upcharges, oversize upcharges).\n\nFor EACH table/section return: title (heading as printed), category (doors|frames|hardware|lites_louvers_glass|panels|other), series (product line or null), kind (size_grid|flat_list|adder), page_hint, and a one-sentence description. Do NOT extract any prices yet. Include vendor_name if shown.\n\nReturn ONLY valid JSON matching the schema.`;
+  const excludeSection = excludeTitles.length
+    ? `\nALREADY-LISTED TABLES (do NOT repeat any of these; list ONLY tables that are NOT in this list):\n${excludeTitles.map((t) => `- ${t}`).join('\n')}\n`
+    : '';
+  return `You are cataloging a manufacturer price book for commercial doors, frames, hardware, glass/lites, and panels.${catSection}${aliasSection}${source}${excludeSection}
+Build a COMPLETE index of EVERY distinct pricing table or priced section in this document, from the FIRST page to the LAST.
+
+How to be exhaustive:
+1. First read the document's table of contents / index (if present) to learn how many sections there are (e.g. "Door Pricing", "Frame Pricing", "Hardware", "Adders/Options").
+2. Then page through the ENTIRE document in order. A real book has MANY tables: every door series has its own size grid (and often header/transom/louver/glass add tables), every frame series has its own grid, plus standalone hardware lists and MANY option/adder/surcharge tables (e.g. "add for fire label", "add for header", finish upcharges, oversize upcharges, prep charges).
+3. Treat each size grid, each flat price list, and each adder/surcharge table as a SEPARATE entry — never merge two printed tables into one.
+4. Do NOT stop after the first few. Err on the side of MORE entries.
+
+For EACH table/section return:
+- title: the heading exactly as printed (make it specific enough to find again, e.g. "FS Series Door Pricing", not just "Pricing").
+- category: one of doors|frames|hardware|lites_louvers_glass|panels|other.
+- series: the product line/series name, or null.
+- kind: size_grid (rows=sizes, cols=options) | flat_list (item -> price) | adder (surcharge/upcharge).
+- page_hint: the page number or page range where this table appears (e.g. "p. 12" or "pp. 12-13"). REQUIRED — give your best estimate.
+- description: <= 12 words. Keep it short to leave room for more tables.
+
+Do NOT extract any prices yet. Include vendor_name if shown. Return ONLY valid JSON matching the schema.`;
 }
 
 export function getCatalogSchema() {
@@ -119,8 +158,18 @@ export function getCatalogSchema() {
 export function buildGridPrompt(title, category, series, kind, pageHint, aliasHints, csvText) {
   const aliasSection = aliasHints ? `\nFIELD ALIASES — map column headers to these standard field keys when recognized (use the standard key in column_field_hints):\n${aliasHints}\n` : '';
   const source = csvText ? `\nPRICE BOOK CONTENT (CSV/text):\n\n${csvText.slice(0, 80000)}\n` : '';
-  const loc = pageHint ? ` (near ${pageHint})` : '';
-  return `You are extracting ONE specific pricing table from a manufacturer price book.${source}\nTARGET TABLE: "${title}"${loc} — category: ${category ?? 'unknown'}, series: ${series ?? 'n/a'}, kind: ${kind ?? 'size_grid'}.${aliasSection}\nExtract the COMPLETE grid for THIS table only (ignore other tables):\n1. column_labels: every column header left-to-right. For a flat_list or adder table with one price column, use a single column "Price".\n2. row_labels: every row top-to-bottom (sizes, or item/option names for flat_list/adder tables).\n3. cells: every priced cell as { row, col, price } using 0-based indices into row_labels/column_labels. Omit blanks. Capture EVERY row — do not stop early.\n4. column_field_hints: { col, field_key } for any column mappable to a standard field key.\n5. warnings: anything unreadable/ambiguous.\n\nReturn ONLY valid JSON. Prices are plain numbers (no $ or commas).`;
+  const loc = pageHint ? ` located at ${pageHint}` : '';
+  return `You are extracting ONE specific pricing table from a manufacturer price book.${source}
+TARGET TABLE: "${title}"${loc} — category: ${category ?? 'unknown'}, series: ${series ?? 'n/a'}, kind: ${kind ?? 'size_grid'}.${aliasSection}
+${pageHint ? `Go to ${pageHint} and find the table titled "${title}". ` : ''}Extract the COMPLETE grid for THIS table ONLY. Do NOT merge in rows or columns from any other table, and do NOT extract a different table even if it looks similar.
+
+1. column_labels: every column header left-to-right, exactly as printed. For a flat_list or adder table that has a single price column, use one column labeled "Price".
+2. row_labels: every row top-to-bottom (sizes like "3'0\" x 7'0\"" for grids, or item/option names for flat_list/adder tables). Preserve the printed order and the exact size formatting.
+3. cells: every priced cell as { row, col, price } using 0-based indices into row_labels/column_labels. Omit blank/empty cells. Capture EVERY priced cell across ALL rows and ALL columns — do not stop early or sample.
+4. column_field_hints: { col, field_key } for any column mappable to a standard field key.
+5. warnings: note anything unreadable, ambiguous, or any prices that appear to continue onto another page.
+
+If the table spans multiple pages, include the continuation rows too. Return ONLY valid JSON. Prices are plain numbers (no $, commas, or text).`;
 }
 
 export function getGridSchema() {

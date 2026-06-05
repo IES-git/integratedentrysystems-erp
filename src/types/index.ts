@@ -916,6 +916,8 @@ export interface PriceBookExtraction {
   title: string | null;
   kind: PriceBookTableKind | null;
   sortOrder: number;
+  /** Page/location hint from the catalog pass, used to target grid extraction. */
+  pageHint: string | null;
   /** True once the full price grid has been extracted (catalog inserts false). */
   gridExtracted: boolean;
   detectedCategory: PriceBookCategory | null;

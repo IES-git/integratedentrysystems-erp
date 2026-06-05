@@ -85,6 +85,7 @@ function mapExtraction(row: Record<string, unknown>): PriceBookExtraction {
     title: (row.title as string | null) ?? null,
     kind: (row.kind as string | null) ?? null,
     sortOrder: (row.sort_order as number) ?? 0,
+    pageHint: (row.page_hint as string | null) ?? null,
     gridExtracted: (row.grid_extracted as boolean) ?? false,
     detectedCategory: (row.detected_category as PriceBookCategory | null) ?? null,
     detectedSeries: (row.detected_series as string | null) ?? null,

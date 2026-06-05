@@ -1247,6 +1247,7 @@ Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_depen
 51. `add_compatibility_rules` - CPQ Phase 3. Created `compatibility_rules` (read authenticated, write admins) and `compatibility_rule_overrides` (full authenticated CRUD) tables for the configuration/compatibility rule engine; updated_at triggers; indexes on scope/active.
 52. `add_price_book_extraction_table_fields` - Multi-table price-book ingestion. Added `title`, `kind`, and `sort_order` columns to `price_book_extractions` so each detected table in a book is its own extraction row (with index on `(price_book_id, sort_order)`).
 53. `add_price_book_gemini_file_and_grid_extracted` - Decoupled ingestion (catalog + per-table grid). Added `gemini_file_uri` / `gemini_file_name` to `price_books` (Gemini Files API reference reused across per-table extraction) and `grid_extracted BOOLEAN DEFAULT false` to `price_book_extractions`.
+54. `add_page_hint_to_price_book_extractions` - Exhaustive cataloging. Added `page_hint TEXT` to `price_book_extractions` so the catalog pass records where each table lives and the per-table grid extraction can target the correct page/table (fixes wrong/merged grids).
 
 ## Edge Functions
 
@@ -1256,7 +1257,7 @@ CPQ Phase 1b — **STEP 1 (catalog)**. Decoupled from grid extraction so large b
 
 **Request:** POST `{ "priceBookId": "uuid" }`
 
-**Flow:** sets `ocr_status='processing'`, clears any prior extractions/pending proposals (re-ingest support) → uploads the file ONCE to the Gemini Files API and stores `gemini_file_uri`/`gemini_file_name` on `price_books` (CSV uses inline text) → **one** Gemini call enumerates EVERY table/section in the book (door series, frames, headers, glass/lites, hardware, option/adder tables) → inserts ONE placeholder `price_book_extractions` row (`grid_extracted=false`, empty grid) + ONE pending `pricing_change_proposals` row per table → sets `ocr_status='done'`. Never writes pricing_tables. XLSX rejected (export CSV/PDF). Capped at 120 tables.
+**Flow:** sets `ocr_status='processing'`, clears any prior extractions/pending proposals (re-ingest support) → uploads the file ONCE to the Gemini Files API and stores `gemini_file_uri`/`gemini_file_name` on `price_books` (CSV uses inline text) → **multi-round** catalog enumeration: repeatedly asks Gemini for tables NOT already listed (TOC-guided, exclude-list driven) until it reports nothing new or stops truncating, salvaging tables from truncated JSON, so EVERY table/section in the book is captured (every door series + its header/glass/lite add tables, every frame series, hardware lists, and all option/adder/surcharge tables) → inserts ONE placeholder `price_book_extractions` row per table (`grid_extracted=false`, empty grid, with `page_hint`) + ONE pending `pricing_change_proposals` row per table → sets `ocr_status='done'` (with a soft `ocr_error` warning if enumeration may have been cut off). If ZERO tables are found it sets `ocr_status='error'` (no more silent single-table fallback). Never writes pricing_tables. XLSX rejected (export CSV/PDF). Capped at 200 tables / 8 catalog rounds. **Runs on the Render `price-book-worker` when `VITE_PRICE_BOOK_WORKER_URL` is set (no wall-clock limit); Edge Function is the fallback.**
 
 **Response:** `{ success, priceBookId, tableCount, extractionsCreated }`
 
@@ -1266,7 +1267,7 @@ CPQ Phase 1b — **STEP 2 (grid)**. `verify_jwt: false`.
 
 **Request:** POST `{ "extractionId": "uuid" }`
 
-**Flow:** loads the extraction + its `price_books` row → reuses the stored `gemini_file_uri` (re-uploads from storage and updates the row if the reference expired; CSV re-reads text) → **one** Gemini call extracts the full grid for THAT table only (`column_labels, row_labels, cells[], column_field_hints, warnings`; truncated responses attempt partial cell recovery) → updates the extraction's `grid` + `grid_extracted=true` and refreshes the linked proposal's counts. Short and well within edge limits. The review UI fires these per table or via "Extract all grids" (bounded concurrency).
+**Flow:** loads the extraction + its `price_books` row → reuses the stored `gemini_file_uri` (re-uploads from storage and updates the row if the reference expired; CSV re-reads text) → **one** Gemini call extracts the full grid for THAT table only, **targeted by the extraction's `page_hint`** so it pulls the right table/page and doesn't merge neighbors (`column_labels, row_labels, cells[], column_field_hints, warnings`; truncated responses attempt partial cell recovery) → updates the extraction's `grid` + `grid_extracted=true` and refreshes the linked proposal's counts. The review UI fires these per table or via "Extract all grids" (bounded concurrency). **Runs on the Render `price-book-worker` when `VITE_PRICE_BOOK_WORKER_URL` is set; Edge Function is the fallback.**
 
 **Response:** `{ success, extractionId, rowCount, colCount, cellCount, warnings }`
 
@@ -1560,6 +1561,7 @@ Staging row holding the agent's normalized grid for ONE table within a price boo
 - `title` (TEXT, NULLABLE) - The table heading as printed in the book
 - `kind` (TEXT, NULLABLE) - 'size_grid' | 'flat_list' | 'adder'
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Document order
+- `page_hint` (TEXT, NULLABLE) - Page/location hint from the catalog pass (e.g. "p. 12"). Passed into per-table grid extraction to target the correct table on the correct page.
 - `grid_extracted` (BOOLEAN, NOT NULL, DEFAULT false) - The catalog step inserts placeholder rows with false; flips true once the per-table grid extraction fills the grid.
 - `detected_category` (TEXT, NULLABLE)
 - `detected_series` (TEXT, NULLABLE)
