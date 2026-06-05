@@ -30,6 +30,7 @@ import { getEstimateWithItems } from '@/lib/estimates-api';
 import { refreshEstimatePricing } from '@/lib/pricing-lookup';
 import { getCompany } from '@/lib/companies-api';
 import { createQuote } from '@/lib/quotes-api';
+import { assertEstimateBuildable } from '@/lib/cpq/service';
 import { generateQuoteSummary } from '@/lib/gemini-api';
 import { CustomerQuotePdf } from '@/components/quotes/CustomerQuotePdf';
 import { ManufacturerQuotePdf } from '@/components/quotes/ManufacturerQuotePdf';
@@ -649,6 +650,8 @@ export default function QuoteBuilderPage() {
     if (!estimateId || !user) return;
     setIsSaving(true);
     try {
+      // CPQ gate: block quoting non-buildable configurations (Phase 4).
+      await assertEstimateBuildable(estimateId);
       const quote = await createQuote({
         estimateId,
         companyId: customerId ?? null,
@@ -692,6 +695,7 @@ export default function QuoteBuilderPage() {
       total,
       currency: 'USD',
       notes: notes.trim() || null,
+      pricedAsOf: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -731,6 +735,7 @@ export default function QuoteBuilderPage() {
       total,
       currency: 'USD',
       notes: notes.trim() || null,
+      pricedAsOf: null,
       createdAt: now,
       updatedAt: now,
     };

@@ -402,6 +402,8 @@ export interface Quote {
   total: number;
   currency: string;
   notes: string | null;
+  /** Catalog snapshot timestamp this quote was priced against (CPQ Phase 0). */
+  pricedAsOf: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -699,6 +701,229 @@ export interface PricingAdderCell {
   price: number | null;
   currency: string;
   notes: string | null;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// CPQ — propose-only approval queue + versioning (Phase 0)
+// ---------------------------------------------------------------------------
+
+/** Where a change originated. The agent only ever produces 'ingestion'/'exception_agent'. */
+export type PricingChangeSource = 'ingestion' | 'exception_agent' | 'manual';
+
+export type PricingProposalType = 'cell' | 'column' | 'row' | 'adder' | 'table' | 'spec';
+
+export type PricingProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied';
+
+/**
+ * A single proposed change to canonical pricing/specs. Nothing the agent
+ * produces touches pricing_tables/pricing_cells directly — it lands here first
+ * for human review (propose-only trust boundary).
+ */
+export interface PricingChangeProposal {
+  id: string;
+  proposalType: PricingProposalType;
+  targetTableId: string | null;
+  /** Identifiers needed to locate/create the target (rowId, columnId, canonicalCode, etc.). */
+  targetIds: Record<string, unknown>;
+  /** The proposed value(s) — shape depends on proposalType. */
+  payload: Record<string, unknown>;
+  source: PricingChangeSource;
+  confidence: number | null;
+  explanation: string | null;
+  status: PricingProposalStatus;
+  createdBy: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Append-only audit row capturing every price written to a cell, with effective dating. */
+export interface PricingCellHistory {
+  id: string;
+  pricingCellId: string;
+  price: number | null;
+  currency: string;
+  effectiveFrom: string;
+  /** NULL = this is the currently-effective price. */
+  effectiveTo: string | null;
+  source: PricingChangeSource | 'import';
+  proposalId: string | null;
+  changedBy: string | null;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// CPQ — vendor price-book ingestion (Phase 1)
+// ---------------------------------------------------------------------------
+
+export type PriceBookCategory = 'doors' | 'frames' | 'hardware' | 'lites_louvers_glass' | 'panels';
+export type PriceBookFileType = 'pdf' | 'image' | 'xlsx' | 'csv';
+export type PriceBookStatus = 'pending' | 'processing' | 'done' | 'error';
+
+/** One uploaded vendor price book (manufacturer price list). */
+export interface PriceBook {
+  id: string;
+  companyId: string | null;
+  name: string;
+  category: PriceBookCategory | null;
+  sourceFileUrl: string;
+  originalFileName: string;
+  fileType: PriceBookFileType;
+  ocrStatus: PriceBookStatus;
+  ocrError: string | null;
+  uploadedByUserId: string | null;
+  extractedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A normalized cell extracted from a price book grid (pre-mapping). */
+export interface ExtractedGridCell {
+  /** Row index within the extraction grid. */
+  row: number;
+  /** Column index within the extraction grid. */
+  col: number;
+  price: number | null;
+}
+
+/**
+ * Normalized grid an extraction agent produces from a price book, before a
+ * human maps it onto pricing_columns/pricing_rows criteria and approves it.
+ */
+export interface ExtractedGrid {
+  /** Raw column header labels in order (e.g. "18 Gauge / CRS"). */
+  columnLabels: string[];
+  /** Raw row labels in order (e.g. "2-0, 2-4 x 6'8\""). */
+  rowLabels: string[];
+  /** Prices keyed by row/col index. */
+  cells: ExtractedGridCell[];
+  /** Optional detected field-key mapping per column (gauge/material/depth...). */
+  columnFieldHints?: Record<number, string>;
+}
+
+// ---------------------------------------------------------------------------
+// CPQ — pricing exception agent (Phase 2)
+// ---------------------------------------------------------------------------
+
+export type PricingExceptionResolutionStatus = 'pending' | 'approved' | 'rejected' | 'resolved';
+
+/** The agent's proposed fix for a failed pricing lookup (suggestion only). */
+export interface PricingExceptionSuggestion {
+  kind: 'closest_cell' | 'fuzzy_series' | 'add_adder' | 'manual' | 'none';
+  suggestedRowId?: string | null;
+  suggestedColumnId?: string | null;
+  suggestedPrice?: number | null;
+  reason: string;
+}
+
+/** A failed pricing lookup queued for human review (propose-only). */
+export interface PricingException {
+  id: string;
+  estimateItemId: string | null;
+  estimateId: string | null;
+  itemLabel: string;
+  lookupStatus: PriceLookupStatus;
+  context: Record<string, unknown>;
+  suggestion: PricingExceptionSuggestion | null;
+  explanation: string | null;
+  resolutionStatus: PricingExceptionResolutionStatus;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// CPQ — compatibility / configuration rule engine (Phase 3)
+// ---------------------------------------------------------------------------
+
+export type CompatibilityOperator =
+  | 'equals' | 'not_equals' | 'in' | 'not_in'
+  | 'gt' | 'lt' | 'gte' | 'lte' | 'between';
+
+/** A single predicate clause over one field's value. */
+export interface CompatibilityCondition {
+  fieldKey: string;
+  operator: CompatibilityOperator;
+  /** Strings for equality ops; numbers for comparison ops; [min,max] for between. */
+  values: (string | number)[];
+}
+
+/**
+ * Rule predicate: when `when` holds (or always, if omitted) for an in-scope
+ * item, `require` must also hold across the opening's field values — otherwise
+ * the rule is violated.
+ */
+export interface CompatibilityPredicate {
+  when?: CompatibilityCondition | null;
+  require: CompatibilityCondition;
+}
+
+export type CompatibilityScopeType = 'item_type' | 'canonical_code';
+export type CompatibilitySeverity = 'error' | 'warning';
+
+export interface CompatibilityRule {
+  id: string;
+  name: string;
+  scopeType: CompatibilityScopeType;
+  scopeValue: string;
+  predicate: CompatibilityPredicate;
+  severity: CompatibilitySeverity;
+  message: string;
+  active: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Vendor override for what-if scenario pricing. `byItem` wins over
+ * `byCategory`. Category keys are the normalized buckets: 'doors', 'frames',
+ * 'panels', 'lites_louvers_glass', 'hardware'.
+ */
+export interface VendorOverride {
+  byCategory?: Record<string, string>;
+  byItem?: Record<string, string>;
+}
+
+/** A rule that failed for a specific item in an opening. */
+export interface CompatibilityViolation {
+  ruleId: string;
+  ruleName: string;
+  severity: CompatibilitySeverity;
+  message: string;
+  itemId: string;
+  itemLabel: string;
+}
+
+export type PriceBookExtractionStatus = 'pending' | 'mapped' | 'approved' | 'discarded';
+
+/** What kind of table the agent detected. */
+export type PriceBookTableKind = 'size_grid' | 'flat_list' | 'adder' | string;
+
+/**
+ * Staging row holding the agent's extracted grid for ONE table within a price
+ * book. A book typically produces many of these (one per detected table:
+ * door series, frames, headers, adders, etc.).
+ */
+export interface PriceBookExtraction {
+  id: string;
+  priceBookId: string;
+  status: PriceBookExtractionStatus;
+  /** Heading of the table as printed in the book. */
+  title: string | null;
+  kind: PriceBookTableKind | null;
+  sortOrder: number;
+  /** True once the full price grid has been extracted (catalog inserts false). */
+  gridExtracted: boolean;
+  detectedCategory: PriceBookCategory | null;
+  detectedSeries: string | null;
+  detectedVendorName: string | null;
+  grid: ExtractedGrid;
+  warnings: string[];
+  createdAt: string;
   updatedAt: string;
 }
 

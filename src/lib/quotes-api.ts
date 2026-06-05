@@ -56,6 +56,7 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
       currency: input.currency ?? 'USD',
       notes: input.notes ?? null,
       status: 'draft',
+      priced_as_of: new Date().toISOString(),
     })
     .select()
     .single();
@@ -316,6 +317,7 @@ function mapQuoteRow(row: any): Quote {
     total: row.total,
     currency: row.currency,
     notes: row.notes,
+    pricedAsOf: row.priced_as_of ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

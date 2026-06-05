@@ -29,6 +29,8 @@ import AdminIntegrationsPage from "@/pages/AdminIntegrationsPage";
 import ItemManagementPage from "@/pages/ItemManagementPage";
 import ItemManagementProgressivePage from "@/pages/ItemManagementProgressivePage";
 import PricingPage from "@/pages/PricingPage";
+import PriceBookIngestPage from "@/pages/PriceBookIngestPage";
+import CompatibilityRulesPage from "@/pages/CompatibilityRulesPage";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -84,6 +86,7 @@ const App = () => (
                   <Route path="item-management" element={<ItemManagementProgressivePage />} />
 
                   {/* Pricing */}
+                  <Route path="pricing/ingest" element={<PriceBookIngestPage />} />
                   <Route path="pricing" element={<PricingPage />} />
                   <Route path="pricing/doors" element={<PricingPage />} />
                   <Route path="pricing/doors/:seriesValue" element={<PricingPage />} />
@@ -98,6 +101,7 @@ const App = () => (
                 
                 {/* Admin */}
                 <Route path="admin/users" element={<AdminUsersPage />} />
+                <Route path="admin/compatibility-rules" element={<CompatibilityRulesPage />} />
                 <Route path="admin/settings/integrations" element={<AdminIntegrationsPage />} />
               </Route>
 

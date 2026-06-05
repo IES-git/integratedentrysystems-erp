@@ -535,6 +535,7 @@ Quote records generated from estimates, supporting customer-facing and manufactu
 - `total` (NUMERIC, NOT NULL, DEFAULT 0) - Final total after adjustments
 - `currency` (TEXT, NOT NULL, DEFAULT 'USD') - ISO currency code
 - `notes` (TEXT, nullable) - Quote notes / payment terms / special instructions
+- `priced_as_of` (TIMESTAMPTZ, nullable) - Pins the catalog snapshot this quote was priced against, for reproducibility/audit (CPQ Phase 0). NULL for quotes created before this column existed.
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
 
@@ -1240,8 +1241,36 @@ Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_depen
 45. `seed_anchor_hardware_family` - Seeded ANCHOR family row in `hardware_catalog` (`subcategory='mount_it'`, `is_family=true`, `code_prefix='ANCHOR'`, `label_template='Anchor - {anchor_type}'`)
 46. `add_door_role_field_definition` - Added `door_role` field definition (`value_type='string'`) to `field_definitions` for tagging active/inactive doors in pair openings at save time
 47. `add_pricing_metadata_to_estimate_items` - Added `price_source TEXT CHECK ('lookup'|'manual'|'ocr')`, `price_lookup_metadata JSONB`, and `is_manual_price_override BOOLEAN DEFAULT false` columns to `estimate_items` for the pricing integration feature; index on `price_source`
+48. `add_pricing_proposals_and_cell_history` - CPQ Phase 0. Created `pricing_change_proposals` (universal propose-only approval queue; read/insert authenticated, update/delete admins; updated_at trigger) and `pricing_cell_history` (append-only price audit with effective dating; read/insert authenticated, no update/delete). Added `priced_as_of TIMESTAMPTZ` to `quotes` to pin the catalog snapshot a quote was priced against.
+49. `add_price_books_ingestion` - CPQ Phase 1. Created `price-book-files` storage bucket (+ RLS), `price_books` and `price_book_extractions` tables for vendor price-book ingestion (full authenticated RLS, updated_at triggers, indexes). Added `price_book_id` FK column to `pricing_change_proposals` linking ingestion proposals to their source book.
+50. `add_pricing_exceptions` - CPQ Phase 2. Created `pricing_exceptions` table (failed-lookup queue with agent suggestions; full authenticated RLS, updated_at trigger, partial unique index for one open exception per item).
+51. `add_compatibility_rules` - CPQ Phase 3. Created `compatibility_rules` (read authenticated, write admins) and `compatibility_rule_overrides` (full authenticated CRUD) tables for the configuration/compatibility rule engine; updated_at triggers; indexes on scope/active.
+52. `add_price_book_extraction_table_fields` - Multi-table price-book ingestion. Added `title`, `kind`, and `sort_order` columns to `price_book_extractions` so each detected table in a book is its own extraction row (with index on `(price_book_id, sort_order)`).
+53. `add_price_book_gemini_file_and_grid_extracted` - Decoupled ingestion (catalog + per-table grid). Added `gemini_file_uri` / `gemini_file_name` to `price_books` (Gemini Files API reference reused across per-table extraction) and `grid_extracted BOOLEAN DEFAULT false` to `price_book_extractions`.
 
 ## Edge Functions
+
+### ingest-price-book
+
+CPQ Phase 1b — **STEP 1 (catalog)**. Decoupled from grid extraction so large books never exceed the Edge Function wall-clock limit. `verify_jwt: false`.
+
+**Request:** POST `{ "priceBookId": "uuid" }`
+
+**Flow:** sets `ocr_status='processing'`, clears any prior extractions/pending proposals (re-ingest support) → uploads the file ONCE to the Gemini Files API and stores `gemini_file_uri`/`gemini_file_name` on `price_books` (CSV uses inline text) → **one** Gemini call enumerates EVERY table/section in the book (door series, frames, headers, glass/lites, hardware, option/adder tables) → inserts ONE placeholder `price_book_extractions` row (`grid_extracted=false`, empty grid) + ONE pending `pricing_change_proposals` row per table → sets `ocr_status='done'`. Never writes pricing_tables. XLSX rejected (export CSV/PDF). Capped at 120 tables.
+
+**Response:** `{ success, priceBookId, tableCount, extractionsCreated }`
+
+### extract-price-book-table
+
+CPQ Phase 1b — **STEP 2 (grid)**. `verify_jwt: false`.
+
+**Request:** POST `{ "extractionId": "uuid" }`
+
+**Flow:** loads the extraction + its `price_books` row → reuses the stored `gemini_file_uri` (re-uploads from storage and updates the row if the reference expired; CSV re-reads text) → **one** Gemini call extracts the full grid for THAT table only (`column_labels, row_labels, cells[], column_field_hints, warnings`; truncated responses attempt partial cell recovery) → updates the extraction's `grid` + `grid_extracted=true` and refreshes the linked proposal's counts. Short and well within edge limits. The review UI fires these per table or via "Extract all grids" (bounded concurrency).
+
+**Response:** `{ success, extractionId, rowCount, colCount, cellCount, warnings }`
+
+**Required Secrets:** `GEMINI_API_KEY`, plus auto-provided `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`.
 
 ### process-estimate
 
@@ -1251,7 +1280,7 @@ Serverless Edge Function that processes uploaded estimate files using Gemini 3 F
 - `slug`: process-estimate
 - `verify_jwt`: false (JWT verification disabled - function uses service role key internally)
 - `status`: ACTIVE
-- `version`: 21 (updated 2026-03-24 — three-pass extraction: added manufacturer alias hints in Pass 2 and Pass 3 for AI-based opening grouping)
+- `version`: 24 (updated 2026-06-04 — large-file support: files >7 MB are uploaded via the Gemini Files API and referenced by URI across all passes, enabling PDFs up to the 50 MB bucket cap; inline base64 retained for small files. Prior: three-pass extraction with manufacturer alias hints + AI opening grouping)
 
 **Request:**
 - Method: POST
@@ -1428,6 +1457,188 @@ Pre-defined hardware catalog seeded from the DOOR_FRAME SHORTCUT_LOOKUP spreadsh
 **Migration:** `add_hardware_progressive_disclosure_columns` (applied 2026-05-12) — added `is_family`, `is_legacy`, `code_prefix`, `code_field_keys`, `label_template`; backfilled `is_legacy=true` on all 66 existing rows
 **Migration:** `seed_swing_it_hardware_families` (applied 2026-05-12) — seeded HINGE and CONT-HINGE family rows; field_definitions (hinge_type, hinge_material, hinge_size, hinge_pin, hinge_gauge, mount, length) with code_token options; item_type_registry slugs `hardware-hinge` / `hardware-cont-hinge`; item_type_base_fields wiring; gauge-depends-on-type dependency
 **Migration:** `seed_close_latch_protect_hardware_families` (applied 2026-05-12) — seeded 6 new family rows for CloseIt/LatchIt/ProtectIt (CLOSER, DEADBOLT, LOCKSET, PANIC, WEATHERSTRIP, THRESHOLD); 8 new field_definitions; all field_value_options with code_tokens; item_type_registry slugs; item_type_base_fields wiring
+
+---
+
+## CPQ Tables (Phase 0 — propose-only approval queue + versioning)
+
+### public.pricing_change_proposals
+
+Universal propose-only queue. Price-book ingestion and the exception agent never write to `pricing_tables`/`pricing_cells` directly — proposed changes land here with `status='pending'` and are applied only after a human approves them.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `proposal_type` (TEXT, NOT NULL) - CHECK IN ('cell','column','row','adder','table','spec')
+- `target_table_id` (UUID, NULLABLE, FK → pricing_tables.id ON DELETE CASCADE)
+- `target_ids` (JSONB, NOT NULL, DEFAULT `{}`) - Identifiers needed to locate/create the target (rowId, columnId, canonicalCode, etc.)
+- `payload` (JSONB, NOT NULL, DEFAULT `{}`) - Proposed value(s); shape depends on `proposal_type`
+- `source` (TEXT, NOT NULL, DEFAULT 'manual') - CHECK IN ('ingestion','exception_agent','manual')
+- `confidence` (NUMERIC, NULLABLE) - Agent confidence 0–1
+- `explanation` (TEXT, NULLABLE) - Plain-English rationale
+- `status` (TEXT, NOT NULL, DEFAULT 'pending') - CHECK IN ('pending','approved','rejected','applied')
+- `created_by` (UUID, NULLABLE, FK → auth.users.id ON DELETE SET NULL)
+- `reviewed_by` (UUID, NULLABLE, FK → auth.users.id ON DELETE SET NULL)
+- `reviewed_at` (TIMESTAMPTZ, NULLABLE)
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:** on `status`, `source`, `target_table_id`, `created_at DESC`
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing change proposals` - SELECT
+- `Authenticated users can insert pricing change proposals` - INSERT (agent via service role, users for manual)
+- `Admins can update pricing change proposals` - UPDATE via `is_admin()` (approve/reject)
+- `Admins can delete pricing change proposals` - DELETE via `is_admin()`
+
+**Triggers:** `set_pricing_change_proposals_updated_at` via handle_updated_at()
+
+### public.pricing_cell_history
+
+Append-only audit of every price written to a `pricing_cells` row, with effective dating for reproducibility. The current price has `effective_to IS NULL`. Written by the versioned cell writer in `pricing-api.ts`.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `pricing_cell_id` (UUID, NOT NULL, FK → pricing_cells.id ON DELETE CASCADE)
+- `price` (NUMERIC(12,2), NULLABLE) - NULL = cell was cleared
+- `currency` (TEXT, NOT NULL, DEFAULT 'USD')
+- `effective_from` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+- `effective_to` (TIMESTAMPTZ, NULLABLE) - NULL = currently effective
+- `source` (TEXT, NOT NULL, DEFAULT 'manual') - CHECK IN ('ingestion','exception_agent','manual','import')
+- `proposal_id` (UUID, NULLABLE, FK → pricing_change_proposals.id ON DELETE SET NULL)
+- `changed_by` (UUID, NULLABLE, FK → auth.users.id ON DELETE SET NULL)
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:** on `pricing_cell_id`, partial on `pricing_cell_id WHERE effective_to IS NULL`, `proposal_id`
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read pricing cell history` - SELECT
+- `Authenticated users can insert pricing cell history` - INSERT
+- Append-only: no UPDATE/DELETE policies
+
+---
+
+## CPQ Tables (Phase 1 — vendor price-book ingestion)
+
+### Storage bucket: price-book-files
+
+Private bucket for uploaded vendor price books. `file_size_limit` 50MB; allowed mime types: PDF, JPEG/JPG/PNG/GIF, XLSX, XLS, CSV. RLS on storage.objects scoped to `bucket_id = 'price-book-files'`: authenticated upload/read, update own, delete own or admin.
+
+### public.price_books
+
+One row per uploaded vendor price book (manufacturer price list).
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `company_id` (UUID, NULLABLE, FK → companies.id ON DELETE SET NULL) - The manufacturer this book belongs to
+- `name` (TEXT, NOT NULL)
+- `category` (TEXT, NULLABLE) - CHECK IN ('doors','frames','hardware','lites_louvers_glass','panels')
+- `source_file_url` (TEXT, NOT NULL, DEFAULT '') - Storage path in price-book-files
+- `original_file_name` (TEXT, NOT NULL, DEFAULT '')
+- `file_type` (TEXT, NOT NULL, DEFAULT 'pdf') - CHECK IN ('pdf','image','xlsx','csv')
+- `ocr_status` (TEXT, NOT NULL, DEFAULT 'pending') - CHECK IN ('pending','processing','done','error')
+- `ocr_error` (TEXT, NULLABLE)
+- `uploaded_by_user_id` (UUID, NULLABLE, FK → auth.users.id ON DELETE SET NULL)
+- `extracted_at` (TIMESTAMPTZ, NULLABLE)
+- `gemini_file_uri` (TEXT, NULLABLE) - Gemini Files API URI for the uploaded book; set by the catalog step and reused by per-table grid extraction.
+- `gemini_file_name` (TEXT, NULLABLE) - Gemini Files API resource name (e.g. `files/abc`).
+- `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:** on `company_id`, `ocr_status`, `created_at DESC`
+
+**RLS Policies:** ✅ enabled. Read/insert/update authenticated; delete own or admin. Trigger `set_price_books_updated_at`.
+
+### public.price_book_extractions
+
+Staging row holding the agent's normalized grid for ONE table within a price book, before a human maps + approves it. A single book produces MANY of these — one per detected table (each door series, frame series, header table, glass/lite table, hardware list, and option/adder table).
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `price_book_id` (UUID, NOT NULL, FK → price_books.id ON DELETE CASCADE)
+- `status` (TEXT, NOT NULL, DEFAULT 'pending') - CHECK IN ('pending','mapped','approved','discarded')
+- `title` (TEXT, NULLABLE) - The table heading as printed in the book
+- `kind` (TEXT, NULLABLE) - 'size_grid' | 'flat_list' | 'adder'
+- `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Document order
+- `grid_extracted` (BOOLEAN, NOT NULL, DEFAULT false) - The catalog step inserts placeholder rows with false; flips true once the per-table grid extraction fills the grid.
+- `detected_category` (TEXT, NULLABLE)
+- `detected_series` (TEXT, NULLABLE)
+- `detected_vendor_name` (TEXT, NULLABLE)
+- `grid` (JSONB, NOT NULL, DEFAULT `{}`) - `{ columnLabels, rowLabels, cells[], columnFieldHints }`
+- `warnings` (JSONB, NOT NULL, DEFAULT `[]`)
+- `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:** on `price_book_id`, `status`, `(price_book_id, sort_order)`
+
+**RLS Policies:** ✅ enabled. Full authenticated CRUD. Trigger `set_price_book_extractions_updated_at`.
+
+### pricing_change_proposals.price_book_id (added)
+
+- `price_book_id` (UUID, NULLABLE, FK → price_books.id ON DELETE CASCADE) - Links ingestion proposals to their source price book. Index `idx_pricing_change_proposals_price_book_id`.
+
+---
+
+## CPQ Tables (Phase 2 — pricing exception agent)
+
+### public.pricing_exceptions
+
+A failed pricing lookup queued for human review. Created by `refreshEstimatePricing` when an item resolves to a non-`matched`, non-`category_unsupported` status. The exception agent (`explainPricingException` in `gemini-api.ts`) proposes a closest-match suggestion; a human approves it (writes the price) or dismisses it.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY)
+- `estimate_item_id` (UUID, NULLABLE, FK → estimate_items.id ON DELETE CASCADE)
+- `estimate_id` (UUID, NULLABLE, FK → estimates.id ON DELETE CASCADE)
+- `item_label` (TEXT, NOT NULL, DEFAULT '')
+- `lookup_status` (TEXT, NOT NULL) - the failing PriceLookupStatus (no_table/no_row/no_column/no_cell/no_vendor)
+- `context` (JSONB, NOT NULL, DEFAULT `{}`) - `{ itemType, manufacturerId, fields[], warning, tableId, availableRows[], availableColumns[] }`
+- `suggestion` (JSONB, NULLABLE) - agent suggestion `{ kind, suggestedRowId, suggestedColumnId, suggestedPrice, reason }`
+- `explanation` (TEXT, NULLABLE)
+- `resolution_status` (TEXT, NOT NULL, DEFAULT 'pending') - CHECK IN ('pending','approved','rejected','resolved')
+- `resolved_by` (UUID, NULLABLE, FK → auth.users.id ON DELETE SET NULL)
+- `resolved_at` (TIMESTAMPTZ, NULLABLE)
+- `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:** on `estimate_item_id`, `estimate_id`, `resolution_status`; partial UNIQUE on `estimate_item_id WHERE resolution_status='pending'` (at most one open exception per item).
+
+**RLS Policies:** ✅ enabled. Full authenticated CRUD. Trigger `set_pricing_exceptions_updated_at`.
+
+**Note:** The pricing engine (`pricing-lookup.ts`) now also prices `hardware` (flat per-item list via `pricing_table_items`/series), `panels`, and `lites_louvers_glass` (label-based width×height), retiring `category_unsupported` for these categories.
+
+---
+
+## CPQ Tables (Phase 3 — compatibility / configuration rule engine)
+
+Separate from price rules: these validate that a configured opening is buildable.
+
+### public.compatibility_rules
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY)
+- `name` (TEXT, NOT NULL)
+- `scope_type` (TEXT, NOT NULL, DEFAULT 'item_type') - CHECK IN ('item_type','canonical_code')
+- `scope_value` (TEXT, NOT NULL) - the item_type slug or canonical_code the rule applies to
+- `predicate` (JSONB, NOT NULL, DEFAULT `{}`) - `{ when?: {fieldKey,operator,values}, require: {fieldKey,operator,values} }`; operator IN equals/not_equals/in/not_in/gt/lt/gte/lte/between
+- `severity` (TEXT, NOT NULL, DEFAULT 'error') - CHECK IN ('error','warning')
+- `message` (TEXT, NOT NULL)
+- `active` (BOOLEAN, NOT NULL, DEFAULT true)
+- `created_by` (UUID, NULLABLE, FK → auth.users.id ON DELETE SET NULL)
+- `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
+
+**Indexes:** on `(scope_type, scope_value)`, `active`
+
+**RLS Policies:** ✅ enabled. Read authenticated; insert/update/delete admins (`is_admin()`). Trigger `set_compatibility_rules_updated_at`.
+
+### public.compatibility_rule_overrides
+
+Per-canonical-code copy-on-write overrides (NULL columns inherit the rule; `is_disabled=true` suppresses the rule for that item). Mirrors the `item_type_field_dependency_overrides` pattern.
+
+**Columns:** `id`, `rule_id` (FK → compatibility_rules ON DELETE CASCADE), `canonical_code`, `is_disabled` (BOOL DEFAULT false), `predicate` (JSONB NULL), `severity` (NULL), `message` (NULL), `created_at`/`updated_at`. UNIQUE `(rule_id, canonical_code)`.
+
+**RLS Policies:** ✅ enabled. Full authenticated CRUD. Trigger `set_compatibility_rule_overrides_updated_at`.
+
+The engine (`src/lib/compatibility-engine.ts`) evaluates active rules against an opening's merged field map and is run in the wizard Review step (errors block Save, warnings inform) and by the CPQ service before quoting.
+
+---
 
 ## Security Status
 

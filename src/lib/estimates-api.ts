@@ -37,6 +37,10 @@ export async function uploadEstimateFile(
   file: File,
   userId: string
 ): Promise<{ estimateId: string; filePath: string }> {
+  const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error(`File is ${(file.size / 1024 / 1024).toFixed(1)} MB. The maximum upload size is 50 MB.`);
+  }
   const fileType = file.type === 'application/pdf' ? 'pdf' : 'image';
 
   // Build a unique storage path

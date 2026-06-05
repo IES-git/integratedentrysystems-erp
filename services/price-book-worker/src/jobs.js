@@ -1,0 +1,164 @@
+// Catalog + per-table grid extraction jobs. Ported from the Supabase Edge
+// Functions, but with no wall-clock limit (runs on Render).
+
+import {
+  ALLOWED_CATEGORIES,
+  getMimeType,
+  uploadToGeminiFiles,
+  callGemini,
+  recoverCells,
+  buildCatalogPrompt,
+  getCatalogSchema,
+  buildGridPrompt,
+  getGridSchema,
+  loadAliasHints,
+} from './gemini.js';
+
+const CATALOG_MAX_TOKENS = 8192;
+const GRID_MAX_TOKENS = 24576;
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const MAX_TABLES = 120;
+
+const BUCKET = 'price-book-files';
+
+async function downloadBytes(sb, path) {
+  const { data: blob, error } = await sb.storage.from(BUCKET).download(path);
+  if (error || !blob) throw new Error('File download failed: ' + (error?.message || 'no data'));
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/**
+ * STEP 1 — Catalog every table/section in the book and insert one placeholder
+ * extraction + pending proposal per table. Uploads the file to Gemini once and
+ * stores the reference for per-table extraction.
+ */
+export async function runCatalog(sb, geminiKey, priceBookId) {
+  try {
+    const { data: book } = await sb.from('price_books').select('*').eq('id', priceBookId).single();
+    if (!book) throw new Error('Price book not found');
+
+    await sb.from('price_book_extractions').delete().eq('price_book_id', priceBookId);
+    await sb.from('pricing_change_proposals').delete().eq('price_book_id', priceBookId).eq('status', 'pending');
+
+    const aliasHints = await loadAliasHints(sb);
+    const bytes = await downloadBytes(sb, book.source_file_url);
+    if (bytes.length > MAX_FILE_SIZE) throw new Error('File too large: ' + (bytes.length / 1024 / 1024).toFixed(1) + ' MB (max 50 MB)');
+
+    let filePart = null;
+    let csvText = null;
+    let geminiFileUri = null;
+    let geminiFileName = null;
+    if (book.file_type === 'csv') {
+      csvText = new TextDecoder().decode(bytes);
+    } else if (book.file_type === 'xlsx') {
+      throw new Error('XLSX is not parsed inline yet — export the sheet to CSV or PDF and re-upload.');
+    } else {
+      const mimeType = getMimeType(book.original_file_name, book.file_type);
+      const uploaded = await uploadToGeminiFiles(geminiKey, bytes, mimeType, book.original_file_name || 'price-book');
+      geminiFileUri = uploaded.uri;
+      geminiFileName = uploaded.name;
+      filePart = { file_data: { mime_type: mimeType, file_uri: uploaded.uri } };
+      await sb.from('price_books').update({ gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
+    }
+
+    const { parsed: catalog } = await callGemini(geminiKey, buildCatalogPrompt(book.category, aliasHints, csvText), getCatalogSchema(), CATALOG_MAX_TOKENS, filePart);
+    const vendorName = catalog?.vendor_name ?? null;
+    let tables = (catalog?.tables ?? []).filter((t) => t.title);
+    if (tables.length === 0) tables = [{ title: book.name, category: book.category ?? undefined, kind: 'size_grid' }];
+    if (tables.length > MAX_TABLES) tables = tables.slice(0, MAX_TABLES);
+
+    const emptyGrid = { columnLabels: [], rowLabels: [], cells: [], columnFieldHints: {} };
+    for (let i = 0; i < tables.length; i++) {
+      const t = tables[i];
+      const detectedCategory = ALLOWED_CATEGORIES.includes(t.category ?? '') ? t.category : (book.category ?? null);
+      const { data: extraction, error: extErr } = await sb.from('price_book_extractions').insert({
+        price_book_id: priceBookId, status: 'pending', title: t.title, kind: t.kind ?? null, sort_order: i,
+        detected_category: detectedCategory, detected_series: t.series ?? null, detected_vendor_name: vendorName,
+        grid: emptyGrid, warnings: [], grid_extracted: false,
+      }).select('id').single();
+      if (extErr || !extraction) { console.error('[catalog] extraction insert failed:', extErr); continue; }
+      await sb.from('pricing_change_proposals').insert({
+        proposal_type: 'table', source: 'ingestion', price_book_id: priceBookId, target_ids: { extractionId: extraction.id },
+        payload: { title: t.title, kind: t.kind ?? null, detectedCategory, detectedSeries: t.series ?? null, detectedVendorName: vendorName, pageHint: t.page_hint ?? null },
+        confidence: 0.5, explanation: `"${t.title}" detected${t.page_hint ? ` (${t.page_hint})` : ''}. Extract its grid, then map to approve.`, status: 'pending',
+      });
+    }
+
+    await sb.from('price_books').update({ ocr_status: 'done', extracted_at: new Date().toISOString(), gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
+    console.log(`[catalog] Cataloged ${tables.length} table(s) for ${priceBookId}`);
+    return { tableCount: tables.length };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[catalog] error for ' + priceBookId + ':', message);
+    await sb.from('price_books').update({ ocr_status: 'error', ocr_error: message }).eq('id', priceBookId);
+    throw err;
+  }
+}
+
+/** STEP 2 — Extract one table's full grid and fill its extraction row. */
+export async function runExtractTable(sb, geminiKey, extractionId) {
+  const { data: ext, error: extErr } = await sb.from('price_book_extractions').select('*').eq('id', extractionId).single();
+  if (extErr || !ext) throw new Error('Extraction not found');
+  const { data: book, error: bookErr } = await sb.from('price_books').select('*').eq('id', ext.price_book_id).single();
+  if (bookErr || !book) throw new Error('Price book not found');
+
+  const aliasHints = await loadAliasHints(sb);
+  const mimeType = getMimeType(book.original_file_name, book.file_type);
+
+  let csvText = null;
+  let filePart = null;
+  if (book.file_type === 'csv') {
+    csvText = new TextDecoder().decode(await downloadBytes(sb, book.source_file_url));
+  } else if (book.gemini_file_uri) {
+    filePart = { file_data: { mime_type: mimeType, file_uri: book.gemini_file_uri } };
+  } else {
+    const bytes = await downloadBytes(sb, book.source_file_url);
+    const up = await uploadToGeminiFiles(geminiKey, bytes, mimeType, book.original_file_name || 'price-book');
+    filePart = { file_data: { mime_type: mimeType, file_uri: up.uri } };
+    await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
+  }
+
+  const prompt = buildGridPrompt(ext.title ?? book.name, ext.detected_category, ext.detected_series, ext.kind, null, aliasHints, csvText);
+
+  let res;
+  try {
+    res = await callGemini(geminiKey, prompt, getGridSchema(), GRID_MAX_TOKENS, filePart);
+  } catch (e) {
+    // Gemini Files reference may have expired (48h) — re-upload and retry once.
+    if (filePart && book.file_type !== 'csv' && [400, 403, 404].includes(e.status)) {
+      const bytes = await downloadBytes(sb, book.source_file_url);
+      const up = await uploadToGeminiFiles(geminiKey, bytes, mimeType, book.original_file_name || 'price-book');
+      await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
+      filePart = { file_data: { mime_type: mimeType, file_uri: up.uri } };
+      res = await callGemini(geminiKey, prompt, getGridSchema(), GRID_MAX_TOKENS, filePart);
+    } else {
+      throw e;
+    }
+  }
+
+  const warnings = [];
+  let grid = res.parsed;
+  if (!grid && res.truncated) {
+    const cells = recoverCells(res.raw);
+    if (cells.length) { grid = { column_labels: ['Price'], row_labels: [], cells }; warnings.push('Response truncated; recovered cells partially — verify labels.'); }
+  }
+  if (!grid) warnings.push('Could not parse the grid for this table.');
+
+  const colHints = {};
+  for (const h of grid?.column_field_hints ?? []) colHints[h.col] = h.field_key;
+  const normalizedGrid = { columnLabels: grid?.column_labels ?? [], rowLabels: grid?.row_labels ?? [], cells: (grid?.cells ?? []).filter((c) => c.price != null), columnFieldHints: colHints };
+  const allWarnings = [...warnings, ...(grid?.warnings ?? [])];
+
+  await sb.from('price_book_extractions').update({ grid: normalizedGrid, warnings: allWarnings, grid_extracted: true }).eq('id', extractionId);
+
+  const { data: props } = await sb.from('pricing_change_proposals').select('id').eq('price_book_id', book.id).contains('target_ids', { extractionId }).limit(1);
+  if (props && props[0]) {
+    await sb.from('pricing_change_proposals').update({
+      payload: { title: ext.title, kind: ext.kind, detectedCategory: ext.detected_category, detectedSeries: ext.detected_series, detectedVendorName: ext.detected_vendor_name, rowCount: normalizedGrid.rowLabels.length, colCount: normalizedGrid.columnLabels.length, cellCount: normalizedGrid.cells.length },
+      confidence: allWarnings.length === 0 ? 0.9 : 0.5,
+      explanation: `"${ext.title}": ${normalizedGrid.rowLabels.length}×${normalizedGrid.columnLabels.length} grid (${normalizedGrid.cells.length} prices). Map to approve.`,
+    }).eq('id', props[0].id);
+  }
+
+  return { rowCount: normalizedGrid.rowLabels.length, colCount: normalizedGrid.columnLabels.length, cellCount: normalizedGrid.cells.length, warnings: allWarnings.length };
+}

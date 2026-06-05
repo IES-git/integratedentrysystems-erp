@@ -73,6 +73,7 @@ import {
   HARDWARE_SUBCATEGORY_LABEL,
 } from '@/lib/hardware-utils';
 import { AddItemModal, newLocalId, type LocalField, type LocalTopLevelItem, type LocalHardwareItem, type PreFillField } from '@/components/estimates/wizard/AddItemModal';
+import { LivePriceBadge } from '@/components/estimates/wizard/LivePriceBadge';
 import { getOppositeHanding, parseDimensionToInches, calcHingeQty } from '@/components/estimates/wizard/opening-rules';
 import {
   GLASS_OR_LOUVER_FIELD_KEY,
@@ -399,6 +400,13 @@ function ItemSlotCard({
             <Badge variant="secondary" className="font-mono text-[10px] shrink-0">
               {item.canonicalCode}
             </Badge>
+            <LivePriceBadge
+              category={item.category}
+              canonicalCode={item.canonicalCode}
+              itemLabel={item.itemLabel}
+              manufacturerId={item.manufacturerId ?? null}
+              fields={item.fields.map((f) => ({ fieldKey: f.fieldKey, fieldValue: f.fieldValue, fieldLabel: f.fieldLabel }))}
+            />
           </div>
         </div>
         {item.loadingFields && (

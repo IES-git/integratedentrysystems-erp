@@ -25,9 +25,14 @@ import {
   getEstimateOpenings,
   updateEstimateItem,
 } from '@/lib/estimates-api';
-import { refreshEstimatePricing } from '@/lib/pricing-lookup';
+import { evaluateOpeningsCompatibility } from '@/lib/compatibility-rules-api';
+import { priceEstimate } from '@/lib/cpq/service';
+import { listManufacturerCompanies } from '@/lib/pricing-api';
 import { supabase } from '@/lib/supabase';
-import type { EstimateOpeningWithItems, EstimateItem } from '@/types';
+import { ExceptionReviewPanel } from './ExceptionReviewPanel';
+import { CompareVendorsPanel } from './CompareVendorsPanel';
+import { ShieldAlert } from 'lucide-react';
+import type { EstimateOpeningWithItems, EstimateItem, CompatibilityViolation, Company } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -290,6 +295,9 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
   const [refreshSummary, setRefreshSummary] = useState<{ updated: number; warnings: { itemLabel: string; status: string; message: string }[] } | null>(null);
   const [highlightedItemIds, setHighlightedItemIds] = useState<Set<string>>(new Set());
   const [manufacturerNameById, setManufacturerNameById] = useState<Map<string, string>>(new Map());
+  const [exceptionsReloadKey, setExceptionsReloadKey] = useState(0);
+  const [violations, setViolations] = useState<CompatibilityViolation[]>([]);
+  const [manufacturers, setManufacturers] = useState<Company[]>([]);
 
   const loadOpenings = useCallback(async () => {
     setLoading(true);
@@ -310,6 +318,15 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
         for (const c of companies ?? []) nameMap.set(c.id as string, c.name as string);
         setManufacturerNameById(nameMap);
       }
+
+      // Evaluate compatibility/configuration rules (non-fatal on error).
+      try {
+        const byOpening = await evaluateOpeningsCompatibility(data);
+        setViolations([...byOpening.values()].flat());
+      } catch (compatErr) {
+        console.error('Compatibility evaluation failed:', compatErr);
+        setViolations([]);
+      }
     } catch (err) {
       console.error('Failed to load openings for review:', err);
     } finally {
@@ -321,16 +338,24 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
     loadOpenings();
   }, [loadOpenings]);
 
+  useEffect(() => {
+    listManufacturerCompanies().then(setManufacturers).catch(() => setManufacturers([]));
+  }, []);
+
   const handleRefreshPrices = async () => {
     setRefreshing(true);
     setRefreshSummary(null);
     try {
-      const result = await refreshEstimatePricing(estimateId);
-      setRefreshSummary(result);
+      // Single CPQ orchestrator: persists prices, enqueues exceptions, and
+      // re-evaluates compatibility in one pass.
+      const priced = await priceEstimate(estimateId, { persist: true });
+      if (priced.refreshSummary) {
+        setRefreshSummary({ updated: priced.refreshSummary.updated, warnings: priced.refreshSummary.warnings });
+      }
 
-      // Reload openings to pick up updated prices
-      const updated = await getEstimateOpenings(estimateId);
+      const updated = priced.openings.map((o) => o.opening);
       setOpenings(updated);
+      setViolations(priced.violations);
 
       // Highlight items that now have prices
       const newPricedIds = new Set<string>();
@@ -344,6 +369,8 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
       setHighlightedItemIds(newPricedIds);
       // Clear highlights after 3 seconds
       setTimeout(() => setHighlightedItemIds(new Set()), 3000);
+      // Reload the exception panel — failed lookups were just enqueued.
+      setExceptionsReloadKey((k) => k + 1);
     } catch (err) {
       console.error('Refresh prices failed:', err);
     } finally {
@@ -375,6 +402,9 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
   const allItems = openings.flatMap((o) => o.items);
   const missingPriceCount = allItems.filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
   const hasAnyPrice = allItems.some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
+  const errorViolations = violations.filter((v) => v.severity === 'error');
+  const warningViolations = violations.filter((v) => v.severity === 'warning');
+  const hasBlockingViolations = errorViolations.length > 0;
 
   if (loading) {
     return (
@@ -439,6 +469,45 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
         </div>
       )}
 
+      {/* Compatibility / configuration violations */}
+      {violations.length > 0 && (
+        <div className="space-y-2">
+          {errorViolations.length > 0 && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-sm">
+              <div className="flex items-center gap-2 font-medium text-destructive">
+                <ShieldAlert className="h-4 w-4" />
+                {errorViolations.length} configuration error{errorViolations.length !== 1 ? 's' : ''} — must fix before saving
+              </div>
+              <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+                {errorViolations.map((v, i) => (
+                  <li key={i}><span className="font-medium text-foreground">{v.itemLabel}:</span> {v.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {warningViolations.length > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+              <div className="flex items-center gap-2 font-medium">
+                <AlertTriangle className="h-4 w-4" />
+                {warningViolations.length} configuration warning{warningViolations.length !== 1 ? 's' : ''}
+              </div>
+              <ul className="mt-1 space-y-0.5 text-xs">
+                {warningViolations.map((v, i) => (
+                  <li key={i}><span className="font-medium">{v.itemLabel}:</span> {v.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Pricing exceptions (agent-assisted resolution) */}
+      <ExceptionReviewPanel
+        key={exceptionsReloadKey}
+        estimateId={estimateId}
+        onResolved={loadOpenings}
+      />
+
       {/* Missing prices warning */}
       {missingPriceCount > 0 && (
         <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
@@ -464,13 +533,21 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
       ) : (
         <div className="space-y-3">
           {openings.map((opening) => (
-            <OpeningReviewCard
-              key={opening.id}
-              opening={opening}
-              manufacturerNameById={manufacturerNameById}
-              onPriceChange={handlePriceChange}
-              highlightedItemIds={highlightedItemIds}
-            />
+            <div key={opening.id} className="space-y-1.5">
+              <div className="flex justify-end">
+                <CompareVendorsPanel
+                  opening={opening}
+                  manufacturers={manufacturers}
+                  onApplied={handleRefreshPrices}
+                />
+              </div>
+              <OpeningReviewCard
+                opening={opening}
+                manufacturerNameById={manufacturerNameById}
+                onPriceChange={handlePriceChange}
+                highlightedItemIds={highlightedItemIds}
+              />
+            </div>
           ))}
         </div>
       )}
@@ -498,7 +575,12 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
         <Button variant="outline" onClick={onBack}>
           Back to Openings
         </Button>
-        <Button onClick={onFinish} size="lg" disabled={finishLoading || openings.length === 0}>
+        <Button
+          onClick={onFinish}
+          size="lg"
+          disabled={finishLoading || openings.length === 0 || hasBlockingViolations}
+          title={hasBlockingViolations ? 'Resolve configuration errors before saving' : undefined}
+        >
           {finishLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
           Save & Finish
         </Button>

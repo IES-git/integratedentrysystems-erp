@@ -55,6 +55,7 @@ import { evaluateDependency } from '@/lib/field-dependencies';
 import { syncDoorFieldToFrames } from '@/lib/door-frame-sync';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import { resolveAndPersistItemPrice } from '@/lib/pricing-lookup';
+import { LivePriceBadge } from './LivePriceBadge';
 import { parseDimensionToInches, calcHingeQty } from './opening-rules';
 import {
   AddItemModal,
@@ -396,6 +397,13 @@ function ItemCard({
             <Badge variant="secondary" className="font-mono text-[10px] shrink-0">
               {item.canonicalCode}
             </Badge>
+            <LivePriceBadge
+              category={item.category}
+              canonicalCode={item.canonicalCode}
+              itemLabel={item.itemLabel}
+              manufacturerId={item.manufacturerId ?? null}
+              fields={item.fields.map((f) => ({ fieldKey: f.fieldKey, fieldValue: f.fieldValue, fieldLabel: f.fieldLabel }))}
+            />
           </div>
         </div>
 

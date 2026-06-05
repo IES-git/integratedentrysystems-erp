@@ -1,0 +1,87 @@
+// Price-book ingestion worker (Render web service).
+//
+// Endpoints (all require a valid Supabase user access token in
+// `Authorization: Bearer <token>`):
+//   GET  /health                 -> liveness
+//   POST /catalog  { priceBookId }   -> kicks off cataloging in the background, returns 202
+//   POST /extract  { extractionId }  -> extracts one table's grid (synchronous), returns counts
+//
+// Runs the long Gemini passes without the Edge Function wall-clock limit.
+
+import express from 'express';
+import cors from 'cors';
+import { createClient } from '@supabase/supabase-js';
+import { runCatalog, runExtractTable } from './jobs.js';
+
+const {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_ANON_KEY,
+  GEMINI_API_KEY,
+  ALLOWED_ORIGINS,
+  PORT,
+} = process.env;
+
+for (const [k, v] of Object.entries({ SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, GEMINI_API_KEY })) {
+  if (!v) {
+    console.error(`Missing required env var: ${k}`);
+    process.exit(1);
+  }
+}
+
+// Service-role client for all DB/storage work (bypasses RLS).
+const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+// Anon client only for verifying caller access tokens.
+const anon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+
+const origins = (ALLOWED_ORIGINS || '*').split(',').map((s) => s.trim());
+app.use(cors({ origin: origins.includes('*') ? true : origins }));
+
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// Auth: require a valid Supabase user token.
+async function requireUser(req, res, next) {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!token) return res.status(401).json({ error: 'Missing Authorization bearer token' });
+    const { data, error } = await anon.auth.getUser(token);
+    if (error || !data?.user) return res.status(401).json({ error: 'Invalid or expired token' });
+    req.user = data.user;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: err instanceof Error ? err.message : 'Auth failed' });
+  }
+}
+
+// Catalog: respond immediately, run in the background (no timeout pressure).
+app.post('/catalog', requireUser, async (req, res) => {
+  const { priceBookId } = req.body || {};
+  if (!priceBookId) return res.status(400).json({ error: 'Missing priceBookId' });
+  const { data: book, error } = await admin.from('price_books').select('id').eq('id', priceBookId).single();
+  if (error || !book) return res.status(404).json({ error: 'Price book not found' });
+
+  await admin.from('price_books').update({ ocr_status: 'processing', ocr_error: null }).eq('id', priceBookId);
+  res.status(202).json({ success: true, started: true, priceBookId });
+
+  // Fire-and-forget; runCatalog sets ocr_status done/error. The frontend polls.
+  runCatalog(admin, GEMINI_API_KEY, priceBookId).catch((e) => console.error('[catalog] background error:', e));
+});
+
+// Extract one table's grid (synchronous — Render has no request wall-clock cap).
+app.post('/extract', requireUser, async (req, res) => {
+  const { extractionId } = req.body || {};
+  if (!extractionId) return res.status(400).json({ error: 'Missing extractionId' });
+  try {
+    const result = await runExtractTable(admin, GEMINI_API_KEY, extractionId);
+    res.json({ success: true, extractionId, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+const port = Number(PORT) || 8080;
+app.listen(port, () => console.log(`price-book-worker listening on :${port}`));

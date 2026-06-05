@@ -15,6 +15,7 @@
  */
 
 import { supabase } from './supabase';
+import { enqueueException, clearPendingException } from './pricing-exceptions-api';
 import { dimensionMatches, parseDimension } from '@/components/pricing/dimension-utils';
 import type {
   EstimateItem,
@@ -25,6 +26,7 @@ import type {
   PriceLookupStatus,
   PricingColumn,
   PricingRow,
+  VendorOverride,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -614,10 +616,12 @@ async function resolveFramePrice(
 // Lites / Louvers / Glass lookup
 // ---------------------------------------------------------------------------
 
-async function resolveLitesPrice(
+async function resolveFlatGridPrice(
   item: EstimateItem,
   fields: ItemField[],
+  category: 'lites_louvers_glass' | 'panels',
 ): Promise<PriceResult> {
+  const noun = category === 'panels' ? 'panel' : 'lite';
   // Find table via pricing_table_items (preferred) or legacy series_value match
   const { data: taggedRows, error: tagErr } = await supabase
     .from('pricing_table_items')
@@ -625,7 +629,7 @@ async function resolveLitesPrice(
     .eq('canonical_code', item.canonicalCode)
     .limit(1);
 
-  if (tagErr) return noResult('no_table', `DB error finding lites table: ${tagErr.message}`);
+  if (tagErr) return noResult('no_table', `DB error finding ${noun} table: ${tagErr.message}`);
 
   let tableId: string | null = null;
 
@@ -636,14 +640,14 @@ async function resolveLitesPrice(
     const { data: legacyTable } = await supabase
       .from('pricing_tables')
       .select('id')
-      .eq('category', 'lites_louvers_glass')
+      .eq('category', category)
       .eq('series_value', item.canonicalCode)
       .maybeSingle();
     tableId = legacyTable?.id ?? null;
   }
 
   if (!tableId) {
-    return noResult('no_table', `No pricing table found for lite "${item.canonicalCode}"`);
+    return noResult('no_table', `No pricing table found for ${noun} "${item.canonicalCode}"`);
   }
 
   // Lites use height (row) × width (column) matched by label
@@ -655,14 +659,14 @@ async function resolveLitesPrice(
     .select('id, label')
     .eq('pricing_table_id', tableId);
 
-  if (rowErr) return noResult('no_row', `DB error fetching lite rows: ${rowErr.message}`, tableId);
+  if (rowErr) return noResult('no_row', `DB error fetching ${noun} rows: ${rowErr.message}`, tableId);
 
   const { data: colData, error: colErr } = await supabase
     .from('pricing_columns')
     .select('id, label')
     .eq('pricing_table_id', tableId);
 
-  if (colErr) return noResult('no_column', `DB error fetching lite columns: ${colErr.message}`, tableId);
+  if (colErr) return noResult('no_column', `DB error fetching ${noun} columns: ${colErr.message}`, tableId);
 
   // Match by label — try exact string, then dimension-aware (parse both sides)
   // Uses parseDoorDimension so nominal "36" (3'6"=42") matches label "3-6" or "3'6\""
@@ -679,10 +683,10 @@ async function resolveLitesPrice(
   const matchedCol = (colData ?? []).find((c) => matchLabel(c.label as string, widthValue));
 
   if (!matchedRow) {
-    return noResult('no_row', `No lite row matches height "${heightValue}"`, tableId);
+    return noResult('no_row', `No ${noun} row matches height "${heightValue}"`, tableId);
   }
   if (!matchedCol) {
-    return noResult('no_column', `No lite column matches width "${widthValue}"`, tableId);
+    return noResult('no_column', `No ${noun} column matches width "${widthValue}"`, tableId);
   }
 
   const { data: cellData, error: cellErr } = await supabase
@@ -692,9 +696,9 @@ async function resolveLitesPrice(
     .eq('pricing_column_id', matchedCol.id)
     .maybeSingle();
 
-  if (cellErr) return noResult('no_cell', `DB error fetching lite cell: ${cellErr.message}`, tableId);
+  if (cellErr) return noResult('no_cell', `DB error fetching ${noun} cell: ${cellErr.message}`, tableId);
   if (!cellData || cellData.price === null) {
-    return noResult('no_cell', `Lite cell has no price`, tableId);
+    return noResult('no_cell', `${noun} cell has no price`, tableId);
   }
 
   return buildResult(
@@ -714,8 +718,124 @@ async function resolveLitesPrice(
 }
 
 // ---------------------------------------------------------------------------
+// Hardware lookup (flat per-item price list)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves a price for a hardware item from a flat price list ingested as a
+ * pricing table (category 'hardware'). The table is located by the item's
+ * canonical_code via pricing_table_items (preferred) or series_value, optionally
+ * scoped to the item's manufacturer. The price is the single priced cell, or the
+ * cell on the row whose label best matches the item's canonical_code / label.
+ */
+async function resolveHardwarePrice(
+  item: EstimateItem,
+  fields: ItemField[],
+): Promise<PriceResult> {
+  // 1. Find candidate table(s) tagged to this canonical_code.
+  const { data: taggedRows, error: tagErr } = await supabase
+    .from('pricing_table_items')
+    .select('pricing_table_id')
+    .eq('canonical_code', item.canonicalCode);
+
+  if (tagErr) return noResult('no_table', `DB error finding hardware table: ${tagErr.message}`);
+
+  let candidateTableIds = (taggedRows ?? []).map((r) => r.pricing_table_id as string);
+
+  if (candidateTableIds.length === 0) {
+    // Legacy fallback: series_value = canonical_code on a hardware table.
+    const { data: legacy } = await supabase
+      .from('pricing_tables')
+      .select('id')
+      .eq('category', 'hardware')
+      .eq('series_value', item.canonicalCode);
+    candidateTableIds = (legacy ?? []).map((r) => r.id as string);
+  }
+
+  if (candidateTableIds.length === 0) {
+    return noResult('no_table', `No hardware pricing table for "${item.canonicalCode}"`);
+  }
+
+  // 2. Prefer a table linked to the item's manufacturer when one is set.
+  let tableId = candidateTableIds[0];
+  if (item.manufacturerId && candidateTableIds.length > 0) {
+    const { data: vendorRows } = await supabase
+      .from('pricing_table_vendors')
+      .select('pricing_table_id')
+      .in('pricing_table_id', candidateTableIds)
+      .eq('company_id', item.manufacturerId);
+    const match = (vendorRows ?? [])[0]?.pricing_table_id as string | undefined;
+    if (match) tableId = match;
+  }
+
+  // 3. Fetch rows, columns, and cells; pick the best row + first column.
+  const [{ data: rowData }, { data: colData }] = await Promise.all([
+    supabase.from('pricing_rows').select('id, label').eq('pricing_table_id', tableId).order('sort_order', { ascending: true }),
+    supabase.from('pricing_columns').select('id, label').eq('pricing_table_id', tableId).order('sort_order', { ascending: true }),
+  ]);
+
+  const rows = rowData ?? [];
+  const cols = colData ?? [];
+  if (rows.length === 0 || cols.length === 0) {
+    return noResult('no_cell', 'Hardware table has no rows/columns', tableId);
+  }
+
+  const codeLower = item.canonicalCode.toLowerCase();
+  const labelLower = item.itemLabel.toLowerCase();
+  const matchedRow =
+    rows.find((r) => {
+      const l = (r.label as string).toLowerCase();
+      return l === codeLower || l === labelLower || l.includes(codeLower) || codeLower.includes(l);
+    }) ?? (rows.length === 1 ? rows[0] : null);
+
+  if (!matchedRow) {
+    return noResult('no_row', `No hardware row matches "${item.canonicalCode}"`, tableId);
+  }
+
+  const targetCol = cols[0];
+
+  const { data: cellData, error: cellErr } = await supabase
+    .from('pricing_cells')
+    .select('id, price')
+    .eq('pricing_row_id', matchedRow.id)
+    .eq('pricing_column_id', targetCol.id)
+    .maybeSingle();
+
+  if (cellErr) return noResult('no_cell', `DB error fetching hardware cell: ${cellErr.message}`, tableId);
+  if (!cellData || cellData.price === null) {
+    return noResult('no_cell', 'Hardware cell has no price', tableId);
+  }
+
+  // Adders (e.g. finish surcharges) apply if configured for this item + vendor.
+  const adders = item.manufacturerId
+    ? await resolveAdders(tableId, item.canonicalCode, item.manufacturerId, fields)
+    : [];
+
+  return buildResult(
+    'matched',
+    cellData.price as number,
+    adders,
+    item.manufacturerId,
+    {
+      tableId,
+      rowId: matchedRow.id as string,
+      columnId: targetCol.id as string,
+      parentColumnId: null,
+      adderCellIds: adders.map((a) => a.cellId),
+      vendorId: item.manufacturerId,
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/** Hardware item types are dynamic slugs like 'hardware-hinge'; match the family prefix. */
+function isHardwareCategory(category: string | null | undefined): boolean {
+  if (!category) return false;
+  return category === 'hardware' || category.startsWith('hardware-');
+}
 
 /**
  * Resolves a unit price for a single estimate item using its stored field values.
@@ -730,9 +850,10 @@ export async function resolveItemPrice(
 
     if (category === 'doors') return resolveDoorPrice(item, fields);
     if (category === 'frames') return resolveFramePrice(item, fields);
-    if (category === 'lites_louvers_glass') return resolveLitesPrice(item, fields);
+    if (category === 'lites_louvers_glass') return resolveFlatGridPrice(item, fields, 'lites_louvers_glass');
+    if (category === 'panels') return resolveFlatGridPrice(item, fields, 'panels');
+    if (isHardwareCategory(category) || item.subcategory) return resolveHardwarePrice(item, fields);
 
-    // Hardware and other categories: not yet supported
     return noResult('category_unsupported', `Pricing lookup not yet supported for category "${category ?? 'unknown'}"`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -741,11 +862,31 @@ export async function resolveItemPrice(
 }
 
 /**
- * Fetches all items and their fields for one opening and resolves prices for each.
- * Returns a map of itemId → PriceResult.
+ * Normalizes an item's type into a pricing-category bucket used by vendor
+ * overrides and the compare-vendors UI.
+ */
+export function normalizeCategoryKey(
+  itemType: string | null | undefined,
+  subcategory?: string | null,
+): string {
+  if (isHardwareCategory(itemType) || subcategory) return 'hardware';
+  return itemType ?? 'unknown';
+}
+
+export interface ResolveOpeningOptions {
+  /** What-if vendor override applied before resolving (read-only; never persists). */
+  vendorOverride?: VendorOverride;
+}
+
+/**
+ * Fetches all items and their fields for one opening and resolves prices for
+ * each. Read-only — never persists. Returns a map of itemId → PriceResult.
+ * Pass `vendorOverride` to price the opening under an alternate manufacturer
+ * scenario (what-if comparison) without touching the database.
  */
 export async function resolveOpeningPricing(
   openingId: string,
+  opts: ResolveOpeningOptions = {},
 ): Promise<Map<string, PriceResult>> {
   const results = new Map<string, PriceResult>();
 
@@ -806,6 +947,13 @@ export async function resolveOpeningPricing(
         isManualPriceOverride: rawItem.is_manual_price_override as boolean ?? false,
         createdAt: rawItem.created_at as string,
       };
+
+      // Apply what-if vendor override (byItem wins over byCategory).
+      const override =
+        opts.vendorOverride?.byItem?.[item.id] ??
+        opts.vendorOverride?.byCategory?.[normalizeCategoryKey(item.itemType, item.subcategory)];
+      if (override) item.manufacturerId = override;
+
       const fields = fieldsByItem.get(item.id) ?? [];
       const result = await resolveItemPrice(item, fields);
       results.set(item.id, result);
@@ -914,13 +1062,54 @@ export async function refreshEstimatePricing(estimateId: string): Promise<{
 
       if (result.status === 'matched') {
         updated++;
+        await clearPendingException(item.id).catch(() => { /* best-effort */ });
       } else {
         warnings.push({ itemLabel: item.itemLabel, status: result.status, message: result.warnings[0] ?? result.status });
+        await enqueueExceptionForResult(item, fields, result).catch(() => { /* best-effort */ });
       }
     })
   );
 
   return { updated, skipped, warnings };
+}
+
+/**
+ * Builds context (item fields + the resolved table's candidate rows/columns)
+ * and enqueues a pending pricing exception for a failed lookup. Best-effort.
+ */
+async function enqueueExceptionForResult(
+  item: EstimateItem,
+  fields: ItemField[],
+  result: PriceResult,
+): Promise<void> {
+  const tableId = result.metadata.tableId;
+  let availableRows: { id: string; label: string }[] | undefined;
+  let availableColumns: { id: string; label: string }[] | undefined;
+
+  if (tableId) {
+    const [{ data: r }, { data: c }] = await Promise.all([
+      supabase.from('pricing_rows').select('id, label').eq('pricing_table_id', tableId).order('sort_order', { ascending: true }),
+      supabase.from('pricing_columns').select('id, label').eq('pricing_table_id', tableId).order('sort_order', { ascending: true }),
+    ]);
+    availableRows = (r ?? []).map((x) => ({ id: x.id as string, label: x.label as string }));
+    availableColumns = (c ?? []).map((x) => ({ id: x.id as string, label: x.label as string }));
+  }
+
+  await enqueueException({
+    estimateItemId: item.id,
+    estimateId: item.estimateId,
+    itemLabel: item.itemLabel,
+    lookupStatus: result.status,
+    context: {
+      itemType: item.itemType ?? null,
+      manufacturerId: item.manufacturerId,
+      fields: fields.map((f) => ({ key: f.fieldKey, value: f.fieldValue })),
+      warning: result.warnings[0] ?? null,
+      tableId,
+      availableRows,
+      availableColumns,
+    },
+  });
 }
 
 /**

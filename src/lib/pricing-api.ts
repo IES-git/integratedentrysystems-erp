@@ -20,6 +20,7 @@ import type {
   DoorSeriesSummary,
   LitesLouversGlassItemSummary,
   Company,
+  PricingChangeSource,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -1172,11 +1173,58 @@ export async function reorderPricingRows(tableId: string, orderedIds: string[]):
 // Cells
 // ---------------------------------------------------------------------------
 
-/** Upserts a price into a cell. Creates the cell if it doesn't exist. */
+export interface CellWriteOptions {
+  /** Where this price came from. Defaults to 'manual'. */
+  source?: PricingChangeSource | 'import';
+  /** The approved proposal that produced this write, if any. */
+  proposalId?: string | null;
+}
+
+/**
+ * Append-only audit writer. Closes the previously-current history row for the
+ * cell (sets effective_to = now) and inserts a new current row. Best-effort:
+ * never throws so a history failure cannot block the actual cell write.
+ */
+async function appendCellHistory(
+  cellId: string,
+  price: number | null,
+  currency: string,
+  opts?: CellWriteOptions,
+): Promise<void> {
+  try {
+    const { data: userData } = await supabase.auth.getUser();
+    const changedBy = userData?.user?.id ?? null;
+    const now = new Date().toISOString();
+
+    await supabase
+      .from('pricing_cell_history')
+      .update({ effective_to: now })
+      .eq('pricing_cell_id', cellId)
+      .is('effective_to', null);
+
+    await supabase.from('pricing_cell_history').insert({
+      pricing_cell_id: cellId,
+      price,
+      currency,
+      effective_from: now,
+      source: opts?.source ?? 'manual',
+      proposal_id: opts?.proposalId ?? null,
+      changed_by: changedBy,
+    });
+  } catch {
+    // Audit history must never block a price write.
+  }
+}
+
+/**
+ * Upserts a price into a cell. Creates the cell if it doesn't exist.
+ * Every write is mirrored to pricing_cell_history for audit + effective dating.
+ */
 export async function upsertPricingCell(
   rowId: string,
   columnId: string,
-  price: number | null
+  price: number | null,
+  opts?: CellWriteOptions,
 ): Promise<PricingCell> {
   const { data, error } = await supabase
     .from('pricing_cells')
@@ -1187,19 +1235,28 @@ export async function upsertPricingCell(
     .select('*')
     .single();
 
-  return mapCell(throwOnError(data as Record<string, unknown> | null, error));
+  const cell = mapCell(throwOnError(data as Record<string, unknown> | null, error));
+  await appendCellHistory(cell.id, cell.price, cell.currency, opts);
+  return cell;
 }
 
 /** Sets a cell's price to null (blank). Creates the cell row if it doesn't exist. */
-export async function clearPricingCell(rowId: string, columnId: string): Promise<void> {
-  const { error } = await supabase
+export async function clearPricingCell(
+  rowId: string,
+  columnId: string,
+  opts?: CellWriteOptions,
+): Promise<void> {
+  const { data, error } = await supabase
     .from('pricing_cells')
     .upsert(
       { pricing_row_id: rowId, pricing_column_id: columnId, price: null },
       { onConflict: 'pricing_row_id,pricing_column_id' }
-    );
+    )
+    .select('*')
+    .single();
 
-  if (error) throw new Error(error.message);
+  const cell = mapCell(throwOnError(data as Record<string, unknown> | null, error));
+  await appendCellHistory(cell.id, null, cell.currency, opts);
 }
 
 // ---------------------------------------------------------------------------
