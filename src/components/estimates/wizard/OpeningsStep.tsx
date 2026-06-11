@@ -43,11 +43,11 @@ function formatCurrency(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
 }
 
-/** Sum of (unitPrice * quantity) for all top-level items in an opening. */
+/** Sum of (unitPrice * quantity) for all items in an opening (top-level + hardware). */
 function openingItemsTotal(opening: EstimateOpeningWithItems): number {
-  return opening.items.reduce((sum, item) => {
-    return sum + (item.unitPrice ?? 0) * item.quantity;
-  }, 0);
+  const itemsTotal = opening.items.reduce((sum, item) => sum + (item.unitPrice ?? 0) * item.quantity, 0);
+  const hardwareTotal = (opening.hardware ?? []).reduce((sum, hw) => sum + (hw.unitPrice ?? 0) * hw.quantity, 0);
+  return itemsTotal + hardwareTotal;
 }
 
 /** Total for an opening including the quantity multiplier. */
@@ -55,9 +55,14 @@ function openingTotal(opening: EstimateOpeningWithItems): number {
   return openingItemsTotal(opening) * opening.quantity;
 }
 
+/** All priced line items across an opening (top-level + hardware). */
+function allOpeningItems(opening: EstimateOpeningWithItems): import('@/types').EstimateItem[] {
+  return [...opening.items, ...(opening.hardware ?? [])];
+}
+
 /** Count of items with no price set across all openings. */
 function countMissingPrices(openings: EstimateOpeningWithItems[]): number {
-  return openings.flatMap((o) => o.items).filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
+  return openings.flatMap(allOpeningItems).filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
 }
 
 interface OpeningsStepProps {
@@ -537,7 +542,7 @@ export function OpeningsStep({
             {openings.length > 0 && (
               <div className="space-y-3">
                 {openings.map((opening) => {
-                  const hasAnyPrice = opening.items.some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
+                  const hasAnyPrice = allOpeningItems(opening).some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
                   return (
                     <OpeningCard
                       key={opening.id}
@@ -624,7 +629,7 @@ export function OpeningsStep({
         {openings.length > 0 && (() => {
           const grandTotal = openings.reduce((sum, o) => sum + openingTotal(o), 0);
           const missingCount = countMissingPrices(openings);
-          const hasAnyGrandPrice = openings.some((o) => o.items.some((i) => i.unitPrice !== null && i.unitPrice !== undefined));
+          const hasAnyGrandPrice = openings.some((o) => allOpeningItems(o).some((i) => i.unitPrice !== null && i.unitPrice !== undefined));
           if (!hasAnyGrandPrice) return null;
           return (
             <Card className="bg-primary/5 border-primary/20">

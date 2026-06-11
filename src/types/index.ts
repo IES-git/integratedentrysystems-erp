@@ -104,7 +104,7 @@ export type PriceSource = 'lookup' | 'manual' | 'ocr';
  * - no_row: no row matched the width/height dimensions
  * - no_column: no column matched the field values (gauge, material, depth)
  * - no_cell: row+column pair exists but no price has been entered
- * - category_unsupported: item category has no lookup logic yet (e.g. hardware)
+ * - category_unsupported: item category has no lookup logic
  */
 export type PriceLookupStatus =
   | 'matched'
@@ -506,12 +506,34 @@ export interface QuickBooksSync {
 }
 
 // Pricing Types
-export type PricingCategory = 'doors' | 'frames' | 'hardware' | 'lites_louvers_glass';
+export type PricingCategory = 'doors' | 'frames' | 'hardware' | 'lites_louvers_glass' | 'panels';
+
+/**
+ * Role of a pricing table within its series:
+ * - base: the size grid used for the base price (one per door/frame series).
+ * - component: an alternate base (e.g. frame heads & jambs sold as parts).
+ * - adder: "(ADDERS)"/additional-preparation surcharges applied on top of base.
+ * - option: kit/louver/glass elevations and other selectable upcharges.
+ * Door/frame base-price lookup selects kind='base'; adder/option tables feed
+ * pricing_adder_cells (see the adder pipeline).
+ */
+export type PricingTableKind = 'base' | 'component' | 'adder' | 'option';
+
+/** Spec-driven base-table selector: item field_key -> required value(s). */
+export type SelectionCriteria = Record<string, string | { in: string[] }>;
 
 export interface PricingTable {
   id: string;
   category: PricingCategory;
   seriesValue: string;
+  kind: PricingTableKind;
+  /**
+   * Spec values that select this base table for its manufacturer (e.g. doors
+   * `{ edge_construction: 'Lockseam', core_construction: 'Glued' }`). The engine
+   * matches a configured item's fields against this; `series_value` is then a
+   * derived label. Empty `{}` falls back to series_value matching.
+   */
+  selectionCriteria: SelectionCriteria;
   fieldValueOptionId: string | null;
   name: string;
   description: string | null;
@@ -784,6 +806,10 @@ export interface PriceBook {
   /** Tables that errored in the current/last extract-all run. */
   extractFailed: number;
   extractError: string | null;
+  /** The date the prices in this book take effect (e.g. "2026-01-01"). */
+  effectiveDate: string | null;
+  /** The price book this one supersedes (older book whose prices are replaced). */
+  supersedesPriceBookId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -810,6 +836,13 @@ export interface ExtractedGrid {
   cells: ExtractedGridCell[];
   /** Optional detected field-key mapping per column (gauge/material/depth...). */
   columnFieldHints?: Record<number, string>;
+  /**
+   * For adder/flat-list tables: Gemini's best-guess field_key for each row index.
+   * e.g. { 0: "astragal_prep", 3: "lock_prep", 7: "hinge_type" }
+   * Used to pre-fill the per-row field picker in the adder mapping UI.
+   * Rows not present here had no confident match and stay unassigned.
+   */
+  rowFieldHints?: Record<number, string>;
 }
 
 // ---------------------------------------------------------------------------

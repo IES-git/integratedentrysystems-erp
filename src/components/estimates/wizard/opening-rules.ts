@@ -1,36 +1,20 @@
 /**
  * Shared rule utilities for the estimate opening wizards.
- * Used by both TemplateOpeningDialog and BuildOpeningDialog.
  */
+
+import { parseDoorDimension } from '@/components/pricing/dimension-utils';
 
 /**
  * Parses a dimension string into a numeric inch value.
  *
- * Handles formats:
- *   - Feet-inch notation:  "3'-0\"", "6'-8\"", "7'-4\""
- *   - Plain inches (string or number): "80", "96"
- *   - Decimal inches: "80.5"
+ * Delegates to the canonical `parseDoorDimension` so builder validation and
+ * the pricing lookup agree on what a value like "36" means (door-industry
+ * nominal: 3 ft 6 in = 42"). See dimension-utils for the full format list.
  *
  * Returns null if the value cannot be parsed.
  */
 export function parseDimensionToInches(val: string | number | null | undefined): number | null {
-  if (val === null || val === undefined || val === '') return null;
-  const str = String(val).trim();
-  if (!str) return null;
-
-  // Feet-inch notation: X'-Y" or X'Y" (with optional quote chars)
-  const feetInchMatch = str.match(/^(\d+)'\s*-?\s*(\d+(?:\.\d+)?)["\s]?$/);
-  if (feetInchMatch) {
-    const feet = parseFloat(feetInchMatch[1]);
-    const inches = parseFloat(feetInchMatch[2]);
-    return feet * 12 + inches;
-  }
-
-  // Plain numeric or decimal string
-  const plain = parseFloat(str);
-  if (!isNaN(plain)) return plain;
-
-  return null;
+  return parseDoorDimension(val);
 }
 
 /**

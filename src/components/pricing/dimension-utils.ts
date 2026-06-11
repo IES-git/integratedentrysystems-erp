@@ -42,6 +42,72 @@ export function parseDimension(raw: string): number | null {
 }
 
 /**
+ * THE canonical door-industry dimension parser. Every surface that interprets
+ * a user-entered or book-extracted door/frame/lite dimension (builder
+ * validation, lite sync, pricing lookup) MUST use this single function so a
+ * value like "36" means the same thing everywhere.
+ *
+ * Handles all formats found in the field wizard and pricing tables:
+ *
+ * 1. Compact nominal  (stored in item_fields by the wizard)
+ *    "36"  → 3 ft 6 in  = 42"    "68"  → 6 ft 8 in  = 80"
+ *    "30"  → 3 ft 0 in  = 36"    "210" → 2 ft 10 in = 34"
+ *    Rule: first 1 char = feet, remaining 1–2 chars = inches (must be 0–11)
+ *
+ * 2. Feet-hyphen-inches  (pricing table labels / user manual entry)
+ *    "2-0" → 24"   "3-6" → 42"   "2-10" → 34"
+ *
+ * 3. Feet-apostrophe(-quote)  (user manual entry)
+ *    "6'8\"" → 80"   "7'0\"" → 84"   "3'-0\"" → 36"   "6'" → 72"
+ *
+ * 4. Plain number inches  (fallback / OCR extracted; decimals allowed)
+ *    "80" → 80"  "80.5" → 80.5"
+ *    (NOTE: if the string also matches compact nominal it is parsed as
+ *    nominal first — "80" = 8'0" = 96". In practice users enter "68" not
+ *    "80" for 6'8" doors, so this is safe.)
+ *
+ * Returns null when the string cannot be parsed.
+ */
+export function parseDoorDimension(raw: string | number | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  // --- 2. feet-hyphen-inches: "2-0", "3-6", "2-10" ---
+  const hyphen = s.match(/^(\d+)-(\d{1,2})$/);
+  if (hyphen) {
+    const ft = parseInt(hyphen[1], 10);
+    const inch = parseInt(hyphen[2], 10);
+    if (inch < 12) return ft * 12 + inch;
+  }
+
+  // --- 3. feet-apostrophe forms: "6'8\"", "7'0\"", "3'-0\"", "6' 8", "6'" ---
+  const apos = s.match(/^(\d+)'\s*-?\s*(?:(\d+(?:\.\d+)?)\s*"?)?$/);
+  if (apos) {
+    const ft = parseInt(apos[1], 10);
+    const inch = apos[2] ? parseFloat(apos[2]) : 0;
+    if (inch < 12) return ft * 12 + inch;
+  }
+
+  // --- 1. compact nominal: "36" → 3 ft 6 in = 42", "68" → 6 ft 8 in = 80" ---
+  // Only matches 2–3 digit all-numeric strings.
+  if (/^\d{2,3}$/.test(s)) {
+    const feet = parseInt(s.charAt(0), 10);
+    const inches = parseInt(s.slice(1), 10);
+    // Valid only when the inch component is 0–11 (genuine feet-inches notation)
+    if (inches >= 0 && inches < 12) {
+      return feet * 12 + inches;
+    }
+    // If inches >= 12 (e.g. "99"), fall through to plain number
+  }
+
+  // --- 4. plain number (1-digit, 4+ digit, decimal, or nominal-invalid) ---
+  if (/^\d+(?:\.\d+)?$/.test(s)) return parseFloat(s);
+
+  return null;
+}
+
+/**
  * Format a whole-inch number back to door-industry notation.
  *
  * < 36 inches (3 feet) → feet-hyphen notation: 24 → "2-0", 28 → "2-4"

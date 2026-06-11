@@ -7,15 +7,12 @@ import {
   Square,
   Wrench,
   LayoutPanelLeft,
-  ChevronsUpDown,
   ChevronDown,
   AlertCircle,
-  Lock,
   GlassWater,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import {
@@ -26,32 +23,21 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
 import { cn } from '@/lib/utils';
 import {
   getItemTypes,
   createEstimateOpening,
   addEstimateItem,
   addItemField,
-  getItemFieldValueOptionsForWizard,
   recordFieldValueUsage,
   updateEstimateOpening,
   deleteEstimateItem,
 } from '@/lib/estimates-api';
 import { getPassToFrameFieldKeys } from '@/lib/item-fields-api';
 import { evaluateDependency } from '@/lib/field-dependencies';
+import { evaluateOpeningCompatibility } from '@/lib/compatibility-engine';
+import { listCompatibilityRules } from '@/lib/compatibility-rules-api';
+
 import { syncDoorFieldToFrames } from '@/lib/door-frame-sync';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import { resolveAndPersistItemPrice } from '@/lib/pricing-lookup';
@@ -60,16 +46,17 @@ import { parseDimensionToInches, calcHingeQty } from './opening-rules';
 import {
   AddItemModal,
   newLocalId,
-  type LocalField,
   type LocalTopLevelItem,
   type LocalHardwareItem,
 } from './AddItemModal';
+import { FieldRow, FieldsList, AddFieldForm, type LocalField } from './FieldEditors';
 import {
   GLASS_OR_LOUVER_FIELD_KEY,
   GLASS_OR_LOUVER_TRIGGER_VALUE,
   GLASS_OR_LOUVER_WIDTH_KEY,
   GLASS_OR_LOUVER_HEIGHT_KEY,
   LITES_ITEM_TYPE,
+  liteLocalIdForDoor,
   syncLiteDimensionsFromDoor,
 } from './lite-glass-utils';
 import type {
@@ -77,10 +64,10 @@ import type {
   EstimateOpening,
   EstimateOpeningWithItems,
   EstimateItemWithHardware,
-  FieldValueOption,
   ItemField,
   HardwareSubcategory,
-  DependencyOperator,
+  CompatibilityRule,
+  CompatibilityViolation,
 } from '@/types';
 
 interface BuildOpeningDialogProps {
@@ -100,270 +87,6 @@ interface BuildOpeningDialogProps {
   editingOpening?: EstimateOpeningWithItems;
 }
 
-// ---------------------------------------------------------------------------
-// AddFieldForm — minimal inline form for adding a custom field to an item
-// ---------------------------------------------------------------------------
-
-interface AddFieldFormProps {
-  onAdd: (field: Omit<LocalField, 'localId'>) => void;
-  onCancel: () => void;
-}
-
-function AddFieldForm({ onAdd, onCancel }: AddFieldFormProps) {
-  const [key, setKey] = useState('');
-  const [label, setLabel] = useState('');
-  const [value, setValue] = useState('');
-
-  const handleSubmit = () => {
-    if (!key.trim() || !label.trim()) return;
-    onAdd({
-      fieldKey: key.toLowerCase().replace(/\s+/g, '_'),
-      fieldLabel: label,
-      fieldValue: value,
-      valueType: 'string',
-      isRequired: false,
-    });
-  };
-
-  return (
-    <div className="mt-2 rounded-md border border-dashed bg-muted/20 p-3 space-y-2">
-      <div className="grid grid-cols-3 gap-2">
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Key</Label>
-          <Input
-            placeholder="e.g. gauge"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            className="h-7 text-xs"
-            autoFocus
-          />
-        </div>
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Label</Label>
-          <Input
-            placeholder="e.g. Gauge"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            className="h-7 text-xs"
-          />
-        </div>
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Value</Label>
-          <Input
-            placeholder="e.g. 16 GA"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            className="h-7 text-xs"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleSubmit();
-              if (e.key === 'Escape') onCancel();
-            }}
-          />
-        </div>
-      </div>
-      <div className="flex justify-end gap-2">
-        <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button
-          size="sm"
-          className="h-7 text-xs"
-          onClick={handleSubmit}
-          disabled={!key.trim() || !label.trim()}
-        >
-          Add
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// FieldRow — single editable field with optional historical value combobox
-// ---------------------------------------------------------------------------
-
-interface FieldRowProps {
-  field: LocalField;
-  canonicalCode: string;
-  onUpdate: (value: string) => void;
-  onDelete: () => void;
-}
-
-function FieldRow({ field, canonicalCode, onUpdate, onDelete }: FieldRowProps) {
-  const [options, setOptions] = useState<FieldValueOption[]>([]);
-  const [popoverOpen, setPopoverOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-
-  useEffect(() => {
-    if (!field.fieldDefinitionId) return;
-    getItemFieldValueOptionsForWizard(canonicalCode, field.fieldDefinitionId)
-      .then(setOptions)
-      .catch(console.error);
-  }, [canonicalCode, field.fieldDefinitionId]);
-
-  const handleOpenChange = (open: boolean) => {
-    setPopoverOpen(open);
-    if (open) setSearchQuery('');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 py-1.5">
-      <div className="w-28 shrink-0">
-        <p className="text-[11px] font-medium text-muted-foreground flex items-center gap-0.5">
-          {field.fieldLabel}
-          {field.isRequired && (
-            <span className="text-destructive font-bold" title="Required">
-              *
-            </span>
-          )}
-        </p>
-        <p className="text-[10px] font-mono text-muted-foreground/60">
-          {field.fieldKey}
-        </p>
-      </div>
-
-      {field.isLocked ? (
-        <div className="h-7 flex-1 flex items-center gap-1.5 rounded border bg-muted/30 px-2">
-          <Lock className="h-3 w-3 shrink-0 text-muted-foreground/50" />
-          <span className="text-xs text-muted-foreground">
-            {field.fieldValue || '—'}
-          </span>
-        </div>
-      ) : options.length > 0 ? (
-        <Popover open={popoverOpen} onOpenChange={handleOpenChange}>
-          <PopoverTrigger asChild>
-            <Button
-              variant="outline"
-              role="combobox"
-              aria-expanded={popoverOpen}
-              className="h-7 flex-1 justify-between text-xs font-normal"
-            >
-              {field.fieldValue ? (
-                <span>{field.fieldValue}</span>
-              ) : (
-                <span className="text-muted-foreground/60 text-[10px]">Select an option</span>
-              )}
-              <ChevronsUpDown className="h-3 w-3 ml-1 shrink-0 opacity-50" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-52 p-0" align="start" onWheel={(e) => e.stopPropagation()}>
-            <Command>
-              <CommandInput
-                placeholder="Search or type…"
-                className="h-8 text-xs"
-                value={searchQuery}
-                onValueChange={(val) => {
-                  setSearchQuery(val);
-                  onUpdate(val);
-                }}
-              />
-              <CommandList>
-                <CommandEmpty className="py-1.5 text-center text-xs text-muted-foreground">
-                  Press Enter to use this value
-                </CommandEmpty>
-                <CommandGroup>
-                  {options.map((o) => (
-                    <CommandItem
-                      key={o.id}
-                      value={o.value}
-                      onSelect={(val) => {
-                        onUpdate(val);
-                        setPopoverOpen(false);
-                      }}
-                    >
-                      {o.value}
-                    </CommandItem>
-                  ))}
-                </CommandGroup>
-              </CommandList>
-            </Command>
-          </PopoverContent>
-        </Popover>
-      ) : (
-        <Input
-          value={field.fieldValue}
-          onChange={(e) => onUpdate(e.target.value)}
-          className="h-7 text-xs flex-1"
-          placeholder={field.isRequired ? 'Required' : '—'}
-        />
-      )}
-
-      {!field.isRequired && !field.isLocked && (
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
-          onClick={onDelete}
-        >
-          <Trash2 className="h-3 w-3" />
-        </Button>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// FieldsList — editable field list for a local item
-// ---------------------------------------------------------------------------
-
-interface FieldsListProps {
-  fields: LocalField[];
-  canonicalCode: string;
-  onUpdateField: (localId: string, value: string) => void;
-  onDeleteField: (localId: string) => void;
-}
-
-function FieldsList({ fields, canonicalCode, onUpdateField, onDeleteField }: FieldsListProps) {
-  if (fields.length === 0) return null;
-
-  // Separate top-level (parent) fields from conditional child fields
-  const parentFields = fields.filter((f) => !f.conditionalParentDefId);
-  const childrenByParentDefId = new Map<string, LocalField[]>();
-  for (const f of fields) {
-    if (!f.conditionalParentDefId) continue;
-    const list = childrenByParentDefId.get(f.conditionalParentDefId) ?? [];
-    list.push(f);
-    childrenByParentDefId.set(f.conditionalParentDefId, list);
-  }
-
-  const rows: JSX.Element[] = [];
-  for (const field of parentFields) {
-    rows.push(
-      <FieldRow
-        key={field.localId}
-        field={field}
-        canonicalCode={canonicalCode}
-        onUpdate={(val) => onUpdateField(field.localId, val)}
-        onDelete={() => onDeleteField(field.localId)}
-      />
-    );
-    if (!field.fieldDefinitionId) continue;
-    const children = childrenByParentDefId.get(field.fieldDefinitionId) ?? [];
-    for (const child of children) {
-      if (
-        child.conditionOperator === undefined ||
-        child.conditionTriggerValues === undefined
-      ) continue;
-      if (!evaluateDependency(field.fieldValue || null, child.conditionOperator, child.conditionTriggerValues)) continue;
-      rows.push(
-        <div key={child.localId} className="pl-4 ml-1 border-l-2 border-primary/20 bg-muted/20">
-          <FieldRow
-            field={child}
-            canonicalCode={canonicalCode}
-            onUpdate={(val) => onUpdateField(child.localId, val)}
-            onDelete={() => onDeleteField(child.localId)}
-          />
-        </div>
-      );
-    }
-  }
-
-  return (
-    <div className="rounded-md border divide-y mt-2">
-      {rows}
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // ItemCard — card for a top-level door or frame item (no hardware section)
@@ -595,6 +318,10 @@ export function BuildOpeningDialog({
   // Field keys from doors that should be mirrored to matching frame fields
   const [passToFrameKeys, setPassToFrameKeys] = useState<Set<string>>(new Set());
 
+  // Live compatibility rules + violations (debounced)
+  const [compatRules, setCompatRules] = useState<CompatibilityRule[]>([]);
+  const [liveViolations, setLiveViolations] = useState<CompatibilityViolation[]>([]);
+
   // Door and frame use different field keys for handing — map them explicitly.
   // Door stores it as 'handing'; frame stores it as 'hand'.
   const DOOR_HANDING_KEY = 'handing';
@@ -632,6 +359,9 @@ export function BuildOpeningDialog({
     getPassToFrameFieldKeys()
       .then(setPassToFrameKeys)
       .catch((err) => console.error('Failed to load pass-to-frame keys:', err));
+    listCompatibilityRules(true)
+      .then(setCompatRules)
+      .catch(() => { /* non-fatal */ });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, openingCount, editingOpening?.id]);
 
@@ -768,6 +498,45 @@ export function BuildOpeningDialog({
 
     setHardwareItems(allHardware);
   };
+
+  // Live compatibility: re-evaluate whenever any item's fields change (debounced 400ms).
+  useEffect(() => {
+    if (compatRules.length === 0) return;
+    const allItems = [...doorItems, ...frameItems, ...panelItems, ...liteItems];
+    if (allItems.length === 0) { setLiveViolations([]); return; }
+
+    const t = setTimeout(() => {
+      // Build synthetic items + fieldsByItem map from local draft state
+      const items = allItems.map((item) => ({
+        id: item.localId,
+        canonicalCode: item.canonicalCode,
+        itemLabel: item.itemLabel,
+        itemType: item.category as string,
+        // Minimal required fields for the engine
+        estimateId: null, quantity: 1, unitPrice: null, sortOrder: 0,
+        manufacturerId: item.manufacturerId, subcategory: null,
+        isManualPriceOverride: false, createdAt: '',
+      }));
+      const fieldsByItem = new Map(allItems.map((item) => [
+        item.localId,
+        item.fields.map((f) => ({
+          id: f.localId,
+          estimateItemId: item.localId,
+          fieldDefinitionId: f.fieldDefinitionId ?? null,
+          fieldKey: f.fieldKey,
+          fieldLabel: f.fieldLabel,
+          fieldValue: f.fieldValue,
+          valueType: f.valueType,
+          sourceConfidence: null,
+          createdAt: '', updatedAt: '',
+        } as ItemField)),
+      ]));
+      const violations = evaluateOpeningCompatibility(compatRules, { items, fieldsByItem });
+      setLiveViolations(violations);
+    }, 400);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compatRules, doorItems, frameItems, panelItems, liteItems]);
 
   // Items arrive fully built (with fields) from AddItemModal — just append them.
   const handleSelectDoor = (item: LocalTopLevelItem) => {
@@ -1182,8 +951,13 @@ export function BuildOpeningDialog({
           openingId: openingData.id,
           parentItemId: null,
           subcategory: hw.subcategory,
+          itemType: hw.subcategory ? `hardware-${hw.canonicalCode.split('-')[0].toLowerCase()}` : 'hardware',
         });
-        await saveLocalFields(created.id, hw.fields);
+        const hwFields = await saveLocalFields(created.id, hw.fields);
+        // Resolve hardware price on save (best-effort, never blocks)
+        try {
+          await resolveAndPersistItemPrice(created.id, { ...created, manufacturerId: null }, hwFields);
+        } catch { /* pricing errors never block save */ }
         savedHardware.push(created);
       }
 
@@ -1253,7 +1027,24 @@ export function BuildOpeningDialog({
   const frameHeightTooShort =
     frameHeightIn != null && doorHeightIn != null && frameHeightIn < doorHeightIn;
 
-  const canSave = name.trim().length > 0 && !frameWidthTooSmall && !frameHeightTooShort;
+  // Missing required fields across doors + frames + panels + lites
+  const allTopLevelItems = [...doorItems, ...frameItems, ...panelItems, ...liteItems];
+  const missingRequiredFields = allTopLevelItems.some((item) =>
+    item.fields.some((f) => f.isRequired && !f.fieldValue.trim())
+  );
+
+  // When any door needs a lite, at least one lite must be present
+  const liteRequired = anyDoorNeedsLite && liteItems.length === 0;
+
+  const hasBlockingViolations = liveViolations.some((v) => v.severity === 'error');
+
+  const canSave =
+    name.trim().length > 0 &&
+    !frameWidthTooSmall &&
+    !frameHeightTooShort &&
+    !missingRequiredFields &&
+    !liteRequired &&
+    !hasBlockingViolations;
 
   // Group hardware by subcategory for display
   const hardwareGroups = groupHardwareBySubcategory(hardwareItems);
@@ -1349,8 +1140,13 @@ export function BuildOpeningDialog({
                       {liteItems.length}
                     </Badge>
                   )}
-                  <span className="text-xs text-amber-600/80 dark:text-amber-400/80 ml-auto">
-                    Required — door has "Yes Lite or Louver"
+                  <span className={cn(
+                    'text-xs ml-auto',
+                    liteRequired
+                      ? 'text-destructive font-medium'
+                      : 'text-amber-600/80 dark:text-amber-400/80',
+                  )}>
+                    {liteRequired ? 'Required — add a lite to save' : 'Required — door has "Yes Lite or Louver"'}
                   </span>
                 </div>
 
@@ -1583,6 +1379,24 @@ export function BuildOpeningDialog({
           onSaveTopLevel={() => {}}
           onSaveHardware={handleSelectHardware}
         />
+
+        {/* Live compatibility violations */}
+        {liveViolations.length > 0 && (
+          <div className="space-y-1">
+            {liveViolations.filter((v) => v.severity === 'error').map((v, i) => (
+              <div key={i} className="flex items-start gap-1.5 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span><strong>{v.itemLabel}:</strong> {v.message}</span>
+              </div>
+            ))}
+            {liveViolations.filter((v) => v.severity === 'warning').map((v, i) => (
+              <div key={i} className="flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-800">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span><strong>{v.itemLabel}:</strong> {v.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {saveError && (
           <p className="text-sm text-destructive flex items-center gap-1.5">

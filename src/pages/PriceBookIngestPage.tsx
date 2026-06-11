@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Upload, FileText, Loader2, CheckCircle2, AlertCircle, ArrowLeft, Trash2, Sparkles, RefreshCw } from 'lucide-react';
+import { Upload, FileText, Loader2, CheckCircle2, AlertCircle, ArrowLeft, Trash2, Sparkles, RefreshCw, Eye } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,12 +19,42 @@ import {
   uploadPriceBook, ingestPriceBook, pollBookStatus, extractPriceBookTable, listPriceBooks, listExtractionsForBook,
   approveExtraction, discardExtraction, deletePriceBook,
   extractAllPriceBookTables, pollExtractAllStatus, hasPriceBookWorker,
-  type ColumnMapping, type RowMapping,
+  approveAdderExtraction, listBaseTablesForVendor,
+  findMatchingPricingTable, computeGridDiff,
+  approveHardwareExtraction, resetExtractionGrid,
+  type ColumnMapping, type RowMapping, type BaseTableOption, type GridDiff, type HardwareRowMapping,
 } from '@/lib/price-books-api';
 import { getProposalForExtraction } from '@/lib/pricing-proposals-api';
+import { getFieldDefinitions } from '@/lib/estimates-api';
 import type {
-  PriceBook, PriceBookCategory, PriceBookExtraction, Company, ColumnCriteria, DimensionCriteria,
+  PriceBook, PriceBookCategory, PriceBookExtraction, Company, ColumnCriteria, DimensionCriteria, FieldDefinition,
 } from '@/types';
+
+/** An adder/option table contributes surcharges, not a base size grid. */
+function isAdderExtraction(ext: PriceBookExtraction): boolean {
+  if (ext.kind === 'adder') return true;
+  return /\(ADDERS\)|ADDITIONAL PREPARATION|ELEVATION|LOUVER|\bKIT\b|\bOPTION|\bGLASS\b/i.test(ext.title ?? '');
+}
+
+/**
+ * Best-effort parse of a base-table title into the spec selectors that route an
+ * item to it (doors: edge_construction + core_construction; frames: frame_type +
+ * frame_fabrication). The user confirms/edits these before approving.
+ */
+function parseSpecSelectors(category: PriceBookCategory, title: string): { key: string; value: string }[] {
+  const t = (title ?? '').toLowerCase();
+  if (category === 'doors') {
+    const edge = /continuous weld/.test(t) ? 'Continuous Weld' : /lockseam/.test(t) ? 'Lockseam' : '';
+    const core = /embossed/.test(t) ? 'Embossed Panel' : /steel stiffen/.test(t) ? 'Steel Stiffened' : /glued/.test(t) ? 'Glued' : '';
+    return [{ key: 'edge_construction', value: edge }, { key: 'core_construction', value: core }];
+  }
+  if (category === 'frames') {
+    const type = /drywall/.test(t) ? 'Drywall' : /masonry/.test(t) ? 'Masonry' : /kerf/.test(t) ? 'Kerf' : '';
+    const fab = /(knock|\bkd\b)/.test(t) ? 'KD' : /welded/.test(t) ? 'Welded-full' : '';
+    return [{ key: 'frame_type', value: type }, { key: 'frame_fabrication', value: fab }];
+  }
+  return [];
+}
 
 const CATEGORIES: { value: PriceBookCategory; label: string }[] = [
   { value: 'doors', label: 'Doors' },
@@ -71,11 +101,15 @@ export default function PriceBookIngestPage() {
   const [category, setCategory] = useState<PriceBookCategory | ''>('');
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [effectiveDate, setEffectiveDate] = useState('');
+  const [supersedesId, setSupersedesId] = useState('__none__');
 
   // Review state
   const [reviewBook, setReviewBook] = useState<PriceBook | null>(null);
   const [bookExtractions, setBookExtractions] = useState<PriceBookExtraction[]>([]);
   const [extraction, setExtraction] = useState<PriceBookExtraction | null>(null);
+  // Read-only view of an already-extracted (often approved) table's grid.
+  const [viewExtraction, setViewExtraction] = useState<PriceBookExtraction | null>(null);
   const [proposalId, setProposalId] = useState<string | null>(null);
   const [reviewName, setReviewName] = useState('');
   const [reviewCategory, setReviewCategory] = useState<PriceBookCategory>('doors');
@@ -83,7 +117,34 @@ export default function PriceBookIngestPage() {
   const [reviewVendorIds, setReviewVendorIds] = useState<string[]>([]);
   const [columnDrafts, setColumnDrafts] = useState<ColumnDraft[]>([]);
   const [rowDrafts, setRowDrafts] = useState<RowDraft[]>([]);
+  const [specDrafts, setSpecDrafts] = useState<{ key: string; value: string }[]>([]);
   const [approving, setApproving] = useState(false);
+
+  // Adder/option mapping state (used when the opened extraction is an adder).
+  const [adderMode, setAdderMode] = useState(false);
+  const [baseTableOptions, setBaseTableOptions] = useState<BaseTableOption[]>([]);
+  const [adderBaseTableId, setAdderBaseTableId] = useState<string>('');
+  const [adderCanonicalCode, setAdderCanonicalCode] = useState<string>('');
+  const [fieldDefs, setFieldDefs] = useState<FieldDefinition[]>([]);
+  const [adderFieldDefId, setAdderFieldDefId] = useState<string>('');
+  // Per-row state: each row can be mapped to a different field definition
+  const [adderRows, setAdderRows] = useState<{
+    optionValue: string;
+    price: number | null;
+    include: boolean;
+    fieldDefinitionId: string; // per-row field (empty = use the header default)
+  }[]>([]);
+  // For bulk-assignment: tracks which rows are checked for mass field-assign
+  const [adderSelectedRows, setAdderSelectedRows] = useState<Set<number>>(new Set());
+  const [bulkFieldDefId, setBulkFieldDefId] = useState<string>('');
+
+  // Diff preview for update-vs-create
+  const [diffPreview, setDiffPreview] = useState<GridDiff | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+
+  // Hardware flat-list mapping state
+  const [hardwareMode, setHardwareMode] = useState(false);
+  const [hardwareRows, setHardwareRows] = useState<HardwareRowMapping[]>([]);
 
   const loadList = async () => {
     setLoading(true);
@@ -111,9 +172,11 @@ export default function PriceBookIngestPage() {
         name: name.trim(),
         companyId: companyId || null,
         category: (category || null) as PriceBookCategory | null,
+        effectiveDate: effectiveDate || null,
+        supersedesPriceBookId: (supersedesId && supersedesId !== '__none__') ? supersedesId : null,
       });
       toast({ title: 'Uploaded', description: 'Scanning the whole book for every pricing table (this can take a minute)…' });
-      setName(''); setFile(null); setCategory(''); setCompanyId('');
+      setName(''); setFile(null); setCategory(''); setCompanyId(''); setEffectiveDate(''); setSupersedesId('__none__');
       await ingestPriceBook(priceBookId);
       await loadList();
       const book = await pollBookStatus(priceBookId);
@@ -167,6 +230,34 @@ export default function PriceBookIngestPage() {
       await reloadBookExtractions(reviewBook);
     } catch (err) {
       toast({ title: 'Extraction failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setExtractingIds((p) => { const n = new Set(p); n.delete(ext.id); return n; });
+    }
+  };
+
+  /**
+   * Re-runs grid extraction on a table that was already extracted but produced
+   * a truncated or empty result. Resets the grid to empty first, then re-runs
+   * the Gemini extraction — a second pass often succeeds where the first was cut off.
+   */
+  const reExtractGrid = async (ext: PriceBookExtraction) => {
+    if (!reviewBook) return;
+    setExtractingIds((p) => new Set(p).add(ext.id));
+    try {
+      await resetExtractionGrid(ext.id);
+      const r = await extractPriceBookTable(ext.id);
+      if (r.cellCount === 0) {
+        toast({
+          title: 'Re-extraction produced no prices',
+          description: `${ext.title ?? 'Table'}: ${r.rowCount} rows, ${r.colCount} cols, 0 prices — response may have been truncated again. Try once more or check the page hint.`,
+          variant: 'destructive',
+        });
+      } else {
+        toast({ title: 'Grid re-extracted', description: `${ext.title ?? 'Table'}: ${r.rowCount}×${r.colCount}, ${r.cellCount} prices.` });
+      }
+      await reloadBookExtractions(reviewBook);
+    } catch (err) {
+      toast({ title: 'Re-extraction failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
     } finally {
       setExtractingIds((p) => { const n = new Set(p); n.delete(ext.id); return n; });
     }
@@ -268,6 +359,70 @@ export default function PriceBookIngestPage() {
       setReviewCategory((ext.detectedCategory ?? book.category ?? 'doors') as PriceBookCategory);
       setReviewSeries(ext.detectedSeries ?? '');
       setReviewVendorIds(book.companyId ? [book.companyId] : []);
+
+      const cat = (ext.detectedCategory ?? book.category ?? 'doors') as PriceBookCategory;
+
+      // Hardware flat-list: route to hardware mapper
+      if (cat === 'hardware' || (ext.kind === 'flat_list' && cat === 'hardware')) {
+        setHardwareMode(true);
+        setAdderMode(false);
+        setHardwareRows(ext.grid.rowLabels.map((label, i) => {
+          const cell = ext.grid.cells.find((c) => c.row === i && c.price != null);
+          return {
+            gridRow: i,
+            label,
+            canonicalCode: label.trim().toUpperCase().replace(/\s+/g, '-'),
+            price: cell?.price ?? null,
+            include: cell?.price != null,
+          };
+        }));
+        return;
+      }
+
+      if (isAdderExtraction(ext)) {
+        // Adder/option table: map each row to an option surcharge on a base table.
+        setAdderMode(true);
+        setAdderFieldDefId('');
+        setAdderSelectedRows(new Set());
+        setBulkFieldDefId('');
+
+        const [bases, defs] = await Promise.all([
+          book.companyId ? listBaseTablesForVendor(book.companyId) : Promise.resolve([]),
+          getFieldDefinitions(),
+        ]);
+        setBaseTableOptions(bases);
+        setFieldDefs(defs);
+
+        // Default to the base table matching this adder's series, if present.
+        const seriesLower = (ext.detectedSeries ?? '').trim().toLowerCase();
+        const matchedBase = bases.find((b) => b.seriesValue.trim().toLowerCase() === seriesLower);
+        setAdderBaseTableId(matchedBase?.id ?? bases[0]?.id ?? '');
+        setAdderCanonicalCode(matchedBase?.seriesValue ?? ext.detectedSeries ?? '');
+
+        // Build a field_key → field def id map for fast lookup
+        const fieldKeyToId = new Map(defs.map((f) => [f.fieldKey, f.id]));
+        // rowFieldHints: Gemini's best-guess field_key per row index (set during extraction)
+        const rowHints = (ext.grid.rowFieldHints as Record<number, string> | undefined) ?? {};
+
+        // Prefill each grid row; auto-assign fieldDefinitionId from Gemini's hints when available.
+        setAdderRows(ext.grid.rowLabels.map((label, i) => {
+          const cell = ext.grid.cells.find((c) => c.row === i && c.price != null);
+          const hintKey = rowHints[i];
+          const hintFieldId = hintKey ? (fieldKeyToId.get(hintKey) ?? '') : '';
+          return {
+            optionValue: label,
+            price: cell?.price ?? null,
+            include: cell?.price != null,
+            fieldDefinitionId: hintFieldId,
+          };
+        }));
+        return;
+      }
+
+      setAdderMode(false);
+      setHardwareMode(false);
+      setDiffPreview(null);
+      setSpecDrafts(parseSpecSelectors(cat, ext.title ?? ''));
       setColumnDrafts(ext.grid.columnLabels.map((label, i) => ({
         gridCol: i,
         label,
@@ -280,6 +435,90 @@ export default function PriceBookIngestPage() {
       }));
     } catch (err) {
       toast({ title: 'Failed to open table', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    }
+  };
+
+  const handleApproveAdder = async () => {
+    if (!extraction || !reviewBook) return;
+    const vendorId = reviewBook.companyId;
+    if (!vendorId) {
+      toast({ title: 'Manufacturer required', description: 'This price book has no manufacturer set.', variant: 'destructive' });
+      return;
+    }
+    if (!adderBaseTableId) {
+      toast({ title: 'Base table required', description: 'Pick the door/frame series these surcharges apply to.', variant: 'destructive' });
+      return;
+    }
+    if (!adderCanonicalCode.trim()) {
+      toast({ title: 'Item code required', description: 'Enter the item canonical code these adders apply to.', variant: 'destructive' });
+      return;
+    }
+    // Validate: every included row must have a field assigned (either per-row or via the header default)
+    const includedRows = adderRows.filter((r) => r.include && r.price != null && r.optionValue.trim());
+    const unassigned = includedRows.filter((r) => !r.fieldDefinitionId && !adderFieldDefId);
+    if (unassigned.length > 0) {
+      toast({
+        title: 'Field required for all rows',
+        description: `${unassigned.length} row(s) have no option field assigned. Use the per-row picker or the bulk-assign bar to assign them.`,
+        variant: 'destructive',
+      });
+      return;
+    }
+    setApproving(true);
+    try {
+      const rows = includedRows.map((r) => ({
+        optionValue: r.optionValue.trim(),
+        price: r.price as number,
+        fieldDefinitionId: r.fieldDefinitionId || undefined,
+      }));
+      const result = await approveAdderExtraction({
+        extractionId: extraction.id,
+        proposalId,
+        baseTableId: adderBaseTableId,
+        canonicalCode: adderCanonicalCode.trim(),
+        fieldDefinitionId: adderFieldDefId, // default; per-row overrides take precedence
+        vendorId,
+        rows,
+      });
+      toast({ title: 'Adders saved', description: `${result.cellsWritten} surcharge(s) written.` });
+      const book = reviewBook;
+      setExtraction(null);
+      setAdderMode(false);
+      await reloadBookExtractions(book);
+      await loadList();
+    } catch (err) {
+      toast({ title: 'Approval failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const handleApproveHardware = async () => {
+    if (!extraction || !reviewBook) return;
+    if (reviewVendorIds.length === 0) {
+      toast({ title: 'Vendor required', description: 'Select at least one manufacturer.', variant: 'destructive' });
+      return;
+    }
+    setApproving(true);
+    try {
+      const result = await approveHardwareExtraction({
+        extractionId: extraction.id,
+        priceBookId: reviewBook.id,
+        proposalId,
+        tableName: reviewName.trim() || (extraction.title ?? 'Hardware'),
+        vendorIds: reviewVendorIds,
+        rows: hardwareRows,
+      });
+      toast({ title: 'Hardware table saved', description: `${result.rowsWritten} item(s) priced, ${result.itemsTagged} canonical code(s) tagged.` });
+      const book = reviewBook;
+      setExtraction(null);
+      setHardwareMode(false);
+      await reloadBookExtractions(book);
+      await loadList();
+    } catch (err) {
+      toast({ title: 'Approval failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setApproving(false);
     }
   };
 
@@ -297,6 +536,17 @@ export default function PriceBookIngestPage() {
       toast({ title: 'Vendor required', description: 'Select at least one manufacturer.', variant: 'destructive' });
       return;
     }
+    // For door and frame base tables, require at least one spec selector so the
+    // table is addressable via the spec-first lookup (not just series fallback).
+    const selCrit = Object.fromEntries(specDrafts.filter((s) => s.key.trim() && s.value.trim()).map((s) => [s.key.trim(), s.value.trim()]));
+    if ((reviewCategory === 'doors' || reviewCategory === 'frames') && Object.keys(selCrit).length === 0) {
+      toast({
+        title: 'Spec selectors required',
+        description: `Add at least one spec selector (e.g. edge_construction, frame_type) so this ${reviewCategory === 'doors' ? 'door' : 'frame'} table is addressable by spec.`,
+        variant: 'destructive',
+      });
+      return;
+    }
     setApproving(true);
     try {
       const columns: ColumnMapping[] = columnDrafts.map((c) => {
@@ -309,6 +559,9 @@ export default function PriceBookIngestPage() {
         widthCriteria: r.width.trim() ? ({ type: 'raw', label: r.width.trim() } as DimensionCriteria) : {},
         heightCriteria: r.height.trim() ? ({ type: 'raw', label: r.height.trim() } as DimensionCriteria) : {},
       }));
+      const selectionCriteria = Object.fromEntries(
+        specDrafts.filter((s) => s.key.trim() && s.value.trim()).map((s) => [s.key.trim(), s.value.trim()]),
+      );
       const result = await approveExtraction({
         extractionId: extraction.id,
         priceBookId: reviewBook.id,
@@ -320,8 +573,10 @@ export default function PriceBookIngestPage() {
         columns,
         rows,
         grid: extraction.grid,
+        selectionCriteria,
       });
-      toast({ title: 'Pricing table created', description: `${result.cellsWritten} prices written across ${result.rowsCreated}×${result.columnsCreated}.` });
+      const action = result.wasUpdate ? 'Pricing table updated' : 'Pricing table created';
+      toast({ title: action, description: `${result.cellsWritten} price${result.cellsWritten !== 1 ? 's' : ''} written (${result.rowsCreated} new rows, ${result.columnsCreated} new columns).` });
       const book = reviewBook;
       setExtraction(null);
       await reloadBookExtractions(book);
@@ -361,6 +616,434 @@ export default function PriceBookIngestPage() {
     return cell?.price ?? null;
   };
 
+  // ---------------------------------------------------------------- Read-only grid view
+  if (reviewBook && viewExtraction) {
+    const g = viewExtraction.grid;
+    const priceCount = g.cells.filter((c) => c.price != null).length;
+    const viewPrice = (rowIdx: number, colIdx: number): number | null => {
+      const cell = g.cells.find((c) => c.row === rowIdx && c.col === colIdx);
+      return cell?.price ?? null;
+    };
+    return (
+      <div className="container mx-auto max-w-6xl space-y-6 p-6">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="icon" onClick={() => setViewExtraction(null)}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold">{viewExtraction.title ?? 'Untitled table'}</h1>
+              {viewExtraction.status === 'approved' && (
+                <Badge className="bg-green-600 hover:bg-green-600"><CheckCircle2 className="mr-1 h-3 w-3" />Approved</Badge>
+              )}
+            </div>
+            <p className="text-sm text-muted-foreground">{reviewBook.name} · {reviewBook.originalFileName}</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 text-sm">
+          <Badge variant="outline" className="capitalize">{viewExtraction.detectedCategory?.replace(/_/g, ' ') ?? 'Uncategorized'}</Badge>
+          {viewExtraction.detectedSeries && <Badge variant="outline">Series: {viewExtraction.detectedSeries}</Badge>}
+          {viewExtraction.kind && <Badge variant="outline" className="capitalize">{viewExtraction.kind.replace(/_/g, ' ')}</Badge>}
+          <Badge variant="outline">{g.rowLabels.length}×{g.columnLabels.length} · {priceCount} prices</Badge>
+        </div>
+
+        {viewExtraction.warnings.length > 0 && (
+          <Card className="border-amber-500/50">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-base text-amber-600">
+                <AlertCircle className="h-4 w-4" /> Agent warnings
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground">
+              <ul className="list-disc pl-5">{viewExtraction.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+            </CardContent>
+          </Card>
+        )}
+
+        <Card>
+          <CardHeader><CardTitle className="text-base">Pricing table</CardTitle></CardHeader>
+          <CardContent className="overflow-x-auto">
+            {g.rowLabels.length === 0 || g.columnLabels.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No grid data was extracted for this table.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="sticky left-0 bg-background"></TableHead>
+                    {g.columnLabels.map((label, i) => <TableHead key={i} className="whitespace-nowrap text-xs">{label}</TableHead>)}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {g.rowLabels.map((rLabel, rIdx) => (
+                    <TableRow key={rIdx}>
+                      <TableCell className="sticky left-0 bg-background whitespace-nowrap text-xs font-medium">{rLabel}</TableCell>
+                      {g.columnLabels.map((_, cIdx) => {
+                        const price = viewPrice(rIdx, cIdx);
+                        return <TableCell key={cIdx} className="text-xs tabular-nums">{price != null ? `$${price.toFixed(2)}` : '—'}</TableCell>;
+                      })}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------- Hardware flat-list mapping view
+  if (reviewBook && extraction && hardwareMode) {
+    const closeHardware = () => { setExtraction(null); setHardwareMode(false); };
+    return (
+      <div className="container mx-auto max-w-4xl space-y-6 p-6">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="icon" onClick={closeHardware}><ArrowLeft className="h-4 w-4" /></Button>
+          <div>
+            <h1 className="text-2xl font-bold">Map hardware: {extraction.title ?? 'Untitled'}</h1>
+            <p className="text-sm text-muted-foreground">{reviewBook.name} · flat price list — one price per item</p>
+          </div>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Table details</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label>Table name</Label>
+              <Input value={reviewName} onChange={(e) => setReviewName(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>Manufacturers</Label>
+              <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border p-2">
+                {manufacturers.map((m) => (
+                  <label key={m.id} className="flex items-center gap-2 text-sm">
+                    <Checkbox checked={reviewVendorIds.includes(m.id)} onCheckedChange={() => toggleVendor(m.id)} />
+                    {m.name}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Hardware item rows</CardTitle>
+            <CardDescription>
+              Map each row to the hardware canonical code (e.g. HINGE-BB, LATCHSET-M) used by the opening builder.
+              Include rows you want to price; skip any you don&apos;t need.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10"></TableHead>
+                  <TableHead>Extracted label</TableHead>
+                  <TableHead>Canonical code</TableHead>
+                  <TableHead className="w-32">Price</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {hardwareRows.map((r, i) => (
+                  <TableRow key={i}>
+                    <TableCell>
+                      <Checkbox
+                        checked={r.include}
+                        onCheckedChange={() => setHardwareRows((p) => p.map((x, j) => j === i ? { ...x, include: !x.include } : x))}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs font-mono">{r.label}</TableCell>
+                    <TableCell>
+                      <Input
+                        className="h-8 font-mono text-xs"
+                        value={r.canonicalCode}
+                        placeholder="e.g. HINGE-BB"
+                        onChange={(e) => setHardwareRows((p) => p.map((x, j) => j === i ? { ...x, canonicalCode: e.target.value } : x))}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Input
+                        className="h-8 text-xs"
+                        type="number"
+                        value={r.price ?? ''}
+                        onChange={(e) => setHardwareRows((p) => p.map((x, j) => j === i ? { ...x, price: e.target.value === '' ? null : Number(e.target.value) } : x))}
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={handleDiscard} disabled={approving}>Discard</Button>
+          <Button onClick={handleApproveHardware} disabled={approving}>
+            {approving && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+            Save hardware prices
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------- Adder/option mapping view
+  if (reviewBook && extraction && adderMode) {
+    const closeAdder = () => { setExtraction(null); setAdderMode(false); };
+
+        // Derived counts for the header summary
+        const includedCount = adderRows.filter((r) => r.include && r.price != null && r.optionValue.trim()).length;
+        const unassignedCount = adderRows.filter((r) => r.include && r.price != null && !r.fieldDefinitionId && !adderFieldDefId).length;
+        const autoAssignedCount = adderRows.filter((r) => r.include && r.price != null && r.fieldDefinitionId).length;
+    const allSelected = adderRows.length > 0 && adderSelectedRows.size === adderRows.length;
+    const someSelected = adderSelectedRows.size > 0 && !allSelected;
+
+    // Group rows visually by their assigned field label
+    const fieldById = new Map(fieldDefs.map((f) => [f.id, f]));
+
+    return (
+      <div className="container mx-auto max-w-5xl space-y-6 p-6">
+        {/* Header */}
+        <div className="flex items-start gap-3">
+          <Button variant="ghost" size="icon" onClick={closeAdder} className="mt-0.5"><ArrowLeft className="h-4 w-4" /></Button>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-2xl font-bold truncate">Map adders: {extraction.title ?? 'Untitled'}</h1>
+            <p className="text-sm text-muted-foreground">{reviewBook.name} · surcharges stacked on top of a base price</p>
+          </div>
+        </div>
+
+        {/* Setup card */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Adder target</CardTitle>
+            <CardDescription>
+              These surcharges apply to a base door/frame series. Each row's price is added at quote time when the item's chosen option value matches.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-1.5">
+              <Label>Base series (door / frame)</Label>
+              <Select value={adderBaseTableId} onValueChange={setAdderBaseTableId}>
+                <SelectTrigger><SelectValue placeholder="Select base table…" /></SelectTrigger>
+                <SelectContent>
+                  {baseTableOptions.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>{b.category} · {b.seriesValue}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {baseTableOptions.length === 0 && (
+                <p className="text-xs text-amber-600">No base tables yet — approve the size grid first.</p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label>
+                Default option field
+                <span className="ml-1 text-muted-foreground font-normal text-[11px]">(applies to unassigned rows)</span>
+              </Label>
+              <Select
+                value={adderFieldDefId || '__none__'}
+                onValueChange={(val) => setAdderFieldDefId(val === '__none__' ? '' : val)}
+              >
+                <SelectTrigger><SelectValue placeholder="Select field…" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">— None (assign per row) —</SelectItem>
+                  {fieldDefs.map((f) => <SelectItem key={f.id} value={f.id}>{f.fieldLabel} ({f.fieldKey})</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Applies to item code</Label>
+              <Input value={adderCanonicalCode} onChange={(e) => setAdderCanonicalCode(e.target.value)} placeholder="e.g. H" />
+              <p className="text-xs text-muted-foreground">Must match the item's canonical_code.</p>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Rows card */}
+        <Card>
+          <CardHeader className="pb-0">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">Option rows</CardTitle>
+                <CardDescription className="mt-0.5">
+                  This table has multiple sections — each row can belong to a <strong>different option field</strong>.
+                  Use the per-row field picker or select rows and bulk-assign them.
+                </CardDescription>
+              </div>
+              <div className="text-right shrink-0 text-sm space-y-0.5">
+                <p className="font-medium">{includedCount} rows included</p>
+                {autoAssignedCount > 0 && (
+                  <p className="text-green-700 text-xs">
+                    ✓ {autoAssignedCount} auto-matched by AI
+                  </p>
+                )}
+                {unassignedCount > 0 && (
+                  <p className="text-destructive text-xs">{unassignedCount} still need a field</p>
+                )}
+              </div>
+            </div>
+
+            {/* Bulk-assign bar — appears when rows are selected */}
+            {adderSelectedRows.size > 0 && (
+              <div className="mt-3 flex items-center gap-2 rounded-md border bg-primary/5 px-3 py-2">
+                <span className="text-xs font-medium text-primary">{adderSelectedRows.size} selected</span>
+                <div className="flex-1">
+                  <Select
+                    value={bulkFieldDefId}
+                    onValueChange={setBulkFieldDefId}
+                  >
+                    <SelectTrigger className="h-7 text-xs">
+                      <SelectValue placeholder="Assign to field…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {fieldDefs.map((f) => <SelectItem key={f.id} value={f.id} className="text-xs">{f.fieldLabel} ({f.fieldKey})</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  size="sm"
+                  disabled={!bulkFieldDefId}
+                  onClick={() => {
+                    setAdderRows((prev) => prev.map((r, i) =>
+                      adderSelectedRows.has(i) ? { ...r, fieldDefinitionId: bulkFieldDefId } : r
+                    ));
+                    setAdderSelectedRows(new Set());
+                    setBulkFieldDefId('');
+                  }}
+                >
+                  Assign
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setAdderSelectedRows(new Set())}>
+                  Clear
+                </Button>
+              </div>
+            )}
+          </CardHeader>
+
+          <CardContent className="p-0 mt-3">
+            {/* Column headers */}
+            <div className="grid grid-cols-[auto_28px_1fr_200px_96px] gap-0 border-y bg-muted/40 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="w-8">
+                <Checkbox
+                  checked={allSelected}
+                  data-state={someSelected ? 'indeterminate' : allSelected ? 'checked' : 'unchecked'}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      setAdderSelectedRows(new Set(adderRows.map((_, i) => i)));
+                    } else {
+                      setAdderSelectedRows(new Set());
+                    }
+                  }}
+                />
+              </div>
+              <div></div>
+              <div>Option value</div>
+              <div>Option field</div>
+              <div className="text-right">Surcharge ($)</div>
+            </div>
+
+            <div className="divide-y">
+              {adderRows.map((r, i) => {
+                const rowField = r.fieldDefinitionId ? fieldById.get(r.fieldDefinitionId) : null;
+                const isSelected = adderSelectedRows.has(i);
+                const missingField = r.include && r.price != null && !r.fieldDefinitionId && !adderFieldDefId;
+
+                return (
+                  <div
+                    key={i}
+                    className={`grid grid-cols-[auto_28px_1fr_200px_96px] items-center gap-0 px-4 py-2 transition-colors
+                      ${isSelected ? 'bg-primary/5' : ''}
+                      ${!r.include ? 'opacity-40' : ''}
+                      ${missingField ? 'bg-destructive/5' : ''}
+                    `}
+                  >
+                    {/* Row select checkbox */}
+                    <div className="w-8">
+                      <Checkbox
+                        checked={isSelected}
+                        onCheckedChange={() => {
+                          setAdderSelectedRows((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(i)) next.delete(i); else next.add(i);
+                            return next;
+                          });
+                        }}
+                      />
+                    </div>
+
+                    {/* Include toggle */}
+                    <div>
+                      <Checkbox
+                        checked={r.include}
+                        title="Include in approval"
+                        onCheckedChange={() => setAdderRows((p) => p.map((x, j) => j === i ? { ...x, include: !x.include } : x))}
+                      />
+                    </div>
+
+                    {/* Option value */}
+                    <div className="pr-3">
+                      <Input
+                        className="h-7 text-xs"
+                        value={r.optionValue}
+                        onChange={(e) => setAdderRows((p) => p.map((x, j) => j === i ? { ...x, optionValue: e.target.value } : x))}
+                      />
+                    </div>
+
+                    {/* Per-row field picker */}
+                    <div className="pr-3">
+                      <Select
+                        value={r.fieldDefinitionId || '__inherit__'}
+                        onValueChange={(val) => setAdderRows((p) => p.map((x, j) => j === i ? { ...x, fieldDefinitionId: val === '__inherit__' ? '' : val } : x))}
+                      >
+                        <SelectTrigger className={`h-7 text-xs ${missingField ? 'border-destructive' : ''} ${rowField ? 'text-foreground' : 'text-muted-foreground'}`}>
+                          <SelectValue placeholder={adderFieldDefId ? 'Using default' : 'Pick field…'} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {adderFieldDefId && (
+                            <SelectItem value="__inherit__" className="text-xs text-muted-foreground italic">
+                              Use default field
+                            </SelectItem>
+                          )}
+                          {fieldDefs.map((f) => (
+                            <SelectItem key={f.id} value={f.id} className="text-xs">
+                              {f.fieldLabel}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {/* Price */}
+                    <div>
+                      <Input
+                        className="h-7 text-xs text-right"
+                        type="number"
+                        value={r.price ?? ''}
+                        onChange={(e) => setAdderRows((p) => p.map((x, j) => j === i ? { ...x, price: e.target.value === '' ? null : Number(e.target.value) } : x))}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="flex justify-between gap-2">
+          <Button variant="outline" onClick={handleDiscard} disabled={approving}>Discard</Button>
+          <Button onClick={handleApproveAdder} disabled={approving || unassignedCount > 0}>
+            {approving && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+            Save {includedCount} adder{includedCount !== 1 ? 's' : ''}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   // ---------------------------------------------------------------- Single-table mapping view
   if (reviewBook && extraction) {
     return (
@@ -375,15 +1058,80 @@ export default function PriceBookIngestPage() {
           </div>
         </div>
 
-        {extraction.warnings.length > 0 && (
+        {/* Empty grid warning with one-click re-extract */}
+        {(extraction.grid.cells.length === 0 || extraction.grid.rowLabels.length === 0) && (
+          <Card className="border-destructive/50 bg-destructive/5">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-base text-destructive">
+                <AlertCircle className="h-4 w-4" /> Empty grid — extraction was truncated
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex items-center justify-between gap-4">
+              <p className="text-sm text-muted-foreground">
+                Gemini hit its output token limit and returned no prices. Re-extracting usually succeeds on a second pass.
+              </p>
+              <Button
+                variant="outline"
+                className="shrink-0"
+                disabled={extractingIds.has(extraction.id)}
+                onClick={async () => {
+                  if (!reviewBook) return;
+                  setExtractingIds((p) => new Set(p).add(extraction.id));
+                  try {
+                    await resetExtractionGrid(extraction.id);
+                    const r = await extractPriceBookTable(extraction.id);
+                    toast({ title: 'Re-extracted', description: `${r.rowCount}×${r.colCount}, ${r.cellCount} prices. Go back to review the updated grid.` });
+                    await reloadBookExtractions(reviewBook);
+                    setExtraction(null); // return to list so user sees the fresh result
+                  } catch (err) {
+                    toast({ title: 'Re-extraction failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+                  } finally {
+                    setExtractingIds((p) => { const n = new Set(p); n.delete(extraction.id); return n; });
+                  }
+                }}
+              >
+                {extractingIds.has(extraction.id)
+                  ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />Re-extracting…</>
+                  : <><RefreshCw className="mr-1.5 h-3.5 w-3.5" />Re-extract grid</>}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {extraction.warnings.length > 0 && (extraction.grid.cells.length > 0 || extraction.grid.rowLabels.length > 0) && (
           <Card className="border-amber-500/50">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-base text-amber-600">
                 <AlertCircle className="h-4 w-4" /> Agent warnings
               </CardTitle>
             </CardHeader>
-            <CardContent className="text-sm text-muted-foreground">
-              <ul className="list-disc pl-5">{extraction.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+            <CardContent className="flex items-center justify-between gap-4">
+              <ul className="list-disc pl-5 text-sm text-muted-foreground">{extraction.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                disabled={extractingIds.has(extraction.id)}
+                onClick={async () => {
+                  if (!reviewBook) return;
+                  setExtractingIds((p) => new Set(p).add(extraction.id));
+                  try {
+                    await resetExtractionGrid(extraction.id);
+                    const r = await extractPriceBookTable(extraction.id);
+                    toast({ title: 'Re-extracted', description: `${r.rowCount}×${r.colCount}, ${r.cellCount} prices.` });
+                    await reloadBookExtractions(reviewBook);
+                    setExtraction(null);
+                  } catch (err) {
+                    toast({ title: 'Re-extraction failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+                  } finally {
+                    setExtractingIds((p) => { const n = new Set(p); n.delete(extraction.id); return n; });
+                  }
+                }}
+              >
+                {extractingIds.has(extraction.id)
+                  ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />Re-extracting…</>
+                  : <><RefreshCw className="mr-1.5 h-3.5 w-3.5" />Re-extract</>}
+              </Button>
             </CardContent>
           </Card>
         )}
@@ -418,6 +1166,49 @@ export default function PriceBookIngestPage() {
                 {manufacturers.length === 0 && <p className="text-xs text-muted-foreground">No manufacturers found.</p>}
               </div>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Series selectors (specs)</CardTitle>
+            <CardDescription>
+              The spec field values that route a configured item to this table for its manufacturer (e.g. doors: edge_construction + core_construction). A user picks these specs in the builder; the system resolves the matching manufacturer — no series needed.
+              {(reviewCategory === 'doors' || reviewCategory === 'frames') && specDrafts.filter((s) => s.key.trim() && s.value.trim()).length === 0 && (
+                <span className="block mt-1 text-destructive text-xs font-medium">
+                  ⚠ Required for doors/frames — add at least one spec selector to enable spec-first pricing.
+                </span>
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow><TableHead>Spec field key</TableHead><TableHead>Value</TableHead><TableHead className="w-10"></TableHead></TableRow>
+              </TableHeader>
+              <TableBody>
+                {specDrafts.map((s, i) => (
+                  <TableRow key={i}>
+                    <TableCell>
+                      <Input className="h-8" value={s.key} placeholder="edge_construction"
+                        onChange={(e) => setSpecDrafts((p) => p.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} />
+                    </TableCell>
+                    <TableCell>
+                      <Input className="h-8" value={s.value} placeholder="Lockseam"
+                        onChange={(e) => setSpecDrafts((p) => p.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
+                    </TableCell>
+                    <TableCell>
+                      <Button size="icon" variant="ghost" onClick={() => setSpecDrafts((p) => p.filter((_, j) => j !== i))}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            <Button size="sm" variant="outline" className="mt-2" onClick={() => setSpecDrafts((p) => [...p, { key: '', value: '' }])}>
+              Add spec selector
+            </Button>
           </CardContent>
         </Card>
 
@@ -506,11 +1297,89 @@ export default function PriceBookIngestPage() {
           </CardContent>
         </Card>
 
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={handleDiscard} disabled={approving}>Discard</Button>
+        {/* Diff preview — show when a matching table already exists */}
+        {diffPreview && (
+          <Card className={diffPreview.totalChanges > 0 ? 'border-amber-300' : 'border-green-300'}>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                {diffPreview.totalChanges > 0
+                  ? <><AlertCircle className="h-4 w-4 text-amber-500" />Existing table found — {diffPreview.totalChanges} change(s) will be applied</>
+                  : <><CheckCircle2 className="h-4 w-4 text-green-500" />No changes — existing table is already up-to-date</>}
+              </CardTitle>
+              <CardDescription>
+                Approving will <strong>update</strong> the existing pricing table rather than create a new one.
+              </CardDescription>
+            </CardHeader>
+            {diffPreview.totalChanges > 0 && (
+              <CardContent className="text-sm space-y-1">
+                {diffPreview.addedRows.length > 0 && <p className="text-green-700">+ {diffPreview.addedRows.length} new row(s): {diffPreview.addedRows.slice(0, 3).join(', ')}{diffPreview.addedRows.length > 3 ? '…' : ''}</p>}
+                {diffPreview.removedRows.length > 0 && <p className="text-destructive">− {diffPreview.removedRows.length} removed row(s)</p>}
+                {diffPreview.addedColumns.length > 0 && <p className="text-green-700">+ {diffPreview.addedColumns.length} new column(s)</p>}
+                {diffPreview.removedColumns.length > 0 && <p className="text-destructive">− {diffPreview.removedColumns.length} removed column(s)</p>}
+                {diffPreview.changedCells.length > 0 && (
+                  <p className="text-amber-700">{diffPreview.changedCells.length} price change(s) — avg {
+                    (() => {
+                      const withDelta = diffPreview.changedCells.filter((c) => c.pctDelta != null);
+                      if (withDelta.length === 0) return 'n/a';
+                      const avg = withDelta.reduce((s, c) => s + (c.pctDelta ?? 0), 0) / withDelta.length;
+                      return `${avg > 0 ? '+' : ''}${avg.toFixed(1)}%`;
+                    })()
+                  }</p>
+                )}
+              </CardContent>
+            )}
+          </Card>
+        )}
+
+        <div className="flex justify-between gap-2">
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleDiscard} disabled={approving}>Discard</Button>
+            {reviewVendorIds.length === 1 && Object.keys(
+              Object.fromEntries(specDrafts.filter((s) => s.key.trim() && s.value.trim()).map((s) => [s.key.trim(), s.value.trim()]))
+            ).length > 0 && !diffPreview && (
+              <Button
+                variant="outline"
+                disabled={diffLoading}
+                onClick={async () => {
+                  if (!extraction || !reviewBook) return;
+                  setDiffLoading(true);
+                  try {
+                    const sc = Object.fromEntries(specDrafts.filter((s) => s.key.trim() && s.value.trim()).map((s) => [s.key.trim(), s.value.trim()]));
+                    const existingId = await findMatchingPricingTable(reviewVendorIds[0], reviewCategory, sc);
+                    if (existingId) {
+                      const columns: ColumnMapping[] = columnDrafts.map((c) => {
+                        const criteria: import('@/types').ColumnCriteria = c.fieldKey.trim() ? { [c.fieldKey.trim()]: c.value.trim() } : {};
+                        return { gridCol: c.gridCol, label: c.label, criteria };
+                      });
+                      const rows: RowMapping[] = rowDrafts.map((r) => ({
+                        gridRow: r.gridRow, label: r.label,
+                        widthCriteria: r.width.trim() ? ({ type: 'raw', label: r.width.trim() } as import('@/types').DimensionCriteria) : {},
+                        heightCriteria: r.height.trim() ? ({ type: 'raw', label: r.height.trim() } as import('@/types').DimensionCriteria) : {},
+                      }));
+                      const diff = await computeGridDiff(existingId, {
+                        extractionId: extraction.id, priceBookId: reviewBook.id, category: reviewCategory,
+                        seriesValue: reviewSeries, tableName: reviewName, vendorIds: reviewVendorIds,
+                        columns, rows, grid: extraction.grid, selectionCriteria: sc,
+                      });
+                      setDiffPreview(diff);
+                    } else {
+                      toast({ title: 'No existing table', description: 'No pricing table matches these specs — will create a new one.' });
+                    }
+                  } catch (err) {
+                    toast({ title: 'Diff check failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+                  } finally {
+                    setDiffLoading(false);
+                  }
+                }}
+              >
+                {diffLoading && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                Check for existing table
+              </Button>
+            )}
+          </div>
           <Button onClick={handleApprove} disabled={approving}>
             {approving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
-            Approve & create pricing table
+            {diffPreview ? 'Approve & update pricing table' : 'Approve & create pricing table'}
           </Button>
         </div>
       </div>
@@ -523,7 +1392,7 @@ export default function PriceBookIngestPage() {
     return (
       <div className="container mx-auto max-w-5xl space-y-6 p-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={() => { setReviewBook(null); setBookExtractions([]); }}>
+          <Button variant="ghost" size="icon" onClick={() => { setReviewBook(null); setBookExtractions([]); setViewExtraction(null); }}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div>
@@ -553,53 +1422,120 @@ export default function PriceBookIngestPage() {
               )}
             </div>
           </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Table</TableHead><TableHead>Category</TableHead><TableHead>Series</TableHead>
-                  <TableHead>Size</TableHead><TableHead>Status</TableHead><TableHead></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {bookExtractions.map((ext) => {
-                  const busy = extractingIds.has(ext.id);
-                  return (
-                    <TableRow key={ext.id}>
-                      <TableCell>
-                        <div className="font-medium">{ext.title ?? 'Untitled table'}</div>
-                        {ext.kind && <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{ext.kind.replace(/_/g, ' ')}</div>}
-                        {ext.warnings.length > 0 && <div className="mt-0.5 text-xs text-amber-600">{ext.warnings.length} warning(s)</div>}
-                      </TableCell>
-                      <TableCell className="capitalize">{ext.detectedCategory?.replace(/_/g, ' ') ?? '—'}</TableCell>
-                      <TableCell>{ext.detectedSeries ?? '—'}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {ext.gridExtracted ? `${ext.grid.rowLabels.length}×${ext.grid.columnLabels.length} · ${ext.grid.cells.length} prices` : '—'}
-                      </TableCell>
-                      <TableCell>
-                        {ext.status === 'approved'
-                          ? <Badge className="bg-green-600 hover:bg-green-600"><CheckCircle2 className="mr-1 h-3 w-3" />Approved</Badge>
-                          : ext.status === 'discarded'
-                            ? <Badge variant="outline">Discarded</Badge>
-                            : ext.gridExtracted
-                              ? <Badge variant="secondary">Ready to map</Badge>
-                              : <Badge variant="outline">Not extracted</Badge>}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {ext.status === 'pending' && (
-                          ext.gridExtracted
-                            ? <Button size="sm" onClick={() => openTable(reviewBook, ext)}>Map &amp; approve</Button>
-                            : <Button size="sm" variant="outline" onClick={() => extractGrid(ext)} disabled={busy || extractingAll}>
-                                {busy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
-                                Extract grid
-                              </Button>
+          <CardContent className="p-0">
+            <div className="divide-y">
+              {bookExtractions.map((ext) => {
+                const busy = extractingIds.has(ext.id);
+                const gridEmpty = ext.gridExtracted && (ext.grid.cells.length === 0 || ext.grid.rowLabels.length === 0);
+                const gridTruncated = ext.gridExtracted && ext.warnings.length > 0 && ext.grid.cells.length > 0;
+                const needsReExtract = gridEmpty || gridTruncated;
+
+                // Status badge
+                const statusBadgeEl = ext.status === 'approved'
+                  ? <Badge className="bg-green-600 hover:bg-green-600 shrink-0"><CheckCircle2 className="mr-1 h-3 w-3" />Approved</Badge>
+                  : ext.status === 'discarded'
+                    ? <Badge variant="outline" className="shrink-0">Discarded</Badge>
+                    : gridEmpty
+                      ? <Badge variant="destructive" className="shrink-0"><AlertCircle className="mr-1 h-3 w-3" />Empty grid</Badge>
+                      : gridTruncated
+                        ? <Badge className="bg-amber-500 hover:bg-amber-500 shrink-0"><AlertCircle className="mr-1 h-3 w-3" />Truncated</Badge>
+                        : ext.gridExtracted
+                          ? <Badge variant="secondary" className="shrink-0">Ready to map</Badge>
+                          : <Badge variant="outline" className="text-muted-foreground shrink-0">Not extracted</Badge>;
+
+                return (
+                  <div key={ext.id} className="flex items-center gap-4 px-6 py-4">
+                    {/* Left: title + meta */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium text-sm truncate">{ext.title ?? 'Untitled table'}</span>
+                        {statusBadgeEl}
+                      </div>
+                      <div className="flex items-center gap-3 mt-1 flex-wrap">
+                        {ext.kind && (
+                          <span className="text-[11px] uppercase tracking-wide text-muted-foreground font-medium">
+                            {ext.kind.replace(/_/g, ' ')}
+                          </span>
                         )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+                        {ext.detectedCategory && (
+                          <span className="text-[11px] text-muted-foreground capitalize">
+                            {ext.detectedCategory.replace(/_/g, ' ')}
+                          </span>
+                        )}
+                        {ext.detectedSeries && (
+                          <span className="text-[11px] text-muted-foreground">
+                            Series: {ext.detectedSeries}
+                          </span>
+                        )}
+                        {ext.gridExtracted && (
+                          <span className={`text-[11px] font-medium ${gridEmpty ? 'text-destructive' : gridTruncated ? 'text-amber-600' : 'text-muted-foreground'}`}>
+                            {gridEmpty
+                              ? '0 rows · 0 prices'
+                              : `${ext.grid.rowLabels.length} rows × ${ext.grid.columnLabels.length} cols · ${ext.grid.cells.length} prices`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Right: action buttons */}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {/* Approved: view only */}
+                      {ext.status === 'approved' && (
+                        <Button size="sm" variant="outline" onClick={() => setViewExtraction(ext)}>
+                          <Eye className="mr-1.5 h-3.5 w-3.5" />View
+                        </Button>
+                      )}
+
+                      {/* Pending + not yet extracted */}
+                      {ext.status === 'pending' && !ext.gridExtracted && (
+                        <Button size="sm" variant="outline" onClick={() => extractGrid(ext)} disabled={busy || extractingAll}>
+                          {busy
+                            ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                            : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                          Extract grid
+                        </Button>
+                      )}
+
+                      {/* Pending + extracted: primary action + optional re-extract */}
+                      {ext.status === 'pending' && ext.gridExtracted && (
+                        <>
+                          {/* Re-extract: prominent when grid is bad, subtle icon when grid is good */}
+                          {needsReExtract ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className={gridEmpty ? 'border-destructive/60 text-destructive hover:bg-destructive/10' : 'border-amber-400 text-amber-700 hover:bg-amber-50'}
+                              onClick={() => reExtractGrid(ext)}
+                              disabled={busy || extractingAll}
+                            >
+                              {busy
+                                ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                                : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
+                              Re-extract
+                            </Button>
+                          ) : (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              title="Re-extract grid (retry if any prices look wrong)"
+                              disabled={busy || extractingAll}
+                              onClick={() => reExtractGrid(ext)}
+                            >
+                              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                            </Button>
+                          )}
+
+                          <Button size="sm" onClick={() => openTable(reviewBook, ext)} disabled={busy}>
+                            Map &amp; approve
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -612,7 +1548,7 @@ export default function PriceBookIngestPage() {
       <div>
         <h1 className="text-2xl font-bold">Price Book Ingestion</h1>
         <p className="text-sm text-muted-foreground">
-          Upload a manufacturer price list (PDF, image, or CSV). The agent extracts the price grid for you to review and approve into a pricing table.
+          Upload a manufacturer price list (PDF, image, Excel, or CSV). The system extracts the price grid for you to review and approve into a pricing table.
         </p>
       </div>
 
@@ -639,7 +1575,25 @@ export default function PriceBookIngestPage() {
           </div>
           <div className="space-y-1">
             <Label>File</Label>
-            <Input type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <Input type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.csv,.xlsx,.xls" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          </div>
+          <div className="space-y-1">
+            <Label>Effective date <span className="text-muted-foreground font-normal">(optional)</span></Label>
+            <Input type="date" value={effectiveDate} onChange={(e) => setEffectiveDate(e.target.value)} />
+            <p className="text-xs text-muted-foreground">When these prices take effect (e.g. 2026-01-01)</p>
+          </div>
+          <div className="space-y-1">
+            <Label>Supersedes <span className="text-muted-foreground font-normal">(optional)</span></Label>
+            <Select value={supersedesId} onValueChange={setSupersedesId}>
+              <SelectTrigger><SelectValue placeholder="None — first upload for this manufacturer" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">None</SelectItem>
+                {books.filter((b) => b.companyId === companyId && b.ocrStatus === 'done').map((b) => (
+                  <SelectItem key={b.id} value={b.id}>{b.name}{b.effectiveDate ? ` (${b.effectiveDate})` : ''}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">Select a prior book that this upload replaces</p>
           </div>
           <div className="sm:col-span-2">
             <Button onClick={handleUpload} disabled={uploading}>
@@ -667,6 +1621,7 @@ export default function PriceBookIngestPage() {
                   <TableRow key={b.id}>
                     <TableCell>
                       <div className="flex items-center gap-2"><FileText className="h-4 w-4 text-muted-foreground" />{b.name}</div>
+                      {b.effectiveDate && <p className="text-xs text-muted-foreground mt-0.5">Effective {b.effectiveDate}</p>}
                       {b.ocrError && <p className="mt-1 text-xs text-destructive">{b.ocrError}</p>}
                     </TableCell>
                     <TableCell className="capitalize">{b.category?.replace(/_/g, ' ') ?? '—'}</TableCell>

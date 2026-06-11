@@ -124,6 +124,10 @@ export function recoverCatalogTables(jsonText) {
   return tables;
 }
 
+/**
+ * Build the catalog prompt for a PDF/image file (unchanged path — Gemini reads numbers).
+ * For spreadsheets use buildSpreadsheetCatalogPrompt instead.
+ */
 export function buildCatalogPrompt(categoryHint, aliasHints, csvText, excludeTitles = []) {
   const aliasSection = aliasHints ? `\nKNOWN FIELD ALIASES (context):\n${aliasHints}\n` : '';
   const catSection = categoryHint ? `\nThe user expects this book to be primarily "${categoryHint}", but it WILL contain other categories too (frames, hardware, adders). Include them all.` : '';
@@ -138,6 +142,7 @@ How to be exhaustive:
 1. First read the document's table of contents / index (if present) to learn how many sections there are (e.g. "Door Pricing", "Frame Pricing", "Hardware", "Adders/Options").
 2. Then page through the ENTIRE document in order. A real book has MANY tables: every door series has its own size grid (and often header/transom/louver/glass add tables), every frame series has its own grid, plus standalone hardware lists and MANY option/adder/surcharge tables (e.g. "add for fire label", "add for header", finish upcharges, oversize upcharges, prep charges).
 3. Treat each size grid, each flat price list, and each adder/surcharge table as a SEPARATE entry — never merge two printed tables into one.
+   IMPORTANT: A single PDF page titled "Additional Preparations (Adders)" often contains MULTIPLE sub-sections (e.g. one section for astragals, a separate section for lock types, another for hinges, another for undercuts). These are DISTINCT adder groups — list each sub-section as its own entry. Use the section heading as the title (e.g. "H Series - Astragal Adders", "H Series - Lock Prep Adders", "H Series - Hinge Adders").
 4. Do NOT stop after the first few. Err on the side of MORE entries.
 
 For EACH table/section return:
@@ -151,16 +156,156 @@ For EACH table/section return:
 Do NOT extract any prices yet. Include vendor_name if shown. Return ONLY valid JSON matching the schema.`;
 }
 
+/**
+ * Build the catalog prompt for a spreadsheet (XLSX/CSV).
+ *
+ * For spreadsheets the AI does NOT read prices — SheetJS already has them.
+ * The AI's only job is to identify which sheet + row/column ranges form each
+ * pricing table and classify them, so we can map sheet indices to the
+ * extraction grid deterministically.
+ *
+ * @param {string} categoryHint
+ * @param {string} aliasHints
+ * @param {{ name: string, preview: string }[]} sheets
+ * @param {string[]} excludeTitles
+ */
+export function buildSpreadsheetCatalogPrompt(categoryHint, aliasHints, sheets, excludeTitles = []) {
+  const aliasSection = aliasHints ? `\nKNOWN FIELD ALIASES (context):\n${aliasHints}\n` : '';
+  const catSection = categoryHint ? `\nThe user expects this book to be primarily "${categoryHint}", but it WILL contain other categories too.` : '';
+  const sheetSection = sheets.map((s, i) => `--- Sheet ${i} (name: "${s.name}") ---\n${s.preview.slice(0, 4000)}`).join('\n\n');
+  const excludeSection = excludeTitles.length
+    ? `\nALREADY-LISTED TABLES (do NOT repeat):\n${excludeTitles.map((t) => `- ${t}`).join('\n')}\n`
+    : '';
+
+  return `You are cataloging a manufacturer price book spreadsheet for commercial doors, frames, hardware, glass/lites, and panels.${catSection}${aliasSection}
+
+SPREADSHEET SHEETS (TSV preview of each sheet's first 50 rows):
+${sheetSection}
+${excludeSection}
+Identify EVERY distinct pricing table in the spreadsheet. A table is a contiguous block with header labels in one row and prices in subsequent rows.
+
+For EACH table return:
+- title: a descriptive name (e.g. "Lockseam Steel Door Pricing").
+- category: one of doors|frames|hardware|lites_louvers_glass|panels|other.
+- series: the product line/series name, or null.
+- kind: size_grid | flat_list | adder.
+- page_hint: the sheet name and approximate start row (e.g. "Sheet 'Doors', row 3").
+- sheet_index: 0-based index into the sheets array above.
+- header_row: 0-based row index of the column headers within the sheet's data rows.
+- data_start_row: 0-based row index of the first data row (immediately after headers).
+- data_end_row: 0-based row index of the last data row (inclusive), or null if unknown.
+- price_col_indices: list of 0-based column indices that contain prices.
+- label_col_index: 0-based column index of the row label (e.g. door size). Use -1 if none.
+- description: <= 12 words.
+
+Do NOT extract any prices. Return ONLY valid JSON matching the schema.`;
+}
+
+/**
+ * JSON schema for the spreadsheet catalog response (extends the base schema).
+ */
+export function getSpreadsheetCatalogSchema() {
+  return {
+    type: 'object',
+    properties: {
+      vendor_name: { type: 'string' },
+      tables: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            category: { type: 'string' },
+            series: { type: 'string' },
+            kind: { type: 'string' },
+            page_hint: { type: 'string' },
+            sheet_index: { type: 'integer' },
+            header_row: { type: 'integer' },
+            data_start_row: { type: 'integer' },
+            data_end_row: { type: 'integer' },
+            price_col_indices: { type: 'array', items: { type: 'integer' } },
+            label_col_index: { type: 'integer' },
+            description: { type: 'string' },
+          },
+          required: ['title', 'sheet_index'],
+        },
+      },
+    },
+    required: ['tables'],
+  };
+}
+
+/**
+ * Build the grid extraction prompt for a spreadsheet table.
+ * The AI's job here is only to validate/confirm the column labels and row labels
+ * identified during catalog — no price reading.
+ */
+export function buildSpreadsheetGridPrompt(title, sheetName, headerRow, dataStartRow, dataEndRow, priceCols, labelCol, sheetPreview) {
+  return `You are confirming the column and row structure for one pricing table in a spreadsheet.
+
+TABLE: "${title}" in sheet "${sheetName}"
+Header row index: ${headerRow}
+Data rows: ${dataStartRow}–${dataEndRow ?? 'end'}
+Price column indices: ${JSON.stringify(priceCols)}
+Label column index: ${labelCol}
+
+SHEET PREVIEW (TSV, first 80 rows):
+${sheetPreview.slice(0, 6000)}
+
+Confirm:
+1. column_labels: the text of each price column header (in the same order as price_col_indices).
+2. row_labels: the text of the label column for each data row (in order).
+3. warnings: any issues (merged cells, blank rows in middle, etc.).
+
+Do NOT extract prices — they will be read from the raw data. Return ONLY valid JSON.`;
+}
+
+export function getSpreadsheetGridSchema() {
+  return {
+    type: 'object',
+    properties: {
+      column_labels: { type: 'array', items: { type: 'string' } },
+      row_labels: { type: 'array', items: { type: 'string' } },
+      warnings: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['column_labels', 'row_labels'],
+  };
+}
+
 export function getCatalogSchema() {
   return { type: 'object', properties: { vendor_name: { type: 'string' }, tables: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, category: { type: 'string' }, series: { type: 'string' }, kind: { type: 'string' }, page_hint: { type: 'string' }, description: { type: 'string' } }, required: ['title'] } } }, required: ['tables'] };
 }
 
-export function buildGridPrompt(title, category, series, kind, pageHint, aliasHints, csvText) {
+/**
+ * Build the grid extraction prompt for a PDF/image table.
+ *
+ * @param {string} title
+ * @param {string|null} category
+ * @param {string|null} series
+ * @param {string|null} kind
+ * @param {string|null} pageHint
+ * @param {string} aliasHints
+ * @param {string|null} csvText
+ * @param {{ field_key: string, field_label: string, description: string|null }[]} [fieldDefs]
+ *   When provided (for adder tables), Gemini will try to match each row to a field key.
+ */
+export function buildGridPrompt(title, category, series, kind, pageHint, aliasHints, csvText, fieldDefs = []) {
   const aliasSection = aliasHints ? `\nFIELD ALIASES — map column headers to these standard field keys when recognized (use the standard key in column_field_hints):\n${aliasHints}\n` : '';
   const source = csvText ? `\nPRICE BOOK CONTENT (CSV/text):\n\n${csvText.slice(0, 80000)}\n` : '';
   const loc = pageHint ? ` located at ${pageHint}` : '';
+  const isAdder = kind === 'adder' || kind === 'flat_list';
+
+  // For adder tables, append the known field list so Gemini can auto-classify rows
+  const fieldHintSection = isAdder && fieldDefs.length > 0
+    ? `\nKNOWN ITEM FIELDS — for each row, suggest the field_key that best describes what option it represents. Use the exact field_key from this list, or null if none fit:\n${fieldDefs.map((f) => `- ${f.field_key}: "${f.field_label}"${f.description ? ` (${f.description})` : ''}`).join('\n')}\n`
+    : '';
+
+  const rowHintInstruction = isAdder && fieldDefs.length > 0
+    ? `6. row_field_hints: for each adder/option row, your best guess at the field_key it belongs to (from the KNOWN ITEM FIELDS list above). Use { row, field_key } pairs. Omit the row if you are unsure — do NOT guess randomly; only include confident matches.`
+    : '';
+
   return `You are extracting ONE specific pricing table from a manufacturer price book.${source}
-TARGET TABLE: "${title}"${loc} — category: ${category ?? 'unknown'}, series: ${series ?? 'n/a'}, kind: ${kind ?? 'size_grid'}.${aliasSection}
+TARGET TABLE: "${title}"${loc} — category: ${category ?? 'unknown'}, series: ${series ?? 'n/a'}, kind: ${kind ?? 'size_grid'}.${aliasSection}${fieldHintSection}
 ${pageHint ? `Go to ${pageHint} and find the table titled "${title}". ` : ''}Extract the COMPLETE grid for THIS table ONLY. Do NOT merge in rows or columns from any other table, and do NOT extract a different table even if it looks similar.
 
 1. column_labels: every column header left-to-right, exactly as printed. For a flat_list or adder table that has a single price column, use one column labeled "Price".
@@ -168,12 +313,41 @@ ${pageHint ? `Go to ${pageHint} and find the table titled "${title}". ` : ''}Ext
 3. cells: every priced cell as { row, col, price } using 0-based indices into row_labels/column_labels. Omit blank/empty cells. Capture EVERY priced cell across ALL rows and ALL columns — do not stop early or sample.
 4. column_field_hints: { col, field_key } for any column mappable to a standard field key.
 5. warnings: note anything unreadable, ambiguous, or any prices that appear to continue onto another page.
+${rowHintInstruction}
 
 If the table spans multiple pages, include the continuation rows too. Return ONLY valid JSON. Prices are plain numbers (no $, commas, or text).`;
 }
 
 export function getGridSchema() {
-  return { type: 'object', properties: { column_labels: { type: 'array', items: { type: 'string' } }, row_labels: { type: 'array', items: { type: 'string' } }, cells: { type: 'array', items: { type: 'object', properties: { row: { type: 'integer' }, col: { type: 'integer' }, price: { type: 'number' } }, required: ['row', 'col', 'price'] } }, column_field_hints: { type: 'array', items: { type: 'object', properties: { col: { type: 'integer' }, field_key: { type: 'string' } }, required: ['col', 'field_key'] } }, warnings: { type: 'array', items: { type: 'string' } } }, required: ['column_labels', 'row_labels', 'cells'] };
+  return {
+    type: 'object',
+    properties: {
+      column_labels: { type: 'array', items: { type: 'string' } },
+      row_labels: { type: 'array', items: { type: 'string' } },
+      cells: { type: 'array', items: { type: 'object', properties: { row: { type: 'integer' }, col: { type: 'integer' }, price: { type: 'number' } }, required: ['row', 'col', 'price'] } },
+      column_field_hints: { type: 'array', items: { type: 'object', properties: { col: { type: 'integer' }, field_key: { type: 'string' } }, required: ['col', 'field_key'] } },
+      row_field_hints: { type: 'array', items: { type: 'object', properties: { row: { type: 'integer' }, field_key: { type: 'string' } }, required: ['row', 'field_key'] } },
+      warnings: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['column_labels', 'row_labels', 'cells'],
+  };
+}
+
+/**
+ * Loads all approved field definitions from the DB for use as adder-row hints.
+ * Returns a compact list with just what Gemini needs to classify rows.
+ */
+export async function loadFieldDefs(sb) {
+  const { data } = await sb
+    .from('field_definitions')
+    .select('field_key, field_label, description')
+    .eq('status', 'approved')
+    .order('field_key', { ascending: true });
+  return (data || []).map((r) => ({
+    field_key: r.field_key,
+    field_label: r.field_label,
+    description: r.description ?? null,
+  }));
 }
 
 export async function loadAliasHints(sb) {

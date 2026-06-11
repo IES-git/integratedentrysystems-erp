@@ -13,7 +13,18 @@ import {
   buildGridPrompt,
   getGridSchema,
   loadAliasHints,
+  loadFieldDefs,
+  buildSpreadsheetCatalogPrompt,
+  getSpreadsheetCatalogSchema,
+  buildSpreadsheetGridPrompt,
+  getSpreadsheetGridSchema,
 } from './gemini.js';
+import { parseSpreadsheet, extractGridFromSheet } from './spreadsheet.js';
+
+/** True when the file is a spreadsheet (handled by SheetJS instead of Gemini vision). */
+function isSpreadsheet(fileType) {
+  return fileType === 'xlsx' || fileType === 'csv';
+}
 
 const CATALOG_MAX_TOKENS = 16384;
 const GRID_MAX_TOKENS = 24576;
@@ -83,6 +94,52 @@ async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart) 
 }
 
 /**
+ * Catalog all pricing tables in a spreadsheet using the SheetJS-first path.
+ * Gemini classifies tables by sheet structure; prices are never passed to Gemini.
+ */
+async function catalogAllSpreadsheetTables(geminiKey, book, aliasHints, parsedSheets) {
+  const all = [];
+  const seen = new Set();
+  let vendorName = null;
+
+  for (let round = 0; round < MAX_CATALOG_ROUNDS && all.length < MAX_TABLES; round++) {
+    const excludeTitles = all.map((t) => t.title);
+    const prompt = buildSpreadsheetCatalogPrompt(book.category, aliasHints, parsedSheets, excludeTitles);
+    const { parsed, truncated, raw } = await callGemini(geminiKey, prompt, getSpreadsheetCatalogSchema(), CATALOG_MAX_TOKENS, null);
+
+    if (vendorName == null && parsed?.vendor_name) vendorName = parsed.vendor_name;
+
+    let tables = parsed?.tables ?? [];
+    if ((!tables || tables.length === 0) && raw) tables = recoverCatalogTables(raw);
+    tables = (tables || []).filter((t) => t && typeof t.title === 'string' && t.title.trim());
+
+    let added = 0;
+    for (const t of tables) {
+      const key = `${t.title.trim().toLowerCase()}|${(t.sheet_index ?? 0)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      // Attach sheet metadata so extraction can use it
+      t._spreadsheet_meta = {
+        sheetIndex: t.sheet_index ?? 0,
+        headerRow: t.header_row ?? 0,
+        dataStartRow: t.data_start_row ?? 1,
+        dataEndRow: t.data_end_row ?? null,
+        priceColIndices: t.price_col_indices ?? [],
+        labelColIndex: t.label_col_index ?? -1,
+      };
+      all.push(t);
+      added++;
+      if (all.length >= MAX_TABLES) break;
+    }
+
+    console.log(`[catalog-spreadsheet] round ${round + 1}: +${added} (total ${all.length})`);
+    if (added === 0) break;
+  }
+
+  return { tables: all, vendorName, truncated: false };
+}
+
+/**
  * STEP 1 — Catalog every table/section in the book and insert one placeholder
  * extraction + pending proposal per table. Uploads the file to Gemini once and
  * stores the reference for per-table extraction.
@@ -100,13 +157,16 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
     if (bytes.length > MAX_FILE_SIZE) throw new Error('File too large: ' + (bytes.length / 1024 / 1024).toFixed(1) + ' MB (max 50 MB)');
 
     let filePart = null;
-    let csvText = null;
     let geminiFileUri = null;
     let geminiFileName = null;
-    if (book.file_type === 'csv') {
-      csvText = new TextDecoder().decode(bytes);
-    } else if (book.file_type === 'xlsx') {
-      throw new Error('XLSX is not parsed inline yet — export the sheet to CSV or PDF and re-upload.');
+    let parsedSheets = null; // Set when file is a spreadsheet
+
+    if (isSpreadsheet(book.file_type)) {
+      // SheetJS path: parse deterministically, use Gemini only for classification
+      parsedSheets = parseSpreadsheet(bytes, book.file_type);
+      if (!parsedSheets || parsedSheets.length === 0) {
+        throw new Error('Could not parse any sheets from the spreadsheet. Ensure the file is a valid XLSX or CSV and re-upload.');
+      }
     } else {
       const mimeType = getMimeType(book.original_file_name, book.file_type);
       const uploaded = await uploadToGeminiFiles(geminiKey, bytes, mimeType, book.original_file_name || 'price-book');
@@ -116,7 +176,9 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
       await sb.from('price_books').update({ gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
     }
 
-    const { tables, vendorName, truncated } = await catalogAllTables(geminiKey, book, aliasHints, csvText, filePart);
+    const { tables, vendorName, truncated } = parsedSheets
+      ? await catalogAllSpreadsheetTables(geminiKey, book, aliasHints, parsedSheets)
+      : await catalogAllTables(geminiKey, book, aliasHints, null, filePart);
 
     // Fail loudly rather than silently degrading to a single bogus "whole book"
     // table (the old behavior that made it look like only one table existed).
@@ -129,10 +191,13 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
       const t = tables[i];
       const detectedCategory = ALLOWED_CATEGORIES.includes(t.category ?? '') ? t.category : (book.category ?? null);
       const pageHint = t.page_hint ?? null;
+      const spreadsheetMeta = t._spreadsheet_meta ?? null;
       const { data: extraction, error: extErr } = await sb.from('price_book_extractions').insert({
         price_book_id: priceBookId, status: 'pending', title: t.title, kind: t.kind ?? null, sort_order: i,
         detected_category: detectedCategory, detected_series: t.series ?? null, detected_vendor_name: vendorName,
         page_hint: pageHint, grid: emptyGrid, warnings: [], grid_extracted: false,
+        // Store spreadsheet mapping metadata for deterministic grid extraction
+        ...(spreadsheetMeta ? { spreadsheet_meta: spreadsheetMeta } : {}),
       }).select('id').single();
       if (extErr || !extraction) { console.error('[catalog] extraction insert failed:', extErr); continue; }
       await sb.from('pricing_change_proposals').insert({
@@ -226,13 +291,100 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
   if (bookErr || !book) throw new Error('Price book not found');
 
   const aliasHints = await loadAliasHints(sb);
-  const mimeType = getMimeType(book.original_file_name, book.file_type);
 
-  let csvText = null;
+  // For adder/flat-list tables, load field definitions so Gemini can auto-classify rows
+  const isAdderKind = ext.kind === 'adder' || ext.kind === 'flat_list';
+  const fieldDefs = isAdderKind ? await loadFieldDefs(sb) : [];
+
+  // ---------------------------------------------------------------------------
+  // SheetJS path: spreadsheet files with stored sheet metadata
+  // ---------------------------------------------------------------------------
+  if (isSpreadsheet(book.file_type) && ext.spreadsheet_meta) {
+    const meta = ext.spreadsheet_meta;
+    const bytes = await downloadBytes(sb, book.source_file_url);
+    const parsedSheets = parseSpreadsheet(bytes, book.file_type);
+    const sheet = parsedSheets[meta.sheetIndex];
+    if (!sheet) throw new Error(`Sheet index ${meta.sheetIndex} not found in spreadsheet`);
+
+    const warnings = [];
+
+    // Ask Gemini to confirm/correct column and row labels (no prices)
+    let columnLabels = [];
+    let rowLabels = [];
+    try {
+      const prompt = buildSpreadsheetGridPrompt(
+        ext.title ?? book.name,
+        sheet.name,
+        meta.headerRow,
+        meta.dataStartRow,
+        meta.dataEndRow,
+        meta.priceColIndices,
+        meta.labelColIndex,
+        sheet.preview,
+      );
+      const { parsed } = await callGemini(geminiKey, prompt, getSpreadsheetGridSchema(), GRID_MAX_TOKENS, null);
+      columnLabels = parsed?.column_labels ?? [];
+      rowLabels = parsed?.row_labels ?? [];
+      if (parsed?.warnings?.length) warnings.push(...parsed.warnings);
+    } catch (e) {
+      warnings.push(`Label confirmation failed: ${e.message} — using raw header/row labels.`);
+    }
+
+    // Determine row range
+    const dataStart = meta.dataStartRow;
+    const dataEnd = meta.dataEndRow != null ? meta.dataEndRow + 1 : sheet.rows.length;
+    const dataRows = sheet.rows.slice(dataStart, dataEnd);
+
+    // Fall back to raw labels when AI confirmation failed
+    if (columnLabels.length === 0) {
+      columnLabels = meta.priceColIndices.map((i) => sheet.headers[i] ?? String(i));
+    }
+    if (rowLabels.length === 0) {
+      rowLabels = dataRows.map((r, ri) => {
+        const lc = meta.labelColIndex;
+        const v = lc >= 0 ? r[lc] : null;
+        return v != null ? String(v) : String(dataStart + ri);
+      });
+    }
+
+    // Read prices from SheetJS data (deterministic — no Gemini for numbers)
+    const cells = [];
+    for (let ri = 0; ri < dataRows.length; ri++) {
+      const row = dataRows[ri];
+      for (let ci = 0; ci < meta.priceColIndices.length; ci++) {
+        const raw = row[meta.priceColIndices[ci]];
+        const price = raw !== null && raw !== undefined
+          ? parseFloat(String(raw).replace(/[^0-9.\-]/g, ''))
+          : NaN;
+        if (!isNaN(price) && isFinite(price)) {
+          cells.push({ row: ri, col: ci, price });
+        }
+      }
+    }
+
+    // Trim labels to match data length
+    const effectiveRowCount = dataRows.length;
+    const trimmedRowLabels = rowLabels.slice(0, effectiveRowCount);
+    const normalizedGrid = { columnLabels, rowLabels: trimmedRowLabels, cells, columnFieldHints: {} };
+
+    await sb.from('price_book_extractions').update({ grid: normalizedGrid, warnings, grid_extracted: true }).eq('id', extractionId);
+    const { data: props } = await sb.from('pricing_change_proposals').select('id').eq('price_book_id', book.id).contains('target_ids', { extractionId }).limit(1);
+    if (props && props[0]) {
+      await sb.from('pricing_change_proposals').update({
+        payload: { title: ext.title, kind: ext.kind, detectedCategory: ext.detected_category, detectedSeries: ext.detected_series, detectedVendorName: ext.detected_vendor_name, rowCount: trimmedRowLabels.length, colCount: columnLabels.length, cellCount: cells.length },
+        confidence: warnings.length === 0 ? 0.95 : 0.7,
+        explanation: `"${ext.title}": ${trimmedRowLabels.length}×${columnLabels.length} grid (${cells.length} prices, SheetJS). Map to approve.`,
+      }).eq('id', props[0].id);
+    }
+    return { rowCount: trimmedRowLabels.length, colCount: columnLabels.length, cellCount: cells.length, warnings: warnings.length };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gemini vision path: PDF/image
+  // ---------------------------------------------------------------------------
+  const mimeType = getMimeType(book.original_file_name, book.file_type);
   let filePart = null;
-  if (book.file_type === 'csv') {
-    csvText = new TextDecoder().decode(await downloadBytes(sb, book.source_file_url));
-  } else if (book.gemini_file_uri) {
+  if (book.gemini_file_uri) {
     filePart = { file_data: { mime_type: mimeType, file_uri: book.gemini_file_uri } };
   } else {
     const bytes = await downloadBytes(sb, book.source_file_url);
@@ -241,14 +393,14 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
     await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
   }
 
-  const prompt = buildGridPrompt(ext.title ?? book.name, ext.detected_category, ext.detected_series, ext.kind, ext.page_hint ?? null, aliasHints, csvText);
+  const prompt = buildGridPrompt(ext.title ?? book.name, ext.detected_category, ext.detected_series, ext.kind, ext.page_hint ?? null, aliasHints, null, fieldDefs);
 
   let res;
   try {
     res = await callGemini(geminiKey, prompt, getGridSchema(), GRID_MAX_TOKENS, filePart);
   } catch (e) {
     // Gemini Files reference may have expired (48h) — re-upload and retry once.
-    if (filePart && book.file_type !== 'csv' && [400, 403, 404].includes(e.status)) {
+    if (filePart && [400, 403, 404].includes(e.status)) {
       const bytes = await downloadBytes(sb, book.source_file_url);
       const up = await uploadToGeminiFiles(geminiKey, bytes, mimeType, book.original_file_name || 'price-book');
       await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
@@ -269,7 +421,16 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
 
   const colHints = {};
   for (const h of grid?.column_field_hints ?? []) colHints[h.col] = h.field_key;
-  const normalizedGrid = { columnLabels: grid?.column_labels ?? [], rowLabels: grid?.row_labels ?? [], cells: (grid?.cells ?? []).filter((c) => c.price != null), columnFieldHints: colHints };
+  // row_field_hints: Gemini's best-guess field_key per row index (adder tables only)
+  const rowHints = {};
+  for (const h of grid?.row_field_hints ?? []) rowHints[h.row] = h.field_key;
+  const normalizedGrid = {
+    columnLabels: grid?.column_labels ?? [],
+    rowLabels: grid?.row_labels ?? [],
+    cells: (grid?.cells ?? []).filter((c) => c.price != null),
+    columnFieldHints: colHints,
+    rowFieldHints: Object.keys(rowHints).length > 0 ? rowHints : undefined,
+  };
   const allWarnings = [...warnings, ...(grid?.warnings ?? [])];
 
   await sb.from('price_book_extractions').update({ grid: normalizedGrid, warnings: allWarnings, grid_extracted: true }).eq('id', extractionId);

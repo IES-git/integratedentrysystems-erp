@@ -1,16 +1,13 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   Plus,
-  Trash2,
   Loader2,
   ChevronDown,
   ArrowLeft,
   Search,
-  Lock,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
@@ -19,54 +16,36 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
 import { cn } from '@/lib/utils';
 import {
   getItemTypeFields,
   getBaseFieldsForCategory,
   getDefaultValuesForFields,
-  getItemFieldValueOptionsForWizard,
   getHardwareFamilies,
   getFieldValueOptions,
 } from '@/lib/estimates-api';
+import { getPricedSpecValues } from '@/lib/pricing-api';
 import { getResolvedDependencies, getItemTypeFieldDependencies } from '@/lib/item-fields-api';
-import { evaluateDependency, mergeDependencies } from '@/lib/field-dependencies';
+import { mergeDependencies } from '@/lib/field-dependencies';
+import { FieldRow, FieldsList, AddFieldForm } from './FieldEditors';
 import { applyDoorValuesToFrame } from '@/lib/door-frame-sync';
 import {
   HARDWARE_SUBCATEGORY_ORDER,
   HARDWARE_SUBCATEGORY_LABEL,
 } from '@/lib/hardware-utils';
 import { buildHardwareCode, buildHardwareLabel } from '@/lib/hardware-code-builder';
-import { listManufacturersForSeries } from '@/lib/pricing-api';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { listManufacturersForCategory } from '@/lib/pricing-api';
+import { LivePriceBadge } from './LivePriceBadge';
+import { resolveSpecAcrossManufacturers, type ManufacturerPriceResult } from '@/lib/pricing-lookup';
 import type {
   ItemType,
   ItemCategory,
   FieldValueType,
-  FieldValueOption,
   HardwareSubcategory,
-  DependencyOperator,
   HardwareCatalogItem,
   Company,
 } from '@/types';
+import type { LocalField } from './FieldEditors';
 
 // ---------------------------------------------------------------------------
 // Subcategory display metadata (used by the tile-picker step)
@@ -89,23 +68,10 @@ const SUBCATEGORY_DESC: Record<HardwareSubcategory, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Shared types — exported so parent components can type their local state
+// Shared types — re-exported from FieldEditors for backward compat
 // ---------------------------------------------------------------------------
 
-export interface LocalField {
-  localId: string;
-  fieldKey: string;
-  fieldLabel: string;
-  fieldValue: string;
-  valueType: FieldValueType;
-  fieldDefinitionId?: string;
-  isRequired: boolean;
-  conditionalParentDefId?: string;
-  conditionOperator?: DependencyOperator;
-  conditionTriggerValues?: (string | number)[];
-  /** When true, the field value is locked and cannot be edited by the user. */
-  isLocked?: boolean;
-}
+export type { LocalField } from './FieldEditors';
 
 export interface LocalHardwareItem {
   localId: string;
@@ -131,280 +97,6 @@ export interface LocalTopLevelItem {
 export const newLocalId = () =>
   Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-// ---------------------------------------------------------------------------
-// Internal: FieldRow
-// ---------------------------------------------------------------------------
-
-interface FieldRowProps {
-  field: LocalField;
-  canonicalCode: string;
-  onUpdate: (value: string) => void;
-  onDelete: () => void;
-}
-
-function FieldRow({ field, canonicalCode, onUpdate, onDelete }: FieldRowProps) {
-  const [options, setOptions] = useState<FieldValueOption[]>([]);
-  const [popoverOpen, setPopoverOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-
-  useEffect(() => {
-    if (!field.fieldDefinitionId) return;
-    getItemFieldValueOptionsForWizard(canonicalCode, field.fieldDefinitionId)
-      .then(setOptions)
-      .catch(console.error);
-  }, [canonicalCode, field.fieldDefinitionId]);
-
-  const handleOpenChange = (open: boolean) => {
-    setPopoverOpen(open);
-    if (open) setSearchQuery('');
-  };
-
-  return (
-    <div className="flex items-center gap-2 px-3 py-1.5">
-      <div className="w-28 shrink-0">
-        <p className="text-[11px] font-medium text-muted-foreground flex items-center gap-0.5">
-          {field.fieldLabel}
-          {field.isRequired && (
-            <span className="text-destructive font-bold" title="Required">
-              *
-            </span>
-          )}
-        </p>
-        <p className="text-[10px] font-mono text-muted-foreground/60">{field.fieldKey}</p>
-      </div>
-
-      {field.isLocked ? (
-        <div className="h-7 flex-1 flex items-center gap-1.5 rounded border bg-muted/30 px-2">
-          <Lock className="h-3 w-3 shrink-0 text-muted-foreground/50" />
-          <span className="text-xs text-muted-foreground">{field.fieldValue || '—'}</span>
-        </div>
-      ) : options.length > 0 ? (
-        <Popover open={popoverOpen} onOpenChange={handleOpenChange}>
-          <PopoverTrigger asChild>
-            <Button
-              variant="outline"
-              role="combobox"
-              aria-expanded={popoverOpen}
-              className="h-7 flex-1 justify-between text-xs font-normal"
-            >
-              {field.fieldValue ? (
-                <span>{field.fieldValue}</span>
-              ) : (
-                <span className="text-muted-foreground/60 text-[10px]">Select an option</span>
-              )}
-              <ChevronDown className="h-3 w-3 ml-1 shrink-0 opacity-50" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            className="p-0"
-            style={{ width: 'var(--radix-popover-trigger-width)' }}
-            align="start"
-            onWheel={(e) => e.stopPropagation()}
-          >
-            <Command>
-              <CommandInput
-                placeholder="Search or type…"
-                className="h-8 text-xs"
-                value={searchQuery}
-                onValueChange={(val) => {
-                  setSearchQuery(val);
-                  onUpdate(val);
-                }}
-              />
-              <CommandList>
-                <CommandEmpty className="py-1.5 text-center text-xs text-muted-foreground">
-                  Press Enter to use this value
-                </CommandEmpty>
-                <CommandGroup>
-                  {options.map((o) => (
-                    <CommandItem
-                      key={o.id}
-                      value={o.value}
-                      onSelect={(val) => {
-                        onUpdate(val);
-                        setPopoverOpen(false);
-                      }}
-                    >
-                      {o.value}
-                    </CommandItem>
-                  ))}
-                </CommandGroup>
-              </CommandList>
-            </Command>
-          </PopoverContent>
-        </Popover>
-      ) : (
-        <Input
-          value={field.fieldValue}
-          onChange={(e) => onUpdate(e.target.value)}
-          className="h-7 text-xs flex-1"
-          placeholder={field.isRequired ? 'Required' : '—'}
-        />
-      )}
-
-      {!field.isRequired && !field.isLocked && (
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
-          onClick={onDelete}
-        >
-          <Trash2 className="h-3 w-3" />
-        </Button>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Internal: FieldsList
-// ---------------------------------------------------------------------------
-
-interface FieldsListProps {
-  fields: LocalField[];
-  canonicalCode: string;
-  onUpdateField: (localId: string, value: string) => void;
-  onDeleteField: (localId: string) => void;
-}
-
-function FieldsList({ fields, canonicalCode, onUpdateField, onDeleteField }: FieldsListProps) {
-  if (fields.length === 0) return null;
-
-  const parentFields = fields.filter((f) => !f.conditionalParentDefId);
-  const childrenByParentDefId = new Map<string, LocalField[]>();
-  for (const f of fields) {
-    if (!f.conditionalParentDefId) continue;
-    const list = childrenByParentDefId.get(f.conditionalParentDefId) ?? [];
-    list.push(f);
-    childrenByParentDefId.set(f.conditionalParentDefId, list);
-  }
-
-  const rows: JSX.Element[] = [];
-  for (const field of parentFields) {
-    rows.push(
-      <FieldRow
-        key={field.localId}
-        field={field}
-        canonicalCode={canonicalCode}
-        onUpdate={(val) => onUpdateField(field.localId, val)}
-        onDelete={() => onDeleteField(field.localId)}
-      />
-    );
-    if (!field.fieldDefinitionId) continue;
-    const children = childrenByParentDefId.get(field.fieldDefinitionId) ?? [];
-    for (const child of children) {
-      if (
-        child.conditionOperator === undefined ||
-        child.conditionTriggerValues === undefined
-      )
-        continue;
-      if (
-        !evaluateDependency(
-          field.fieldValue || null,
-          child.conditionOperator,
-          child.conditionTriggerValues
-        )
-      )
-        continue;
-      rows.push(
-        <div
-          key={child.localId}
-          className="pl-4 ml-1 border-l-2 border-primary/20 bg-muted/20"
-        >
-          <FieldRow
-            field={child}
-            canonicalCode={canonicalCode}
-            onUpdate={(val) => onUpdateField(child.localId, val)}
-            onDelete={() => onDeleteField(child.localId)}
-          />
-        </div>
-      );
-    }
-  }
-
-  return <div className="rounded-md border divide-y">{rows}</div>;
-}
-
-// ---------------------------------------------------------------------------
-// Internal: AddFieldForm
-// ---------------------------------------------------------------------------
-
-interface AddFieldFormProps {
-  onAdd: (field: Omit<LocalField, 'localId'>) => void;
-  onCancel: () => void;
-}
-
-function AddFieldForm({ onAdd, onCancel }: AddFieldFormProps) {
-  const [key, setKey] = useState('');
-  const [label, setLabel] = useState('');
-  const [value, setValue] = useState('');
-
-  const handleSubmit = () => {
-    if (!key.trim() || !label.trim()) return;
-    onAdd({
-      fieldKey: key.toLowerCase().replace(/\s+/g, '_'),
-      fieldLabel: label,
-      fieldValue: value,
-      valueType: 'string',
-      isRequired: false,
-    });
-  };
-
-  return (
-    <div className="mt-3 rounded-md border border-dashed bg-muted/20 p-3 space-y-2">
-      <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
-        Add Custom Field
-      </p>
-      <div className="grid grid-cols-3 gap-2">
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Key</Label>
-          <Input
-            placeholder="e.g. gauge"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            className="h-7 text-xs"
-            autoFocus
-          />
-        </div>
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Label</Label>
-          <Input
-            placeholder="e.g. Gauge"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            className="h-7 text-xs"
-          />
-        </div>
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Value</Label>
-          <Input
-            placeholder="e.g. 16 GA"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            className="h-7 text-xs"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleSubmit();
-              if (e.key === 'Escape') onCancel();
-            }}
-          />
-        </div>
-      </div>
-      <div className="flex justify-end gap-2">
-        <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button
-          size="sm"
-          className="h-7 text-xs"
-          onClick={handleSubmit}
-          disabled={!key.trim() || !label.trim()}
-        >
-          Add
-        </Button>
-      </div>
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // AddItemModal
@@ -502,6 +194,13 @@ export function AddItemModal({
   const [manufacturersLoading, setManufacturersLoading] = useState(false);
   const [selectedManufacturerId, setSelectedManufacturerId] = useState<string | null>(null);
 
+  // Availability filtering: map of fieldKey → set of priced values
+  const [pricedValuesByKey, setPricedValuesByKey] = useState<Map<string, Set<string>> | undefined>(undefined);
+
+  // Spec-first manufacturer comparison
+  const [mfrResults, setMfrResults] = useState<ManufacturerPriceResult[]>([]);
+  const [mfrLoading, setMfrLoading] = useState(false);
+
   // ---------------------------------------------------------------------------
   // Load hardware families once when the dialog opens
   // ---------------------------------------------------------------------------
@@ -555,6 +254,9 @@ export function AddItemModal({
       setManufacturers([]);
       setManufacturersLoading(false);
       setSelectedManufacturerId(null);
+      setPricedValuesByKey(undefined);
+      setMfrResults([]);
+      setMfrLoading(false);
     }
   }, [open, isHardware]);
 
@@ -703,12 +405,13 @@ export function AddItemModal({
     setLoadingFields(true);
     setSelectedManufacturerId(null);
 
-    // Load manufacturers for doors/frames based on the series
+    // Load manufacturers for doors/frames. Spec-driven: list every vendor with a
+    // base table in this category (not keyed by series) — the user picks the
+    // manufacturer and the engine resolves the series from the configured specs.
     if (category === 'doors' || category === 'frames') {
       const pricingCategory = category as 'doors' | 'frames';
-      const seriesValue = itemType.series ?? itemType.itemLabel;
       setManufacturersLoading(true);
-      listManufacturersForSeries(pricingCategory, seriesValue)
+      listManufacturersForCategory(pricingCategory)
         .then((mfrs) => {
           setManufacturers(mfrs);
           // Auto-select if only one manufacturer
@@ -716,6 +419,17 @@ export function AddItemModal({
         })
         .catch(console.error)
         .finally(() => setManufacturersLoading(false));
+
+      // Load availability data for spec fields so dropdowns can show
+      // which values are actually priced by at least one manufacturer.
+      const specKeys = pricingCategory === 'doors'
+        ? ['edge_construction', 'core_construction', 'gauge', 'material']
+        : ['frame_type', 'frame_fabrication', 'gauge', 'depth'];
+      Promise.all(specKeys.map((k) => getPricedSpecValues(k, pricingCategory).then((vals) => [k, new Set(vals)] as const)))
+        .then((pairs) => setPricedValuesByKey(new Map(pairs)))
+        .catch(() => setPricedValuesByKey(undefined));
+    } else {
+      setPricedValuesByKey(undefined);
     }
 
     try {
@@ -750,8 +464,14 @@ export function AddItemModal({
       // Build a lookup map for any pre-fill fields (e.g. glass dimensions for lites)
       const preFillMap = new Map((preFillFields ?? []).map((p) => [p.fieldKey, p]));
 
+      // Build a dep map so we can stamp conditional metadata onto base fields too.
+      // (Without this, a field that IS a conditional child AND is listed as a base
+      // field would always show — the dep metadata is only on the extra-fields pass.)
+      const depByChildFieldDefId = new Map(resolvedDeps.map((d) => [d.childField.id, d]));
+
       const fields: LocalField[] = validFields.map((rf) => {
         const prefill = preFillMap.get(rf.fieldDefinition!.fieldKey);
+        const dep = rf.fieldDefinitionId ? depByChildFieldDefId.get(rf.fieldDefinitionId) : undefined;
         return {
           localId: newLocalId(),
           fieldKey: rf.fieldDefinition!.fieldKey,
@@ -761,6 +481,14 @@ export function AddItemModal({
           fieldDefinitionId: rf.fieldDefinitionId,
           isRequired: rf.isRequired,
           isLocked: prefill?.locked ?? false,
+          // Attach conditional metadata when this base field is also a dep child
+          ...(dep
+            ? {
+                conditionalParentDefId: dep.parentFieldDefinitionId,
+                conditionOperator: dep.operator,
+                conditionTriggerValues: dep.triggerValues,
+              }
+            : {}),
         };
       });
 
@@ -781,6 +509,7 @@ export function AddItemModal({
         }
       }
 
+      // Append conditional child fields not already included as base fields
       for (const dep of resolvedDeps) {
         if (existingFieldKeys.has(dep.childField.fieldKey)) continue;
         fields.push({
@@ -1148,8 +877,20 @@ export function AddItemModal({
                 >
                   <ArrowLeft className="h-4 w-4" />
                 </Button>
-                <div className="min-w-0">
-                  <DialogTitle className="truncate">{configureTitleText}</DialogTitle>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <DialogTitle className="truncate">{configureTitleText}</DialogTitle>
+                    {/* Live price badge for doors/frames */}
+                    {(category === 'doors' || category === 'frames') && localItem && (
+                      <LivePriceBadge
+                        category={category}
+                        canonicalCode={localItem.canonicalCode}
+                        itemLabel={localItem.itemLabel}
+                        manufacturerId={selectedManufacturerId}
+                        fields={localItem.fields.map((f) => ({ fieldKey: f.fieldKey, fieldValue: f.fieldValue, fieldLabel: f.fieldLabel }))}
+                      />
+                    )}
+                  </div>
                   {(selectedItemType || selectedFamily) && (
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <Badge variant="secondary" className="font-mono text-[10px]">
@@ -1176,35 +917,95 @@ export function AddItemModal({
                 </div>
               ) : (
                 <>
-                  {/* Manufacturer picker — shown for doors and frames only */}
+                  {/* Spec-first manufacturer comparison — shown for doors and frames */}
                   {(category === 'doors' || category === 'frames') && (
-                    <div className="mb-3 rounded-md border bg-muted/20 px-3 py-2 flex items-center gap-3">
-                      <p className="text-[11px] font-medium text-muted-foreground w-28 shrink-0">
-                        Manufacturer
-                      </p>
-                      {manufacturersLoading ? (
-                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          Loading…
+                    <div className="mb-3 space-y-2">
+                      {/* Show comparison panel if results are loaded */}
+                      {mfrResults.length > 0 ? (
+                        <div className="rounded-md border bg-muted/10 divide-y">
+                          <div className="px-3 py-1.5 flex items-center justify-between">
+                            <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
+                              Available manufacturers ({mfrResults.filter((r) => r.result.status === 'matched').length} priced)
+                            </p>
+                            <button
+                              type="button"
+                              className="text-[11px] text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+                              onClick={() => { setMfrResults([]); setSelectedManufacturerId(null); }}
+                            >
+                              Clear
+                            </button>
+                          </div>
+                          {mfrResults.map((r) => {
+                            const isSelected = selectedManufacturerId === r.manufacturerId;
+                            const fmt = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+                            return (
+                              <button
+                                key={r.manufacturerId}
+                                type="button"
+                                onClick={() => setSelectedManufacturerId(r.manufacturerId)}
+                                className={cn(
+                                  'w-full px-3 py-2 text-left text-xs flex items-center gap-3 transition-colors',
+                                  isSelected ? 'bg-primary/10 font-medium' : 'hover:bg-muted/30',
+                                )}
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <span className="font-medium block truncate">{r.manufacturerName}</span>
+                                  <span className="text-[10px] text-muted-foreground">{r.seriesValue}</span>
+                                </div>
+                                {r.result.status === 'matched' && r.result.totalUnitPrice != null ? (
+                                  <span className="text-green-700 font-semibold shrink-0">{fmt(r.result.totalUnitPrice)}</span>
+                                ) : (
+                                  <span className="text-muted-foreground/50 text-[10px] shrink-0">{r.result.status.replace(/_/g, ' ')}</span>
+                                )}
+                                {isSelected && <span className="text-primary text-[10px] shrink-0">✓</span>}
+                              </button>
+                            );
+                          })}
                         </div>
-                      ) : manufacturers.length === 0 ? (
-                        <p className="text-xs text-muted-foreground/60 italic">No pricing tables set up yet</p>
                       ) : (
-                        <Select
-                          value={selectedManufacturerId ?? ''}
-                          onValueChange={(val) => setSelectedManufacturerId(val || null)}
-                        >
-                          <SelectTrigger className="h-7 text-xs flex-1">
-                            <SelectValue placeholder="Select manufacturer…" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {manufacturers.map((m) => (
-                              <SelectItem key={m.id} value={m.id} className="text-xs">
-                                {m.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <div className="rounded-md border bg-muted/20 px-3 py-2 flex items-center gap-3">
+                          <p className="text-[11px] font-medium text-muted-foreground w-28 shrink-0">
+                            Manufacturer
+                          </p>
+                          {selectedManufacturerId ? (
+                            <div className="flex items-center gap-2 flex-1">
+                              <span className="text-xs">{manufacturers.find((m) => m.id === selectedManufacturerId)?.name ?? 'Selected'}</span>
+                              <button type="button" onClick={() => setSelectedManufacturerId(null)} className="text-[10px] text-muted-foreground hover:text-foreground underline">change</button>
+                            </div>
+                          ) : (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs flex-1"
+                              disabled={mfrLoading || !localItem}
+                              onClick={async () => {
+                                if (!localItem || (category !== 'doors' && category !== 'frames')) return;
+                                const fMap = Object.fromEntries(localItem.fields.map((f) => [f.fieldKey, f.fieldValue]));
+                                const widthRaw = fMap['opening_width'] ?? null;
+                                const heightRaw = fMap['opening_height'] ?? null;
+                                setMfrLoading(true);
+                                try {
+                                  const results = await resolveSpecAcrossManufacturers(
+                                    category as 'doors' | 'frames',
+                                    fMap,
+                                    { widthRaw, heightRaw },
+                                  );
+                                  setMfrResults(results);
+                                  // Auto-select if only one matched
+                                  const matched = results.filter((r) => r.result.status === 'matched');
+                                  if (matched.length === 1) setSelectedManufacturerId(matched[0].manufacturerId);
+                                } catch {
+                                  // Fall back to list
+                                  setMfrResults([]);
+                                } finally {
+                                  setMfrLoading(false);
+                                }
+                              }}
+                            >
+                              {mfrLoading ? <><Loader2 className="h-3 w-3 mr-1.5 animate-spin" />Finding…</> : 'Find matching manufacturers'}
+                            </Button>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}
@@ -1224,6 +1025,7 @@ export function AddItemModal({
                     }
                     onUpdateField={handleUpdateField}
                     onDeleteField={handleDeleteField}
+                    pricedValuesByKey={pricedValuesByKey}
                   />
 
                   {addFieldFormOpen ? (

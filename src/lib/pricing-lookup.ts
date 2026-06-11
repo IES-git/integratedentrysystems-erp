@@ -8,15 +8,16 @@
  * Supported categories:
  *   - doors            (criteria-based column matching + adders)
  *   - frames           (hierarchical gauge→depth label matching + adders)
- *   - lites_louvers_glass (label-based width×height matching)
- *   - hardware         (returns category_unsupported — no tables yet)
+ *   - lites_louvers_glass / panels (label-based width×height matching)
+ *   - hardware         (flat price lists tagged via pricing_table_items)
  *
  * The caller is responsible for persisting the result onto estimate_items.
  */
 
 import { supabase } from './supabase';
 import { enqueueException, clearPendingException } from './pricing-exceptions-api';
-import { dimensionMatches, parseDimension } from '@/components/pricing/dimension-utils';
+import { normalizeGauge, extractGaugeTokens, normalizeDepth, extractDepthTokens, normalizeSpecValue } from './pricing-normalize';
+import { dimensionMatches, parseDoorDimension } from '@/components/pricing/dimension-utils';
 import type {
   EstimateItem,
   EstimateOpeningWithItems,
@@ -85,67 +86,6 @@ function fieldValue(fields: ItemField[], key: string): string | null {
 }
 
 /**
- * Parse a door-industry dimension string into total inches.
- *
- * Handles all formats found in the field wizard and pricing tables:
- *
- * 1. Compact nominal  (stored in item_fields by the wizard)
- *    "36"  → 3 ft 6 in  = 42"    "68"  → 6 ft 8 in  = 80"
- *    "30"  → 3 ft 0 in  = 36"    "210" → 2 ft 10 in = 34"
- *    Rule: first 1 char = feet, remaining 1–2 chars = inches (must be 0–11)
- *
- * 2. Feet-hyphen-inches  (pricing table labels / user manual entry)
- *    "2-0" → 24"   "3-6" → 42"   "2-10" → 34"
- *
- * 3. Feet-apostrophe-quote  (user manual entry)
- *    "6'8\""→ 80"  "7'0\"" → 84"
- *
- * 4. Plain integer inches  (fallback / OCR extracted)
- *    "80" → 80"  (NOTE: if the string also matches compact nominal it is
- *               parsed as nominal first — "80" = 8'0" = 96".  In practice
- *               users enter "68" not "80" for 6'8" doors, so this is safe.)
- *
- * Returns null when the string cannot be parsed.
- */
-function parseDoorDimension(raw: string): number | null {
-  if (!raw) return null;
-  const s = raw.trim();
-
-  // --- 2. feet-hyphen-inches: "2-0", "3-6", "2-10" ---
-  const hyphen = s.match(/^(\d+)-(\d{1,2})$/);
-  if (hyphen) {
-    const ft = parseInt(hyphen[1], 10);
-    const inch = parseInt(hyphen[2], 10);
-    if (inch < 12) return ft * 12 + inch;
-  }
-
-  // --- 3. feet-apostrophe-quote: "6'8\"", "7'0\"" ---
-  const apos = s.match(/^(\d+)'\s*(?:(\d+)")?$/);
-  if (apos) {
-    const ft = parseInt(apos[1], 10);
-    const inch = apos[2] ? parseInt(apos[2], 10) : 0;
-    return ft * 12 + inch;
-  }
-
-  // --- 1. compact nominal: "36" → 3 ft 6 in = 42", "68" → 6 ft 8 in = 80" ---
-  // Only matches 2–3 digit all-numeric strings.
-  if (/^\d{2,3}$/.test(s)) {
-    const feet = parseInt(s.charAt(0), 10);
-    const inches = parseInt(s.slice(1), 10);
-    // Valid only when the inch component is 0–11 (genuine feet-inches notation)
-    if (inches >= 0 && inches < 12) {
-      return feet * 12 + inches;
-    }
-    // If inches >= 12 (e.g. "99"), fall through to plain integer
-  }
-
-  // --- 4. plain integer (1-digit or 4+ digit, or 2-3 digit with inch ≥ 12) ---
-  if (/^\d+$/.test(s)) return parseInt(s, 10);
-
-  return null;
-}
-
-/**
  * Match a dimension criteria against a value in inches.
  *
  * Extends the base `dimensionMatches` to also handle `{ type: 'raw', label: '...' }`
@@ -201,10 +141,19 @@ function matchColumn(
   fieldMap: Record<string, string>,
 ): boolean {
   const criteria = col.criteria ?? {};
+  // Item gauge can be stored under 'gauge' or 'material' and in any spelling.
+  const itemGauge = normalizeGauge(fieldMap['gauge'] ?? fieldMap['material']);
 
   // --- Criteria-based matching ---
   if (Object.keys(criteria).length > 0) {
     return Object.entries(criteria).every(([key, val]) => {
+      const valStr = typeof val === 'string' ? val : (val.values[0] ?? '');
+      // Gauge/material columns: compare on the normalized gauge so "18",
+      // "18 GA", "18 Gauge CRS", "18 Gauge GALV" all match the same column.
+      if ((key === 'gauge' || key === 'material') && itemGauge != null) {
+        const colGauge = normalizeGauge(valStr);
+        if (colGauge != null) return colGauge === itemGauge;
+      }
       const itemVal = fieldMap[key];
       if (!itemVal) return false;
       if (typeof val === 'string') {
@@ -217,7 +166,10 @@ function matchColumn(
   }
 
   // --- Label-based fallback for empty-criteria columns ---
-  // Try the gauge field first (most common column discriminator for doors/frames)
+  // Prefer normalized gauge token matching ("18 Gauge CRS" label vs "18" field).
+  if (itemGauge != null && extractGaugeTokens(col.label).includes(itemGauge)) return true;
+
+  // Looser substring fallback for non-numeric gauge labels.
   const gaugeVal = fieldMap['gauge'];
   if (gaugeVal) {
     const colLower = col.label.toLowerCase();
@@ -239,6 +191,102 @@ function matchColumn(
   }
 
   return false;
+}
+
+/**
+ * Resolves the single BASE pricing table (`kind='base'`) for a category +
+ * series + manufacturer. A series can now own several tables (base grid,
+ * component parts, adders, options); only the base carries the base price.
+ *
+ * Resolution is deterministic: exact (case-insensitive) series match wins; if
+ * none, a case-insensitive contains match is tried. Returns an error result
+ * when zero or more than one base table matches, rather than silently picking
+ * one (which previously produced wrong prices for multi-table series).
+ */
+/** Compares one spec value, normalizing gauge/material and known spec aliases. */
+function specValueMatches(key: string, itemVal: string, criteriaVal: string): boolean {
+  if (key === 'gauge' || key === 'material') {
+    const a = normalizeGauge(itemVal);
+    const b = normalizeGauge(criteriaVal);
+    if (a != null && b != null) return a === b;
+  }
+  // Normalize via alias table for known spec fields (edge_construction etc.)
+  const normItem = normalizeSpecValue(key, itemVal) ?? itemVal.trim();
+  const normCriteria = normalizeSpecValue(key, criteriaVal) ?? criteriaVal.trim();
+  return normItem.toLowerCase() === normCriteria.toLowerCase();
+}
+
+/** True when EVERY key in a table's selection_criteria is satisfied by the item. */
+function selectionCriteriaMatch(
+  criteria: Record<string, unknown>,
+  fieldMap: Record<string, string>,
+): boolean {
+  const entries = Object.entries(criteria ?? {});
+  if (entries.length === 0) return false; // empty criteria is not spec-selectable
+  return entries.every(([key, val]) => {
+    const itemVal = fieldMap[key];
+    if (itemVal == null || itemVal === '') return false;
+    if (typeof val === 'string') return specValueMatches(key, itemVal, val);
+    if (val && typeof val === 'object' && Array.isArray((val as { in?: unknown[] }).in)) {
+      return (val as { in: unknown[] }).in.some((v) => specValueMatches(key, itemVal, String(v)));
+    }
+    return false;
+  });
+}
+
+/**
+ * Resolves the single base/component pricing table for a category + manufacturer.
+ *
+ * Spec-driven first: matches the item's spec fields against each table's
+ * `selection_criteria` (e.g. doors -> {edge_construction, core_construction})
+ * so the same configuration resolves to whatever that manufacturer calls the
+ * series. Falls back to legacy `series_value` matching for tables that have no
+ * `selection_criteria` yet. Zero or multiple matches return an error result
+ * (surfaced as a pricing exception) rather than guessing.
+ */
+async function resolveBaseTable(
+  category: 'doors' | 'frames',
+  manufacturerId: string,
+  opts: { fieldMap: Record<string, string>; series: string | null; kind?: 'base' | 'component' },
+): Promise<{ tableId: string } | { error: PriceResult }> {
+  const kind = opts.kind ?? 'base';
+  const { data: rows, error } = await supabase
+    .from('pricing_tables')
+    .select('id, series_value, selection_criteria, pricing_table_vendors!inner(company_id)')
+    .eq('category', category)
+    .eq('kind', kind)
+    .eq('pricing_table_vendors.company_id', manufacturerId);
+
+  if (error) return { error: noResult('no_table', `DB error looking up ${category} table: ${error.message}`) };
+  const all = rows ?? [];
+
+  // 1. Spec-driven selection.
+  const specMatches = all.filter((t) => selectionCriteriaMatch((t.selection_criteria as Record<string, unknown>) ?? {}, opts.fieldMap));
+  const specIds = [...new Set(specMatches.map((t) => t.id as string))];
+  if (specIds.length === 1) return { tableId: specIds[0] };
+  if (specIds.length > 1) {
+    return { error: noResult('no_table', `Specs match multiple ${category} tables for this manufacturer — add a distinguishing spec.`) };
+  }
+
+  // 2. Legacy fallback: match by series_value (exact, then contains).
+  const series = (opts.series ?? '').trim();
+  if (series) {
+    const seriesLower = series.toLowerCase();
+    let candidates = all.filter((t) => (t.series_value as string).trim().toLowerCase() === seriesLower);
+    if (candidates.length === 0) {
+      candidates = all.filter((t) => {
+        const sv = (t.series_value as string).trim().toLowerCase();
+        return sv.includes(seriesLower) || seriesLower.includes(sv);
+      });
+    }
+    const uniqueIds = [...new Set(candidates.map((t) => t.id as string))];
+    if (uniqueIds.length === 1) return { tableId: uniqueIds[0] };
+    if (uniqueIds.length > 1) {
+      return { error: noResult('no_table', `Multiple base ${category} tables match series "${series}" for this manufacturer — cannot disambiguate.`) };
+    }
+  }
+
+  return { error: noResult('no_table', `No ${category} pricing table matches these specs for the selected manufacturer`) };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,41 +348,14 @@ async function resolveDoorPrice(
 
   if (!item.manufacturerId) return noResult('no_vendor', 'No manufacturer selected for door item');
 
-  // 1. Find pricing table: series_value must match AND manufacturer must be linked.
-  //    Try exact series match first, then fall back to case-insensitive contains.
-  let tableId: string | null = null;
-
-  const { data: exactRows, error: tableErr } = await supabase
-    .from('pricing_tables')
-    .select('id, pricing_table_vendors!inner(company_id)')
-    .eq('category', 'doors')
-    .eq('series_value', series)
-    .eq('pricing_table_vendors.company_id', item.manufacturerId)
-    .limit(1);
-
-  if (tableErr) return noResult('no_table', `DB error looking up door table: ${tableErr.message}`);
-
-  if (exactRows && exactRows.length > 0) {
-    tableId = exactRows[0].id as string;
-  } else {
-    // Fallback: load all door tables for this manufacturer and do a contains match
-    const { data: allTables } = await supabase
-      .from('pricing_tables')
-      .select('id, series_value, pricing_table_vendors!inner(company_id)')
-      .eq('category', 'doors')
-      .eq('pricing_table_vendors.company_id', item.manufacturerId);
-
-    const seriesLower = series.toLowerCase();
-    const fuzzy = (allTables ?? []).find((t) => {
-      const sv = (t.series_value as string).toLowerCase();
-      return sv === seriesLower || sv.includes(seriesLower) || seriesLower.includes(sv);
-    });
-    tableId = fuzzy ? (fuzzy.id as string) : null;
-  }
-
-  if (!tableId) {
-    return noResult('no_table', `No pricing table for door series "${series}" with selected manufacturer`);
-  }
+  // 1. Find the BASE table. Spec-driven: the item's spec fields (e.g.
+  //    edge_construction + core_construction) select the manufacturer's series
+  //    via selection_criteria; legacy series_value match is the fallback. Only
+  //    kind='base' tables carry the base price.
+  const fieldMap = Object.fromEntries(fields.map((f) => [f.fieldKey, f.fieldValue]));
+  const baseTable = await resolveBaseTable('doors', item.manufacturerId, { fieldMap, series });
+  if ('error' in baseTable) return baseTable.error;
+  const tableId = baseTable.tableId;
 
   // 2. Parse dimensions using the door-industry nominal format
   //    "36" = 3 ft 6 in = 42",  "68" = 6 ft 8 in = 80",  "3-0" = 36",  "6'8\"" = 80"
@@ -387,9 +408,6 @@ async function resolveDoorPrice(
     .is('parent_column_id', null);
 
   if (colErr) return noResult('no_column', `DB error fetching columns: ${colErr.message}`, tableId);
-
-  // Build a map of ALL field values from the item for multi-criteria matching
-  const fieldMap = Object.fromEntries(fields.map((f) => [f.fieldKey, f.fieldValue]));
 
   const matchedCol = (colData ?? []).find((col) =>
     matchColumn(
@@ -454,38 +472,19 @@ async function resolveFramePrice(
 
   if (!item.manufacturerId) return noResult('no_vendor', 'No manufacturer selected for frame item');
 
-  // Find table with series match + vendor, with fuzzy fallback
-  let tableId: string | null = null;
-
-  const { data: exactRows, error: tableErr } = await supabase
-    .from('pricing_tables')
-    .select('id, pricing_table_vendors!inner(company_id)')
-    .eq('category', 'frames')
-    .eq('series_value', series)
-    .eq('pricing_table_vendors.company_id', item.manufacturerId)
-    .limit(1);
-
-  if (tableErr) return noResult('no_table', `DB error looking up frame table: ${tableErr.message}`);
-
-  if (exactRows && exactRows.length > 0) {
-    tableId = exactRows[0].id as string;
-  } else {
-    const { data: allTables } = await supabase
-      .from('pricing_tables')
-      .select('id, series_value, pricing_table_vendors!inner(company_id)')
-      .eq('category', 'frames')
-      .eq('pricing_table_vendors.company_id', item.manufacturerId);
-    const seriesLower = series.toLowerCase();
-    const fuzzy = (allTables ?? []).find((t) => {
-      const sv = (t.series_value as string).toLowerCase();
-      return sv === seriesLower || sv.includes(seriesLower) || seriesLower.includes(sv);
-    });
-    tableId = fuzzy ? (fuzzy.id as string) : null;
+  // Choose the frame base table. Spec-driven (frame_type + frame_fabrication via
+  // selection_criteria), with legacy series_value fallback. When the item is
+  // explicitly sold as parts/components we target the component-parts table
+  // (kind='component'), falling back to the complete-unit base if none.
+  const frameFieldMap = Object.fromEntries(fields.map((f) => [f.fieldKey, f.fieldValue]));
+  const soldAs = (fieldValue(fields, 'sold_as') ?? fieldValue(fields, 'frame_construction') ?? '').toLowerCase();
+  const wantComponent = /component|part|knock|\bkd\b/.test(soldAs);
+  let baseTable = await resolveBaseTable('frames', item.manufacturerId, { fieldMap: frameFieldMap, series, kind: wantComponent ? 'component' : 'base' });
+  if ('error' in baseTable && wantComponent) {
+    baseTable = await resolveBaseTable('frames', item.manufacturerId, { fieldMap: frameFieldMap, series, kind: 'base' });
   }
-
-  if (!tableId) {
-    return noResult('no_table', `No pricing table for frame series "${series}" with selected manufacturer`);
-  }
+  if ('error' in baseTable) return baseTable.error;
+  const tableId = baseTable.tableId;
 
   const rawWidth = fieldValue(fields, 'opening_width');
   const rawHeight = fieldValue(fields, 'opening_height');
@@ -529,58 +528,67 @@ async function resolveFramePrice(
 
   if (colErr) return noResult('no_column', `DB error fetching frame columns: ${colErr.message}`, tableId);
 
-  const allCols = (allColData ?? []) as Pick<PricingColumn, 'id' | 'label' | 'parentColumnId'>[];
+  // Normalize raw rows (Supabase returns snake_case parent_column_id).
+  const allCols = (allColData ?? []).map((c) => {
+    const r = c as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      label: (r.label as string) ?? '',
+      criteria: (r.criteria as Record<string, unknown>) ?? {},
+      parentColumnId: (r.parent_column_id as string | null) ?? null,
+    };
+  });
+  const byId = new Map(allCols.map((c) => [c.id, c]));
+  // Leaf columns = those that are not a parent of any other column. For flat
+  // tables every column is a leaf; for hierarchical tables the leaves are the
+  // depth children. Frame books commonly encode gauge AND depth in one flat
+  // column label ("16 GAGE MATERIAL | 4 3/4\", 5 3/4\", 6\""), so we score each
+  // leaf on BOTH gauge and depth (the old code matched gauge only and ignored
+  // depth, returning the same price for every depth).
+  const parentIds = new Set(allCols.filter((c) => c.parentColumnId).map((c) => c.parentColumnId as string));
+  const leaves = allCols.filter((c) => !parentIds.has(c.id));
 
-  // Parent columns have no parent_column_id
-  const parentCols = allCols.filter((c) => !c.parentColumnId);
-  const childColsByParent = new Map<string, typeof allCols>();
-  for (const c of allCols) {
-    if (c.parentColumnId) {
-      const list = childColsByParent.get(c.parentColumnId) ?? [];
-      list.push(c);
-      childColsByParent.set(c.parentColumnId, list);
+  const itemGauge = normalizeGauge(gaugeValue);
+  const itemDepth = normalizeDepth(depthValue);
+
+  /** Gauge + depth tokens for a leaf, merged with its parent (hierarchical case). */
+  const tokensFor = (leaf: (typeof allCols)[0]): { gauges: number[]; depths: number[] } => {
+    const parent = leaf.parentColumnId ? byId.get(leaf.parentColumnId) : null;
+    const label = parent ? `${parent.label} | ${leaf.label}` : leaf.label;
+    const crit = { ...(parent?.criteria as Record<string, unknown> ?? {}), ...(leaf.criteria as Record<string, unknown> ?? {}) };
+    const gauges = new Set<number>(extractGaugeTokens(label));
+    for (const k of ['gauge', 'material']) {
+      const g = normalizeGauge(crit[k] as string | undefined);
+      if (g != null) gauges.add(g);
     }
+    const depths = new Set<number>(extractDepthTokens(label));
+    const d = normalizeDepth(crit['depth'] as string | undefined);
+    if (d != null) depths.add(d);
+    return { gauges: [...gauges], depths: [...depths] };
+  };
+
+  let bestLeaf: (typeof allCols)[0] | null = null;
+  let bestScore = -1;
+  for (const leaf of leaves) {
+    const { gauges, depths } = tokensFor(leaf);
+    // If the item declares a gauge and the column declares gauges, they must match.
+    if (itemGauge != null && gauges.length > 0 && !gauges.includes(itemGauge)) continue;
+    // If the item declares a depth and the column declares depths, they must match.
+    if (itemDepth != null && depths.length > 0 && !depths.includes(itemDepth)) continue;
+    let score = 0;
+    if (itemGauge != null && gauges.includes(itemGauge)) score += 1;
+    if (itemDepth != null && depths.includes(itemDepth)) score += 2; // depth is the finer discriminator
+    if (score > bestScore) { bestScore = score; bestLeaf = leaf; }
+  }
+  // Single-column tables: fall back to the only leaf.
+  if (!bestLeaf && leaves.length === 1) bestLeaf = leaves[0];
+
+  if (!bestLeaf) {
+    return noResult('no_column', `No frame column matches gauge "${gaugeValue}"${depthValue ? ` / depth "${depthValue}"` : ''}`, tableId);
   }
 
-  // Find the gauge parent column (label match, case-insensitive contains)
-  let matchedParentCol: (typeof allCols)[0] | null = null;
-  if (gaugeValue) {
-    matchedParentCol = parentCols.find((c) =>
-      c.label.toLowerCase().includes(gaugeValue.toLowerCase()) ||
-      gaugeValue.toLowerCase().includes(c.label.toLowerCase())
-    ) ?? null;
-  }
-  // Fall through to first parent if only one exists
-  if (!matchedParentCol && parentCols.length === 1) matchedParentCol = parentCols[0];
-
-  if (!matchedParentCol) {
-    return noResult('no_column', `No frame gauge column matches "${gaugeValue}"`, tableId);
-  }
-
-  const children = childColsByParent.get(matchedParentCol.id) ?? [];
-
-  // If no children, use the parent column directly (flat frame tables)
-  let targetColId: string;
-  let targetParentColId: string | null = null;
-
-  if (children.length === 0) {
-    targetColId = matchedParentCol.id;
-  } else {
-    // Match child by depth label
-    let matchedChild: (typeof allCols)[0] | null = null;
-    if (depthValue) {
-      matchedChild = children.find((c) =>
-        c.label.toLowerCase().includes(depthValue.toLowerCase()) ||
-        depthValue.toLowerCase().includes(c.label.toLowerCase())
-      ) ?? null;
-    }
-    if (!matchedChild && children.length === 1) matchedChild = children[0];
-    if (!matchedChild) {
-      return noResult('no_column', `No frame depth column matches "${depthValue}" under gauge "${gaugeValue}"`, tableId);
-    }
-    targetColId = matchedChild.id;
-    targetParentColId = matchedParentCol.id;
-  }
+  const targetColId = bestLeaf.id;
+  const targetParentColId = bestLeaf.parentColumnId ?? null;
 
   const { data: cellData, error: cellErr } = await supabase
     .from('pricing_cells')
@@ -1136,6 +1144,224 @@ export async function resolveAndPersistItemPrice(
   } catch {
     // Pricing lookup errors must never block the opening save
   }
+}
+
+// ---------------------------------------------------------------------------
+// Spec-first multi-manufacturer resolution
+// ---------------------------------------------------------------------------
+
+export interface ManufacturerPriceResult {
+  manufacturerId: string;
+  manufacturerName: string;
+  seriesValue: string;
+  result: PriceResult;
+}
+
+/**
+ * Resolves the spec against ALL manufacturers that have a base pricing table
+ * for the given category. Returns one result per manufacturer, ordered by
+ * total unit price (cheapest first, unpriced at end).
+ *
+ * This is the spec-first path: the user never picks a manufacturer or series up
+ * front. They fill in spec fields and this function returns every manufacturer
+ * that can supply the spec with a resolved price.
+ */
+export async function resolveSpecAcrossManufacturers(
+  category: 'doors' | 'frames',
+  fieldMap: Record<string, string>,
+  dims: { widthRaw: string | null; heightRaw: string | null },
+): Promise<ManufacturerPriceResult[]> {
+  // Fetch all base tables for this category with vendor + series info
+  const { data: tables, error } = await supabase
+    .from('pricing_tables')
+    .select('id, series_value, selection_criteria, pricing_table_vendors(company_id, companies(id, name))')
+    .eq('category', category)
+    .eq('kind', 'base');
+
+  if (error || !tables) return [];
+
+  // Group by manufacturer so each vendor is priced once (using their best matching table)
+  const byManufacturer = new Map<string, { tableId: string; seriesValue: string; manufacturerId: string; manufacturerName: string }>();
+
+  for (const t of tables) {
+    const sc = (t.selection_criteria as Record<string, unknown>) ?? {};
+    if (!selectionCriteriaMatch(sc, fieldMap)) continue;
+
+    const vendors = (t.pricing_table_vendors ?? []) as { company_id: string; companies: { id: string; name: string } | null }[];
+    for (const v of vendors) {
+      if (byManufacturer.has(v.company_id)) continue; // keep first match per vendor
+      byManufacturer.set(v.company_id, {
+        tableId: t.id as string,
+        seriesValue: t.series_value as string,
+        manufacturerId: v.company_id,
+        manufacturerName: v.companies?.name ?? v.company_id,
+      });
+    }
+  }
+
+  if (byManufacturer.size === 0) return [];
+
+  // Price each manufacturer
+  const results = await Promise.all(
+    [...byManufacturer.values()].map(async ({ tableId, seriesValue, manufacturerId, manufacturerName }) => {
+      const widthIn = dims.widthRaw ? parseDoorDimension(dims.widthRaw) : null;
+      const heightIn = dims.heightRaw ? parseDoorDimension(dims.heightRaw) : null;
+
+      // Build a synthetic result by looking up the resolved table directly
+      const result = await resolveTableDirectly(tableId, category, manufacturerId, fieldMap, widthIn, heightIn);
+      return { manufacturerId, manufacturerName, seriesValue, result };
+    })
+  );
+
+  // Sort: matched first by price asc, then unmatched
+  return results.sort((a, b) => {
+    if (a.result.status === 'matched' && b.result.status !== 'matched') return -1;
+    if (a.result.status !== 'matched' && b.result.status === 'matched') return 1;
+    if (a.result.totalUnitPrice != null && b.result.totalUnitPrice != null) {
+      return a.result.totalUnitPrice - b.result.totalUnitPrice;
+    }
+    return 0;
+  });
+}
+
+/**
+ * Price a specific table directly (skips table resolution — table is already known).
+ * Used by resolveSpecAcrossManufacturers to price each manufacturer's table.
+ */
+async function resolveTableDirectly(
+  tableId: string,
+  category: 'doors' | 'frames',
+  manufacturerId: string,
+  fieldMap: Record<string, string>,
+  widthIn: number | null,
+  heightIn: number | null,
+): Promise<PriceResult> {
+  if (widthIn === null) {
+    return noResult('no_row', 'Width not specified or unparseable', tableId);
+  }
+  if (heightIn === null) {
+    return noResult('no_row', 'Height not specified or unparseable', tableId);
+  }
+
+  const { data: rowData, error: rowErr } = await supabase
+    .from('pricing_rows')
+    .select('id, width_criteria, height_criteria')
+    .eq('pricing_table_id', tableId);
+  if (rowErr) return noResult('no_row', rowErr.message, tableId);
+
+  const matchedRow = (rowData ?? []).find((r) => {
+    const wc = r.width_criteria as Parameters<typeof dimensionMatches>[0] | Record<string, never>;
+    const hc = r.height_criteria as Parameters<typeof dimensionMatches>[0] | Record<string, never>;
+    return matchDimensionCriteria(wc, widthIn) && matchDimensionCriteria(hc, heightIn);
+  });
+  if (!matchedRow) {
+    return noResult('no_row', `No row matches ${widthIn}"×${heightIn}"`, tableId);
+  }
+
+  if (category === 'doors') {
+    const { data: colData, error: colErr } = await supabase
+      .from('pricing_columns')
+      .select('id, label, criteria, parent_column_id')
+      .eq('pricing_table_id', tableId)
+      .is('parent_column_id', null);
+    if (colErr) return noResult('no_column', colErr.message, tableId);
+
+    const matchedCol = (colData ?? []).find((col) =>
+      matchColumn(
+        col as { id: string; label: string; criteria: Record<string, string | { type: 'in'; values: string[] }> },
+        fieldMap,
+      )
+    );
+    if (!matchedCol) {
+      return noResult('no_column', `No column matches gauge "${fieldMap['gauge'] ?? '?'}"`, tableId);
+    }
+
+    const { data: cellData, error: cellErr } = await supabase
+      .from('pricing_cells')
+      .select('id, price')
+      .eq('pricing_row_id', matchedRow.id)
+      .eq('pricing_column_id', matchedCol.id)
+      .maybeSingle();
+    if (cellErr || !cellData || cellData.price === null) {
+      return noResult('no_cell', 'No price for this combination', tableId);
+    }
+
+    const fields = Object.entries(fieldMap).map(([k, v]) => ({
+      id: '', estimateItemId: '', fieldDefinitionId: null,
+      fieldKey: k, fieldLabel: k, fieldValue: v,
+      valueType: 'string' as const, sourceConfidence: null, createdAt: '', updatedAt: '',
+    }));
+    const adders = await resolveAdders(tableId, '', manufacturerId, fields);
+    return buildResult('matched', cellData.price as number, adders, manufacturerId, {
+      tableId, rowId: matchedRow.id as string, columnId: matchedCol.id as string,
+      parentColumnId: null, adderCellIds: adders.map((a) => a.cellId), vendorId: manufacturerId,
+    });
+  }
+
+  // Frames: gauge+depth matching
+  const { data: allColData, error: colErr2 } = await supabase
+    .from('pricing_columns')
+    .select('id, label, criteria, parent_column_id')
+    .eq('pricing_table_id', tableId)
+    .order('sort_order', { ascending: true });
+  if (colErr2) return noResult('no_column', colErr2.message, tableId);
+
+  const allCols = (allColData ?? []).map((c) => {
+    const r = c as Record<string, unknown>;
+    return {
+      id: r.id as string, label: (r.label as string) ?? '',
+      criteria: (r.criteria as Record<string, unknown>) ?? {},
+      parentColumnId: (r.parent_column_id as string | null) ?? null,
+    };
+  });
+  const byId2 = new Map(allCols.map((c) => [c.id, c]));
+  const parentIds2 = new Set(allCols.filter((c) => c.parentColumnId).map((c) => c.parentColumnId as string));
+  const leaves = allCols.filter((c) => !parentIds2.has(c.id));
+
+  const itemGauge = normalizeGauge(fieldMap['gauge']);
+  const itemDepth = normalizeDepth(fieldMap['depth']);
+
+  let bestLeaf: typeof allCols[0] | null = null;
+  let bestScore = -1;
+  for (const leaf of leaves) {
+    const parent = leaf.parentColumnId ? byId2.get(leaf.parentColumnId) : null;
+    const label = parent ? `${parent.label} | ${leaf.label}` : leaf.label;
+    const crit = { ...(parent?.criteria ?? {}), ...(leaf.criteria ?? {}) } as Record<string, unknown>;
+    const gauges = new Set<number>(extractGaugeTokens(label));
+    for (const k of ['gauge', 'material']) { const g = normalizeGauge(crit[k] as string | undefined); if (g != null) gauges.add(g); }
+    const depths = new Set<number>(extractDepthTokens(label));
+    const d = normalizeDepth(crit['depth'] as string | undefined); if (d != null) depths.add(d);
+    if (itemGauge != null && gauges.size > 0 && !gauges.has(itemGauge)) continue;
+    if (itemDepth != null && depths.size > 0 && !depths.has(itemDepth)) continue;
+    let score = 0;
+    if (itemGauge != null && gauges.has(itemGauge)) score += 1;
+    if (itemDepth != null && depths.has(itemDepth)) score += 2;
+    if (score > bestScore) { bestScore = score; bestLeaf = leaf; }
+  }
+  if (!bestLeaf && leaves.length === 1) bestLeaf = leaves[0];
+  if (!bestLeaf) return noResult('no_column', 'No frame column matches gauge/depth', tableId);
+
+  const { data: cellData2, error: cellErr2 } = await supabase
+    .from('pricing_cells')
+    .select('id, price')
+    .eq('pricing_row_id', matchedRow.id)
+    .eq('pricing_column_id', bestLeaf.id)
+    .maybeSingle();
+  if (cellErr2 || !cellData2 || cellData2.price === null) {
+    return noResult('no_cell', 'No price for this combination', tableId);
+  }
+
+  const fields2 = Object.entries(fieldMap).map(([k, v]) => ({
+    id: '', estimateItemId: '', fieldDefinitionId: null,
+    fieldKey: k, fieldLabel: k, fieldValue: v,
+    valueType: 'string' as const, sourceConfidence: null, createdAt: '', updatedAt: '',
+  }));
+  const adders2 = await resolveAdders(tableId, '', manufacturerId, fields2);
+  return buildResult('matched', cellData2.price as number, adders2, manufacturerId, {
+    tableId, rowId: matchedRow.id as string, columnId: bestLeaf.id,
+    parentColumnId: bestLeaf.parentColumnId ?? null,
+    adderCellIds: adders2.map((a) => a.cellId), vendorId: manufacturerId,
+  });
 }
 
 // Re-export for use in components

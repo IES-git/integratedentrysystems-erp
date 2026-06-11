@@ -38,6 +38,8 @@ function mapTable(row: Record<string, unknown>): PricingTable {
     id: row.id as string,
     category: row.category as PricingTable['category'],
     seriesValue: row.series_value as string,
+    kind: (row.kind as PricingTable['kind']) ?? 'base',
+    selectionCriteria: (row.selection_criteria as PricingTable['selectionCriteria']) ?? {},
     fieldValueOptionId: row.field_value_option_id as string | null,
     name: row.name as string,
     description: row.description as string | null,
@@ -532,7 +534,9 @@ export async function createPricingTable(
   category: PricingTable['category'],
   seriesValue: string,
   name: string,
-  fieldValueOptionId?: string
+  fieldValueOptionId?: string,
+  kind: PricingTable['kind'] = 'base',
+  selectionCriteria: PricingTable['selectionCriteria'] = {},
 ): Promise<PricingTable> {
   const { data, error } = await supabase
     .from('pricing_tables')
@@ -540,6 +544,8 @@ export async function createPricingTable(
       category,
       series_value: seriesValue,
       name,
+      kind,
+      selection_criteria: selectionCriteria,
       ...(fieldValueOptionId ? { field_value_option_id: fieldValueOptionId } : {}),
     })
     .select('*')
@@ -552,6 +558,70 @@ export async function createPricingTable(
 export async function deletePricingTable(id: string): Promise<void> {
   const { error } = await supabase.from('pricing_tables').delete().eq('id', id);
   if (error) throw new Error(error.message);
+}
+
+/** Per-table pricing coverage row used by the coverage report. */
+export interface PricingCoverageRow {
+  tableId: string;
+  category: string;
+  seriesValue: string;
+  kind: string;
+  name: string;
+  vendorNames: string[];
+  rows: number;
+  cols: number;
+  cells: number;
+  /** rows*cols (the cells a fully-filled grid would have). */
+  expectedCells: number;
+  /** Adder/option surcharge rows attached to this table (for base tables). */
+  adderCells: number;
+}
+
+/**
+ * Read-only coverage report: for every pricing table, how filled its grid is
+ * and how many adder cells are attached. Lets you confirm a series+vendor is
+ * quote-ready (full grid, expected adders) before relying on it. Optionally
+ * filtered to a category and/or vendor.
+ */
+export async function getPricingCoverage(opts: { category?: string } = {}): Promise<PricingCoverageRow[]> {
+  let q = supabase
+    .from('pricing_tables')
+    .select(`
+      id, category, series_value, kind, name,
+      pricing_columns(id),
+      pricing_rows(id, pricing_cells(id)),
+      pricing_table_vendors(companies(name)),
+      pricing_adder_cells(id)
+    `);
+  if (opts.category) q = q.eq('category', opts.category);
+  const { data, error } = await q;
+  if (error) throw new Error(error.message);
+
+  const rowsOut = (data ?? []).map((t) => {
+    const r = t as Record<string, unknown>;
+    const cols = ((r.pricing_columns as unknown[]) ?? []).length;
+    const prows = (r.pricing_rows as { pricing_cells?: unknown[] }[]) ?? [];
+    const rowCount = prows.length;
+    const cells = prows.reduce((s, row) => s + ((row.pricing_cells as unknown[])?.length ?? 0), 0);
+    const vendorNames = ((r.pricing_table_vendors as { companies?: { name?: string } }[]) ?? [])
+      .map((v) => v.companies?.name)
+      .filter((n): n is string => !!n);
+    return {
+      tableId: r.id as string,
+      category: r.category as string,
+      seriesValue: r.series_value as string,
+      kind: (r.kind as string) ?? 'base',
+      name: r.name as string,
+      vendorNames,
+      rows: rowCount,
+      cols,
+      cells,
+      expectedCells: rowCount * cols,
+      adderCells: ((r.pricing_adder_cells as unknown[]) ?? []).length,
+    };
+  });
+
+  return rowsOut;
 }
 
 /**
@@ -665,6 +735,63 @@ export async function updatePricingTable(
  * Used to filter the manufacturer picker in the estimate wizard so users
  * only see vendors that actually have prices set up for the selected item.
  */
+function mapCompany(c: Record<string, unknown>): Company {
+  return {
+    id: c.id as string,
+    name: c.name as string,
+    companyType: c.company_type as Company['companyType'],
+    billingAddress: c.billing_address as string | null,
+    billingCity: c.billing_city as string | null,
+    billingState: c.billing_state as string | null,
+    billingZip: c.billing_zip as string | null,
+    shippingAddress: c.shipping_address as string | null,
+    shippingCity: c.shipping_city as string | null,
+    shippingState: c.shipping_state as string | null,
+    shippingZip: c.shipping_zip as string | null,
+    notes: c.notes as string | null,
+    active: c.active as boolean,
+    settings: c.settings as Company['settings'],
+    createdAt: c.created_at as string,
+    updatedAt: c.updated_at as string,
+  };
+}
+
+/**
+ * Lists every manufacturer that has a BASE pricing table in a category,
+ * regardless of series. Used by the spec-driven builder: the user configures
+ * specs and picks any of these manufacturers; the engine resolves which of that
+ * manufacturer's series the specs map to. (Replaces series-keyed manufacturer
+ * lookup, which fails when the item's catalog series isn't the vendor's series.)
+ */
+export async function listManufacturersForCategory(
+  category: PricingTable['category'],
+): Promise<Company[]> {
+  const { data: tables, error: tablesErr } = await supabase
+    .from('pricing_tables')
+    .select('id')
+    .eq('category', category)
+    .eq('kind', 'base');
+  if (tablesErr) throw new Error(tablesErr.message);
+  if (!tables || tables.length === 0) return [];
+
+  const tableIds = tables.map((t: Record<string, unknown>) => t.id as string);
+  const { data: vendors, error: vendorsErr } = await supabase
+    .from('pricing_table_vendors')
+    .select('company_id')
+    .in('pricing_table_id', tableIds);
+  if (vendorsErr) throw new Error(vendorsErr.message);
+  if (!vendors || vendors.length === 0) return [];
+
+  const companyIds = [...new Set((vendors as { company_id: string }[]).map((v) => v.company_id))];
+  const { data: companies, error: companiesErr } = await supabase
+    .from('companies')
+    .select('*')
+    .in('id', companyIds)
+    .order('name', { ascending: true });
+  if (companiesErr) throw new Error(companiesErr.message);
+  return (companies ?? []).map((c) => mapCompany(c as Record<string, unknown>));
+}
+
 export async function listManufacturersForSeries(
   category: PricingTable['category'],
   seriesValue: string,
@@ -719,6 +846,66 @@ export async function listManufacturersForSeries(
     createdAt: c.created_at as string,
     updatedAt: c.updated_at as string,
   }));
+}
+
+/**
+ * Returns the set of distinct values for a given spec field key that are
+ * present in at least one pricing table's `selection_criteria`.
+ * Used by the wizard to filter dropdowns to only values that actually resolve
+ * to a priced table — so a brand-new user can never select an unavailable spec.
+ *
+ * @param fieldKey  e.g. 'edge_construction', 'core_construction', 'gauge'
+ * @param category  optional — restrict to tables of this category
+ */
+export async function getPricedSpecValues(
+  fieldKey: string,
+  category?: PricingTable['category'],
+): Promise<string[]> {
+  let q = supabase.from('pricing_tables').select('selection_criteria').eq('kind', 'base');
+  if (category) q = q.eq('category', category);
+  const { data, error } = await q;
+  if (error || !data) return [];
+
+  const values = new Set<string>();
+  for (const row of data) {
+    const sc = (row.selection_criteria as Record<string, unknown>) ?? {};
+    const val = sc[fieldKey];
+    if (!val) continue;
+    if (typeof val === 'string') values.add(val.trim());
+    else if (val && typeof val === 'object' && Array.isArray((val as { in?: unknown[] }).in)) {
+      for (const v of (val as { in: unknown[] }).in) {
+        values.add(String(v).trim());
+      }
+    }
+  }
+  return [...values].sort();
+}
+
+/**
+ * Returns distinct gauge values (as strings like "18") that appear in column
+ * criteria across pricing tables of the given category.
+ */
+export async function getPricedGaugeValues(
+  category?: PricingTable['category'],
+): Promise<string[]> {
+  let q = supabase.from('pricing_columns').select('criteria, pricing_tables!inner(kind, category)');
+  // Join via FK — filter on kind='base' and optional category
+  const { data, error } = await q;
+  if (error || !data) return [];
+
+  const values = new Set<string>();
+  for (const row of (data as Record<string, unknown>[]) ?? []) {
+    const tableData = row['pricing_tables'] as Record<string, unknown> | null;
+    if (!tableData) continue;
+    if (tableData['kind'] !== 'base') continue;
+    if (category && tableData['category'] !== category) continue;
+    const criteria = (row['criteria'] as Record<string, unknown>) ?? {};
+    for (const key of ['gauge', 'material']) {
+      const val = criteria[key];
+      if (typeof val === 'string') values.add(val.trim());
+    }
+  }
+  return [...values].sort();
 }
 
 /** Returns all companies that are manufacturers (company_type IN 'manufacturer','both'), sorted by name. */

@@ -650,6 +650,8 @@ Individual field configuration rows belonging to a template, controlling which f
 
 Tracks previously used values for each field definition, enabling smart dropdown suggestions ordered by usage frequency.
 
+**Also seeded by price-book ingestion:** approving a base door/frame table seeds the `series` value plus `gauge` (doors) / `depth` (frames) options parsed from the column labels, and approving an adder/option table seeds that field's option values. This "normalizes" ingested price-book values into the builder's item fields so a user's selection (e.g. series `H`, gauge `18 Gauge`) resolves against the matching pricing table. See `seedBaseTableFieldOptions` / `ensureFieldOptions` in `src/lib/price-books-api.ts`. (Best-effort, idempotent.)
+
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `field_definition_id` (UUID, NOT NULL) - FK to field_definitions.id, CASCADE on delete
@@ -718,6 +720,8 @@ One row per pricing series (e.g. "CH"). Category-scoped with a soft-link to `fie
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `category` (TEXT, NOT NULL) - CHECK IN ('doors','frames','hardware','lites_louvers_glass')
 - `series_value` (TEXT, NOT NULL) - e.g. `'CH'` for doors (mirrors a value from `field_value_options`); for `lites_louvers_glass` tables this equals the item's `canonical_code` from `estimate_items`
+- `kind` (TEXT, NOT NULL, DEFAULT 'base') - CHECK IN ('base','component','adder','option'). Role within the series: `base` = the size grid used for the base price (door/frame base-price lookup selects this); `component` = alternate base (e.g. frame heads & jambs sold as parts); `adder` = "(ADDERS)"/additional-preparation surcharges; `option` = kit/louver/glass elevations and other selectable upcharges. Adder/option tables feed `pricing_adder_cells`. Indexed `(category, series_value, kind)`.
+- `selection_criteria` (JSONB, NOT NULL, DEFAULT `{}`) - Spec-driven base-table selection: `{ field_key: value | {"in":[...]} }` of the item spec values that route a configured item to this table for its manufacturer (doors: `edge_construction` + `core_construction`; frames: `frame_type` + `frame_fabrication`). The engine (`resolveBaseTable`) matches a configured item's fields against this scoped to category+vendor, so the same specs resolve to whatever each manufacturer calls the series; `series_value` becomes a derived display label. Empty `{}` falls back to `series_value` matching.
 - `field_value_option_id` (UUID, NULLABLE, FK → field_value_options.id ON DELETE SET NULL) - Soft-link for traceability
 - `name` (TEXT, NOT NULL) - Display name (defaults to the series value)
 - `description` (TEXT, NULLABLE) - Optional description
@@ -1007,7 +1011,7 @@ Per-item-type alias overrides. Same shape as `manufacturer_field_labels` plus `c
 
 ### public.pricing_adder_cells
 
-One price cell per `(pricing_table) × (item type) × (adder field) × (option value) × (vendor)`. Populated from the Adders tab in the Pricing editor for fields that have `is_adder = true` in `item_type_field_overrides`. Each option value for the field gets its own row so adder prices can vary by option.
+One price cell per `(pricing_table) × (item type) × (adder field) × (option value) × (vendor)`. Populated from the Adders tab in the Pricing editor for fields that have `is_adder = true` in `item_type_field_overrides`, AND from price-book ingestion: approving an adder/option extraction (`approveAdderExtraction` in `price-books-api.ts`) writes one row per option, attached to the series' BASE table (`pricing_table_id` = the kind='base' door/frame table). At pricing time `resolveAdders(baseTableId, canonicalCode, vendorId, fields)` adds a row's price when the item's `field_definition` value equals that row's `option_value`. Each option value for the field gets its own row so adder prices can vary by option.
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
@@ -1248,7 +1252,12 @@ Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_depen
 52. `add_price_book_extraction_table_fields` - Multi-table price-book ingestion. Added `title`, `kind`, and `sort_order` columns to `price_book_extractions` so each detected table in a book is its own extraction row (with index on `(price_book_id, sort_order)`).
 53. `add_price_book_gemini_file_and_grid_extracted` - Decoupled ingestion (catalog + per-table grid). Added `gemini_file_uri` / `gemini_file_name` to `price_books` (Gemini Files API reference reused across per-table extraction) and `grid_extracted BOOLEAN DEFAULT false` to `price_book_extractions`.
 54. `add_page_hint_to_price_book_extractions` - Exhaustive cataloging. Added `page_hint TEXT` to `price_book_extractions` so the catalog pass records where each table lives and the per-table grid extraction can target the correct page/table (fixes wrong/merged grids).
+55. `add_spreadsheet_meta_to_price_book_extractions` - SheetJS XLSX/CSV support. Added `spreadsheet_meta JSONB` to `price_book_extractions` to store sheet index, header/data row offsets, price column indices, and label column index so XLSX/CSV tables can be extracted deterministically without Gemini reading any numbers.
+56. `add_pricing_table_id_to_price_book_extractions` - Update-vs-create traceability. Added `pricing_table_id UUID FK → pricing_tables(id) ON DELETE SET NULL` so each approved extraction is linked to the pricing table it created/updated. Enables fingerprint-based re-upload dedup.
+57. `add_versioning_to_pricing_tables` - Book-level versioning. Added `effective_from TIMESTAMPTZ DEFAULT NOW()` to `pricing_tables` (stamped on every update so price history is time-addressable). Added `supersedes_price_book_id UUID FK → price_books(id) ON DELETE SET NULL` and `effective_date DATE` to `price_books` so a re-upload can declare the date its prices take effect and which prior book it replaces.
 55. `add_extract_all_progress_to_price_books` - Background "extract all grids" job. Added `extract_status` / `extract_total` / `extract_done` / `extract_failed` / `extract_error` to `price_books` so the Render worker's `/extract-all` background job can report progress and the frontend can poll instead of holding the browser open. (Catalog round cap also raised 8→10 in the worker.)
+56. `add_kind_to_pricing_tables` - CPQ pricing remediation Phase 0. Added `kind TEXT NOT NULL DEFAULT 'base'` (CHECK base|component|adder|option) to `pricing_tables` + index `(category, series_value, kind)`. Backfilled existing rows from name heuristics. Door/frame base-price lookup now selects `kind='base'` (deterministic, no arbitrary pick); adder/option tables feed `pricing_adder_cells`.
+57. `spec_driven_series_resolution` - Spec-driven, manufacturer-aware series resolution. Added `pricing_tables.selection_criteria JSONB DEFAULT '{}'`. Renamed the thermal-fill field `core` -> `core_fill` (field_definitions + item_fields; no code refs). Created discriminator field_definitions `edge_construction` (Lockseam/Continuous Weld) and `core_construction` (Glued/Steel Stiffened/Embossed Panel) with option sets, added as door base fields. Engine now resolves the base table by matching a configured item's spec fields against `selection_criteria` scoped to category+manufacturer (series_value fallback retained). The 5 approved Pioneer base tables (H/CH/C/LW + F) were backfilled with their selection_criteria; the builder's manufacturer picker now lists vendors by category (`listManufacturersForCategory`) so users configure specs + pick a manufacturer and the price resolves without choosing a series.
 
 ## Edge Functions
 
@@ -1576,6 +1585,8 @@ Staging row holding the agent's normalized grid for ONE table within a price boo
 - `detected_vendor_name` (TEXT, NULLABLE)
 - `grid` (JSONB, NOT NULL, DEFAULT `{}`) - `{ columnLabels, rowLabels, cells[], columnFieldHints }`
 - `warnings` (JSONB, NOT NULL, DEFAULT `[]`)
+- `spreadsheet_meta` (JSONB, NULLABLE) - Set for XLSX/CSV tables. `{ sheetIndex, headerRow, dataStartRow, dataEndRow, priceColIndices[], labelColIndex }` allows deterministic SheetJS re-extraction without re-sending numbers to Gemini.
+- `pricing_table_id` (UUID, NULLABLE, FK → pricing_tables.id ON DELETE SET NULL) - Set when the extraction is approved; links back to the created/updated pricing table for update-vs-create logic on re-upload.
 - `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
 **Indexes:** on `price_book_id`, `status`, `(price_book_id, sort_order)`

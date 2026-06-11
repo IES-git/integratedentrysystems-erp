@@ -55,11 +55,15 @@ export interface PriceEstimateOptions {
 }
 
 function openingSubtotal(opening: EstimateOpeningWithItems): number {
-  return opening.items.reduce((s, i: EstimateItem) => s + (i.unitPrice ?? 0) * i.quantity, 0);
+  const itemsTotal = opening.items.reduce((s, i: EstimateItem) => s + (i.unitPrice ?? 0) * i.quantity, 0);
+  const hardwareTotal = (opening.hardware ?? []).reduce((s, h: EstimateItem) => s + (h.unitPrice ?? 0) * h.quantity, 0);
+  return itemsTotal + hardwareTotal;
 }
 
 function unpriced(opening: EstimateOpeningWithItems): number {
-  return opening.items.filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
+  const topLevel = opening.items.filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
+  const hardware = (opening.hardware ?? []).filter((h) => h.unitPrice === null || h.unitPrice === undefined).length;
+  return topLevel + hardware;
 }
 
 /**

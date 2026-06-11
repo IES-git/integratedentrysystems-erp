@@ -48,11 +48,18 @@ function formatDate(iso: string): string {
 }
 
 function openingSubtotal(opening: EstimateOpeningWithItems): number {
-  return opening.items.reduce((s, i) => s + (i.unitPrice ?? 0) * i.quantity, 0);
+  const itemsTotal = opening.items.reduce((s, i) => s + (i.unitPrice ?? 0) * i.quantity, 0);
+  const hardwareTotal = (opening.hardware ?? []).reduce((s, h) => s + (h.unitPrice ?? 0) * h.quantity, 0);
+  return itemsTotal + hardwareTotal;
 }
 
 function openingTotal(opening: EstimateOpeningWithItems): number {
   return openingSubtotal(opening) * opening.quantity;
+}
+
+/** All line items in an opening (top-level + hardware). */
+function allOpeningLineItems(opening: EstimateOpeningWithItems): EstimateItem[] {
+  return [...opening.items, ...(opening.hardware ?? [])];
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +212,7 @@ function OpeningReviewCard({ opening, manufacturerNameById, onPriceChange, highl
 
   const subtotal = openingSubtotal(opening);
   const total = openingTotal(opening);
-  const hasAnyPrice = opening.items.some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
+  const hasAnyPrice = allOpeningLineItems(opening).some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
 
   return (
     <Card className={cn('overflow-hidden')}>
@@ -249,10 +256,10 @@ function OpeningReviewCard({ opening, manufacturerNameById, onPriceChange, highl
             <div className="w-24 text-right">Line Total</div>
           </div>
 
-          {opening.items.length === 0 ? (
+          {allOpeningLineItems(opening).length === 0 ? (
             <p className="px-4 py-3 text-xs text-muted-foreground italic">No items in this opening.</p>
           ) : (
-            opening.items.map((item) => (
+            allOpeningLineItems(opening).map((item) => (
               <div
                 key={item.id}
                 className={cn(
@@ -357,10 +364,10 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
       setOpenings(updated);
       setViolations(priced.violations);
 
-      // Highlight items that now have prices
+      // Highlight items that now have prices (top-level + hardware)
       const newPricedIds = new Set<string>();
       for (const o of updated) {
-        for (const item of o.items) {
+        for (const item of allOpeningLineItems(o)) {
           if (item.unitPrice !== null && item.unitPrice !== undefined) {
             newPricedIds.add(item.id);
           }
@@ -384,22 +391,23 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
       priceSource: isManual ? 'manual' : null,
       isManualPriceOverride: isManual,
     });
-    // Update local state
+    // Update local state — apply to both top-level items and hardware
+    const applyUpdate = (i: EstimateItem) =>
+      i.id === itemId
+        ? { ...i, unitPrice: price, priceSource: isManual ? ('manual' as const) : null, isManualPriceOverride: isManual }
+        : i;
     setOpenings((prev) =>
       prev.map((o) => ({
         ...o,
-        items: o.items.map((i) =>
-          i.id === itemId
-            ? { ...i, unitPrice: price, priceSource: isManual ? ('manual' as const) : null, isManualPriceOverride: isManual }
-            : i
-        ),
+        items: o.items.map(applyUpdate),
+        hardware: (o.hardware ?? []).map(applyUpdate),
       }))
     );
   };
 
-  // Derived totals
+  // Derived totals — include opening-level hardware in all counts
   const grandTotal = openings.reduce((s, o) => s + openingTotal(o), 0);
-  const allItems = openings.flatMap((o) => o.items);
+  const allItems = openings.flatMap(allOpeningLineItems);
   const missingPriceCount = allItems.filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
   const hasAnyPrice = allItems.some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
   const errorViolations = violations.filter((v) => v.severity === 'error');
@@ -560,7 +568,7 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
               <div>
                 <p className="text-sm font-semibold">Grand Total</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  {openings.reduce((s, o) => s + o.items.length, 0)} items across {openings.length} opening{openings.length !== 1 ? 's' : ''}
+                  {openings.reduce((s, o) => s + allOpeningLineItems(o).length, 0)} items across {openings.length} opening{openings.length !== 1 ? 's' : ''}
                   {missingPriceCount > 0 && ` (${missingPriceCount} missing price)`}
                 </p>
               </div>
