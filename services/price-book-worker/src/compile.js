@@ -210,6 +210,51 @@ function sizeConditions(paths, rowLabel) {
   return out;
 }
 
+/** A label that is a header / non-data token (becomes junk if compiled as a value). */
+function isHeaderish(label) {
+  const s = String(label ?? '').trim().toLowerCase();
+  if (!s) return true;
+  return /^(price|prices|list|net|cost|costs|size|sizes|width|height|each|ea|nominal|series|model|description|desc|notes?|item|code|qty|quantity|n\/?a)$/.test(s);
+}
+
+/**
+ * Computes the exclusive group + priority for a base/component matrix cell so the
+ * engine selects exactly ONE size row (the smallest that still encloses the
+ * opening) instead of summing every row whose `LTE` bound qualifies.
+ *
+ * - exclusive_group keys on everything EXCEPT the size axis (entity, charge
+ *   category, series, and the column attributes) so all size rows in the same
+ *   series/column compete as one group.
+ * - priority = width_bound * 10000 + height_bound, so the tightest enclosing
+ *   cell has the lowest priority number and wins (the engine keeps the lowest).
+ *
+ * Only applied when the row carries a real `LTE` size bound; rows whose size
+ * could not be parsed keep the legacy behavior (no grouping) so genuinely
+ * distinct non-dimensional rows are never suppressed.
+ */
+function matrixStacking(entityType, archetype, ext, colConds, sizeConds) {
+  const hasRealSize = sizeConds.some((c) => c.operator === 'LTE');
+  if (!hasRealSize) return { exclusiveGroup: null, priority: 100 };
+
+  const cat = archetype === 'component_matrix' ? 'component' : 'base';
+  const colKey = colConds
+    .map((c) => `${c.fieldPath}=${c.value1}`)
+    .sort()
+    .join(',');
+  const exclusiveGroup = `${entityType}|${cat}|${ext.detected_series ?? ''}|${colKey}`;
+
+  let width = 0;
+  let height = 0;
+  for (const c of sizeConds) {
+    if (c.operator !== 'LTE') continue;
+    const n = Number(c.value1) || 0;
+    if (/width/i.test(c.fieldPath ?? '')) width = n;
+    else if (/height/i.test(c.fieldPath ?? '')) height = n;
+  }
+  const priority = width * 10000 + height || 100;
+  return { exclusiveGroup, priority };
+}
+
 /** Compile a size/component matrix: one BASE_AMOUNT rule per priced cell. */
 async function compileMatrix(sb, ctx, archetype) {
   const { documentId, regionId, priceTableId, entityType, ext, grid, paths } = ctx;
@@ -218,19 +263,32 @@ async function compileMatrix(sb, ctx, archetype) {
   let count = 0;
   for (const cell of grid.cells ?? []) {
     const price = parsePrice(cell.price);
-    if (price == null) continue;
+    if (price == null || price <= 0) continue;
     const colLabel = colLabels[cell.col] ?? '';
     const rowLabel = rowLabels[cell.row] ?? '';
+    // Skip header / non-data cells that otherwise compile into junk rules
+    // (e.g. a "Price" column header parsed as a gauge value).
+    if (isHeaderish(rowLabel) || isHeaderish(colLabel)) continue;
+
+    const colConds = columnConditions(paths, colLabel);
+    const sizeConds = sizeConditions(paths, rowLabel);
+    // A base/component matrix row must carry a size axis; otherwise it's noise.
+    if (sizeConds.length === 0) continue;
+
+    const { exclusiveGroup, priority } = matrixStacking(entityType, archetype, ext, colConds, sizeConds);
     const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
       action_type: 'BASE_AMOUNT',
       charge_category: archetype === 'component_matrix' ? 'component' : 'base',
       amount: price,
+      exclusive_group: exclusiveGroup,
+      stacking_behavior: exclusiveGroup ? 'EXCLUSIVE_GROUP' : 'STACK',
+      priority,
       raw_value_text: `${rowLabel} | ${colLabel} = ${price}`,
     }));
     await insertConditions(sb, ruleId, [
       ...seriesCondition(paths, ext),
-      ...columnConditions(paths, colLabel),
-      ...sizeConditions(paths, rowLabel),
+      ...colConds,
+      ...sizeConds,
     ]);
     count++;
   }
