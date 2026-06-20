@@ -1,4 +1,15 @@
 /**
+ * @deprecated RETIRED PATH (superseded in Phase 3).
+ *
+ * The canonical pricing path is now the rule-based engine in
+ * `src/lib/pricing/engine.ts` (`priceOpening` / `priceOpeningCore`), driven by
+ * `price_rule` + `rule_condition` against a pinned `price_book_document`.
+ *
+ * This module remains ONLY to serve legacy grid consumers (the old builders,
+ * QuoteBuilderPage, CompareVendorsPanel, cpq/service.ts) until the Phase 6
+ * cutover drops the legacy `pricing_*` grid tables and deletes this file. Do not
+ * add new callers — use `@/lib/pricing` instead.
+ *
  * Runtime pricing lookup engine.
  *
  * Resolves a unit price for an estimate item by matching its stored field values
@@ -101,12 +112,15 @@ function matchDimensionCriteria(
   if (Object.keys(criteria).length === 0) return true; // empty = match all
   const c = criteria as Parameters<typeof dimensionMatches>[0];
   if (c.type === 'raw') {
-    // Parse the raw label as a comma-separated list of dimension strings
-    // Uses parseDoorDimension so "3-6" parses the same as stored nominal "36"
-    const parts = (c as { type: 'raw'; label: string }).label
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    // Pioneer masonry frame rows use composite labels like
+    // "6-8 | SINGLE OPENING (3S) | 2-0, 2-4" where everything before the
+    // last "|" is metadata (height, opening type). Extract only the segment
+    // after the last pipe so "2-0" isn't buried in an unparseable prefix.
+    const rawLabel = (c as { type: 'raw'; label: string }).label;
+    const dimensionSegment = rawLabel.includes('|')
+      ? rawLabel.split('|').pop()!
+      : rawLabel;
+    const parts = dimensionSegment.split(',').map((s) => s.trim()).filter(Boolean);
     return parts.some((p) => parseDoorDimension(p) === inches);
   }
   return dimensionMatches(c, inches);

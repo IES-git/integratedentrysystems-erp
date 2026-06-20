@@ -1259,6 +1259,12 @@ Per-canonical-code (per-item) copy-on-write overrides for `item_type_field_depen
 56. `add_kind_to_pricing_tables` - CPQ pricing remediation Phase 0. Added `kind TEXT NOT NULL DEFAULT 'base'` (CHECK base|component|adder|option) to `pricing_tables` + index `(category, series_value, kind)`. Backfilled existing rows from name heuristics. Door/frame base-price lookup now selects `kind='base'` (deterministic, no arbitrary pick); adder/option tables feed `pricing_adder_cells`.
 57. `spec_driven_series_resolution` - Spec-driven, manufacturer-aware series resolution. Added `pricing_tables.selection_criteria JSONB DEFAULT '{}'`. Renamed the thermal-fill field `core` -> `core_fill` (field_definitions + item_fields; no code refs). Created discriminator field_definitions `edge_construction` (Lockseam/Continuous Weld) and `core_construction` (Glued/Steel Stiffened/Embossed Panel) with option sets, added as door base fields. Engine now resolves the base table by matching a configured item's spec fields against `selection_criteria` scoped to category+manufacturer (series_value fallback retained). The 5 approved Pioneer base tables (H/CH/C/LW + F) were backfilled with their selection_criteria; the builder's manufacturer picker now lists vendors by category (`listManufacturersForCategory`) so users configure specs + pick a manufacturer and the price resolves without choosing a series.
 
+> CPQ v2 (Pioneer spec-pricing overhaul) migrations are catalogued in the **CPQ v2 — Spec-Driven Pricing Model** section below (Phase 0 list + per-phase notes), not in this legacy numbered list.
+
+58. `cpq_v2_add_entity_type_to_estimate_line` - Phase 5. Added `estimate_line.entity_type TEXT` so the auditable quote groups persisted lines into Pioneer/hardware layers.
+59. `cpq_v2_add_charge_category_to_estimate_line` - Phase 5. Added `estimate_line.charge_category TEXT` for layer grouping + hardware rollups; written by `persistEngineResult`.
+60. `cpq_v2_deprecate_legacy_grid_tables` - Phase 6 cutover prep. Marked `pricing_tables`/`pricing_columns`/`pricing_rows`/`pricing_cells`/`pricing_adder_cells` deprecated/read-only via table comments. The destructive drop (`db/migrations/retire_legacy_grid.sql`) is gated on Pioneer ingestion + round-trip QA and is NOT yet applied.
+
 ## Edge Functions
 
 ### ingest-price-book
@@ -1481,8 +1487,9 @@ Universal propose-only queue. Price-book ingestion and the exception agent never
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
-- `proposal_type` (TEXT, NOT NULL) - CHECK IN ('cell','column','row','adder','table','spec')
+- `proposal_type` (TEXT, NOT NULL) - CHECK IN ('cell','column','row','adder','table','spec','price_rule','dependency_rule','option','product_family','hardware_product','hardware_price'). The latter six are CPQ v2 rule/catalog/hardware proposals (Phase 2.0 bridge).
 - `target_table_id` (UUID, NULLABLE, FK → pricing_tables.id ON DELETE CASCADE)
+- `price_book_document_id` (UUID, NULLABLE, FK → price_book_document.id ON DELETE CASCADE) - CPQ v2 (Phase 2.0): the draft/published document version this proposal compiles rules into. Index `pricing_change_proposals_price_book_document_id_idx`.
 - `target_ids` (JSONB, NOT NULL, DEFAULT `{}`) - Identifiers needed to locate/create the target (rowId, columnId, canonicalCode, etc.)
 - `payload` (JSONB, NOT NULL, DEFAULT `{}`) - Proposed value(s); shape depends on `proposal_type`
 - `source` (TEXT, NOT NULL, DEFAULT 'manual') - CHECK IN ('ingestion','exception_agent','manual')
@@ -1561,9 +1568,10 @@ One row per uploaded vendor price book (manufacturer price list).
 - `extract_done` (INTEGER, NOT NULL, DEFAULT 0) - Tables successfully extracted so far in the current/last extract-all run.
 - `extract_failed` (INTEGER, NOT NULL, DEFAULT 0) - Tables that errored in the current/last extract-all run (retryable individually or by re-running).
 - `extract_error` (TEXT, NULLABLE) - Fatal error message if the extract-all job itself failed.
+- `price_book_document_id` (UUID, NULLABLE, FK → price_book_document.id ON DELETE SET NULL) - CPQ v2 (Phase 2.0): the immutable published `price_book_document` version this staging book links to. A draft document is created when ingestion begins; publishing flips its `status` to `published`. Index `price_books_price_book_document_id_idx`.
 - `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
-**Indexes:** on `company_id`, `ocr_status`, `created_at DESC`
+**Indexes:** on `company_id`, `ocr_status`, `created_at DESC`, `price_book_document_id`
 
 **RLS Policies:** ✅ enabled. Read/insert/update authenticated; delete own or admin. Trigger `set_price_books_updated_at`.
 
@@ -1574,7 +1582,7 @@ Staging row holding the agent's normalized grid for ONE table within a price boo
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `price_book_id` (UUID, NOT NULL, FK → price_books.id ON DELETE CASCADE)
-- `status` (TEXT, NOT NULL, DEFAULT 'pending') - CHECK IN ('pending','mapped','approved','discarded')
+- `status` (TEXT, NOT NULL, DEFAULT 'pending') - CHECK IN ('pending','mapped','compiled','approved','discarded'). CPQ v2 adds `compiled`: the rule compiler emitted `price_rule`/`dependency_rule` rows from this table's evidence and they await human approval.
 - `title` (TEXT, NULLABLE) - The table heading as printed in the book
 - `kind` (TEXT, NULLABLE) - 'size_grid' | 'flat_list' | 'adder'
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Document order
@@ -1586,10 +1594,14 @@ Staging row holding the agent's normalized grid for ONE table within a price boo
 - `grid` (JSONB, NOT NULL, DEFAULT `{}`) - `{ columnLabels, rowLabels, cells[], columnFieldHints }`
 - `warnings` (JSONB, NOT NULL, DEFAULT `[]`)
 - `spreadsheet_meta` (JSONB, NULLABLE) - Set for XLSX/CSV tables. `{ sheetIndex, headerRow, dataStartRow, dataEndRow, priceColIndices[], labelColIndex }` allows deterministic SheetJS re-extraction without re-sending numbers to Gemini.
-- `pricing_table_id` (UUID, NULLABLE, FK → pricing_tables.id ON DELETE SET NULL) - Set when the extraction is approved; links back to the created/updated pricing table for update-vs-create logic on re-upload.
+- `pricing_table_id` (UUID, NULLABLE, FK → pricing_tables.id ON DELETE SET NULL) - Legacy grid path: set when the extraction approved into a `pricing_tables` grid. NOT written by the CPQ v2 rule pipeline.
+- `archetype` (TEXT, NULLABLE) - CPQ v2 (Phase 2.0): the table-archetype classifier's result (`base_matrix`, `component_matrix`, `code_adder_list`, `elevation`, `size_oversize`, `per_foot`, `fabrication`, `install_kit`, `anchor`, `quantity_tier`, `percentage`, `next_larger`, `included_nc_na`, `contact_factory`, `specialty_assembly`, `narrative`). Drives how the rule compiler interprets the grid.
+- `source_region_id` (UUID, NULLABLE, FK → source_region.id ON DELETE SET NULL) - CPQ v2: the raw-evidence `source_region` this extraction produced (`raw_table_cell` rows hang off it). Index `price_book_extractions_source_region_id_idx`.
+- `price_book_document_id` (UUID, NULLABLE, FK → price_book_document.id ON DELETE SET NULL) - CPQ v2: the document version this extraction compiles rules into. Index `price_book_extractions_price_book_document_id_idx`.
+- `compiled_rule_count` (INTEGER, NOT NULL, DEFAULT 0) - CPQ v2: how many `price_rule`/`dependency_rule` rows the compiler emitted for this table.
 - `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
-**Indexes:** on `price_book_id`, `status`, `(price_book_id, sort_order)`
+**Indexes:** on `price_book_id`, `status`, `(price_book_id, sort_order)`, `source_region_id`, `price_book_document_id`
 
 **RLS Policies:** ✅ enabled. Full authenticated CRUD. Trigger `set_price_book_extractions_updated_at`.
 
@@ -1658,6 +1670,109 @@ Per-canonical-code copy-on-write overrides (NULL columns inherit the rule; `is_d
 **RLS Policies:** ✅ enabled. Full authenticated CRUD. Trigger `set_compatibility_rule_overrides_updated_at`.
 
 The engine (`src/lib/compatibility-engine.ts`) evaluates active rules against an opening's merged field map and is run in the wizard Review step (errors block Save, warnings inform) and by the CPQ service before quoting.
+
+---
+
+## CPQ v2 — Spec-Driven Pricing & Hardware Integration (Overhaul Phase 0)
+
+Greenfield rule-based pricing model from the Pioneer Spec Field Dictionary, Pioneer Ingestion & Pricing Schema, and the Hardware Data Integration workbook. These canonical tables coexist with the legacy grid model (`pricing_tables`/`pricing_cells`/...) until cutover, after which the legacy grid tables and `src/lib/pricing-lookup.ts` are retired. TypeScript types live in `src/types/cpq.ts` (re-exported from `src/types/index.ts`).
+
+**Conventions:** all tables have RLS enabled. Catalog/rule tables use *authenticated read, admin write* (`is_admin()`); estimate-derived tables use *full authenticated CRUD* (mirrors the relaxed standalone `estimate_items` policies — flagged `rls_policy_always_true` by the advisor, accepted for the current phase). Mutable tables have a `set_<table>_updated_at` trigger via `handle_updated_at()`.
+
+### Helper functions (internal)
+- `public._cpq_set_updated_at(p_table text)` — attaches the standard updated_at trigger.
+- `public._cpq_rls_admin_write(p_table text)` — enables RLS + policies `auth_read` (SELECT authenticated), `admin_insert`/`admin_update`/`admin_delete` (`is_admin()`).
+- `public._cpq_rls_auth_write(p_table text)` — enables RLS + full authenticated CRUD policies (`auth_read`/`auth_insert`/`auth_update`/`auth_delete`).
+- All three are `SET search_path = public, pg_temp`.
+
+### Raw evidence layer
+- **public.price_book_document** — one record per imported price-book revision. Cols: `id`, `manufacturer_id`→companies, `title`, `revision`, `effective_date`, `expiry_date`, `currency_code` (DEFAULT 'USD'), `source_file_path`, `source_file_hash`, `page_count`, `supersedes_id`→self, `status` CHECK('draft','published','superseded','archived'), `review_status` CHECK('UNREVIEWED','APPROVED','REJECTED','NEEDS_REVIEW'), `notes`, `created_by`→users, timestamps. (Folds in the legacy `price_books` concept.)
+- **public.source_region** — provenance per page/table/note/cell. Cols: `id`, `price_book_id`→price_book_document CASCADE, `page_number`, `region_type` CHECK('page','table','note','cell','image'), `bbox` JSONB, `table_title`, `raw_text`, `extraction_confidence`, `created_at`.
+- **public.raw_table_cell** — raw extracted cell + hierarchical headers. Cols: `id`, `source_region_id` CASCADE, `price_book_id` CASCADE, `row_index`, `col_index`, `row_headers`/`col_headers` JSONB, `raw_value`, `normalized_value`, `created_at`.
+
+### Canonical catalog layer
+- **public.product_family** — door/frame/panel/stick/specialty families (H, CH, F, DW, ...). Cols: `id`, `price_book_id` (NULL), `entity_type` CHECK('door','frame','panel','stick','specialty'), `family_code`, `name`, `default_attributes` JSONB, `description`, timestamps. Index `(entity_type, family_code)`.
+- **public.option_definition** — controlled vocabulary for option/prep/anchor/install codes. Cols: `id`, `entity_type` CHECK('opening','door','frame','panel','stick','special_frame','hardware'), `category`, `feature_number`, `code`, `description`, `template_required`, `hand_required`, `pdf_pages`, `notes`, timestamps. Index `(entity_type, code)`.
+- **public.price_table** — one per logical printed pricing table. Cols: `id`, `price_book_id` CASCADE, `entity_type`, `archetype` CHECK(16 archetypes: base_matrix, component_matrix, code_adder_list, elevation, size_oversize, per_foot, fabrication, install_kit, anchor, quantity_tier, percentage, next_larger, included_nc_na, contact_factory, specialty_assembly, narrative), `name`, `section`, `basis`, `unit`, `precedence`, `source_region_id`, timestamps.
+
+### Spec dictionary
+- **public.opening_spec_field** — the 172-field master schema. Cols: `id`, `field_id` UNIQUE (e.g. 'OPN-001','DOR-002'), `entity` CHECK('opening','door','frame','panel','special_frame','hardware'), `category`, `field_label`, `data_type`, `required_when`, `allowed_values`, `pricing_logic`, `pdf_pages`, `priced_by`, `sort_order`, timestamps.
+- **public.spec_field_mapping** — maps a spec field to a machine `field_path` used by `rule_condition`. Cols: `id`, `field_id`→opening_spec_field(field_id) CASCADE, `field_path`, `value_type` CHECK('TEXT','NUMBER','DIMENSION','BOOLEAN','CODE','DATE'), `notes`, `created_at`. UNIQUE `(field_id, field_path)`.
+
+### Pricing rule layer
+- **public.price_rule** — one canonical price action (per "Price Rule Columns" tab). Cols include: `id`, `rule_key` UNIQUE, `price_book_id` CASCADE, `price_table_id`, `entity_type` CHECK('door','frame','panel','stick','specialty','prep','anchor','packaging','hardware'), `charge_category`, `item_or_option_code`, `price_status` CHECK('PRICED','NO_CHARGE','INCLUDED','NOT_APPLICABLE','CONTACT_FACTORY'), `action_type` CHECK(14: BASE_AMOUNT, FIXED_ADD, FIXED_ADD_X_QTY, RATE_X_QUANTITY, PERCENT_OF, REFERENCE_PLUS_ADD, TIERED_ADD, WAIVER, OVERRIDE, NO_CHARGE, INCLUDED, NOT_APPLICABLE, CONTACT_FACTORY, EXTERNAL_REQUIRED), `amount`, `currency_code`, `unit_of_measure`, `quantity_basis_field`, `base_quantity_included`, `minimum_charge`, `maximum_charge`, `reference_rule_id`→self, `percentage`, `fixed_add_after_reference`, `rounding_method` CHECK, `rounding_increment`, `priority`, `stacking_behavior` CHECK('STACK','OVERRIDE','EXCLUSIVE_GROUP','SUPPRESS_IF_INCLUDED'), `exclusive_group`, `effective_from`/`effective_to`, `source_region_id`, `raw_value_text`, `extraction_confidence`, `review_status`, timestamps.
+- **public.rule_condition** — one selector predicate per row (per "Rule Condition Columns" tab). Cols: `id`, `price_rule_id` CASCADE, `condition_group`, `field_id`, `field_path`, `operator` CHECK('EQ','NE','IN','NOT_IN','GT','GTE','LT','LTE','BETWEEN','EXISTS','MISSING'), `value_type`, `value_1`, `value_2`, `unit`, `inclusive_min`, `inclusive_max`, `normalized_value`, `source_phrase`, `derived_flag`, `null_behavior` CHECK('FAIL','DEFAULT','IGNORE','MANUAL_REVIEW'), `created_at`.
+- **public.rule_action_parameter** — params for non-fixed actions. Cols: `id`, `price_rule_id` CASCADE, `param_key`, `param_value`, `reference_rule_id`, `created_at`.
+- **public.included_scope** — features bundled by a base/assembly rule (prevents double counting). Cols: `id`, `price_rule_id` CASCADE, `included_feature`, `included_option_code`, `suppresses_charge_category`, `notes`, `created_at`.
+- **public.quantity_tier** — quantity-dependent price/waiver tiers. Cols: `id`, `price_rule_id` CASCADE, `quantity_field`, `min_qty`, `max_qty`, `amount`, `status`, `is_setup_charge`, `created_at`.
+- **public.dependency_rule** — machine-testable requirement/exclusion (per "Dependency Schema" tab). Cols: `id`, `rule_key` UNIQUE, `price_book_id` CASCADE, `trigger_conditions` JSONB, `relationship_type` CHECK('REQUIRES','EXCLUDES','AUTO_ADD','SUPPRESSES','DEFAULTS','WARNS','REQUESTS_INPUT'), `target_type` CHECK('spec_field','option_code','price_rule','external_item','manual_quote'), `target_id_or_value`, `severity` CHECK('INFO','WARNING','ERROR','BLOCK_PRICING','BLOCK_ORDER'), `auto_apply_allowed`, `message_template`, `price_effect`, `source_region_id`, `priority`, `review_status`, timestamps.
+- **public.external_scope_requirement** — required item not priced by this book. Cols: `id`, `price_rule_id` (NULL), `category`, `required_attributes` JSONB, `description`, `created_at`.
+
+### Estimate layer
+- **public.estimate_line** — auditable price build-up (per "Estimate Output" tab). Cols: `id`, `estimate_id` CASCADE, `opening_id` CASCADE, `component_id`→estimate_items, `entity_type` (Phase 5: door/frame/panel/specialty/prep/hardware/anchor/packaging — drives the auditable-quote layer grouping), `line_type` CHECK('BASE','ADDER','INCLUDED','EXTERNAL','MANUAL_QUOTE','WARNING'), `price_rule_id`, `charge_category` (Phase 5: base/option/prep code/hardware category/keying/access_control/service scope — drives layer grouping + hardware rollups), `description`, `selected_option_code`, `quantity`, `unit_of_measure`, `unit_list_price`, `extended_list_price`, `discount_multiplier`, `extended_net_price`, `sell_price`, `gross_margin`, `gross_margin_pct`, `price_status` CHECK('PRICED','INCLUDED','NO_CHARGE','CONTACT_FACTORY','EXTERNAL_PENDING','INVALID'), `calculation_expression`, `matched_conditions` JSONB, `included_or_suppressed_by`, `source_page`, `source_region_id`, `price_book_id`, `confidence`, `review_status`, `exception_message`, `sort_order`, `created_at`. (Full authenticated CRUD.) Read into the auditable quote via `loadEstimateLinesByOpening` → `buildAuditableQuoteFromEstimateLines` (`src/lib/cpq/auditable-quote.ts`); completeness gated by `validateQuoteCompleteness` (`src/lib/cpq/completeness.ts`).
+- **public.manual_quote_queue** — CF/low-confidence/unresolved/invalid combos. Cols: `id`, `estimate_id` CASCADE, `opening_id`, `component_id`, `price_rule_id`, `reason` CHECK('CONTACT_FACTORY','LOW_CONFIDENCE','UNRESOLVED_REFERENCE','INVALID_COMBINATION','MISSING_PRICE'), `requested_inputs`, `status` CHECK('open','in_progress','resolved','cancelled'), `resolution_note`, timestamps. (Full authenticated CRUD.)
+- **public.qa_issue** — extraction/pricing validation issues (publication gate). Cols: `id`, `price_book_id` CASCADE, `price_rule_id`, `source_region_id`, `check_name`, `severity` CHECK('INFO','WARNING','ERROR','BLOCK'), `detail`, `status` CHECK('open','resolved','waived'), timestamps.
+
+### Hardware catalog (from the Hardware Data Integration workbook — 16-table schema)
+- **public.hardware_product** — generic product model. Cols: `id`, `category`, `subcategory`, `manufacturer_id`→companies, `manufacturer_name`, `product_family`, `model`, `description`, `active`, `source_row_ref`, `source_confidence`, timestamps.
+- **public.hardware_variant** — purchasable/configurable variant. Cols: `id`, `hardware_product_id` CASCADE, `sku`, `function`, `finish`, `size`, `hand`, `voltage`, `rating`, `material`, `option_attributes` JSONB, timestamps.
+- **public.hardware_attribute** — typed EAV attribute on a product/variant. Cols: `id`, `hardware_product_id` CASCADE, `hardware_variant_id` CASCADE, `attr_name`, `attr_value`, `attr_unit`, `source_text`, `created_at`.
+- **public.hardware_price_book** — vendor/supplier price source revision. Cols: `id`, `supplier_id`→companies, `supplier_name`, `title`, `effective_date`, `expiry_date`, `currency_code`, `source_file`, `review_status`, timestamps.
+- **public.hardware_price** — one price for one variant from one source (cost model). Cols: `id`, `hardware_variant_id` CASCADE, `hardware_price_book_id`, `list_price`, `discount_multiplier`, `net_cost` (= list × discount), `uom` (DEFAULT 'EACH'), `effective_from`/`effective_to`, `minimum_quantity`, `source_row_ref`, `review_status`, timestamps.
+- **public.hardware_sell_rule** — markup/customer sell rule (sell is computed, never hardcoded). Cols: `id`, `name`, `cost_basis` CHECK('net','list'), `markup_multiplier`, `gm_target_pct`, `rounding`, `customer_class`, `company_id`→companies, `category`, `effective_from`/`effective_to`, `priority`, timestamps.
+- **public.hardware_compatibility_rule** — product/category compatibility. Cols: `id`, `subject_type` CHECK('product','variant','category'), `subject_ref`, `relationship_type` CHECK('REQUIRES','EXCLUDES','ALLOWS'), `target_type`, `target_ref`, `allowed_ratings`, `allowed_sizes`, `allowed_functions`, `notes`, timestamps.
+- **public.hardware_prep_crosswalk** — THE bridge: hardware → Pioneer door/frame preps. Cols: `id`, `hardware_category`, `hardware_product_id`, `hardware_variant_id`, `door_prep_code`, `frame_prep_code`, `template_id`, `hand_required`, `location_required`, `additional_required_fields`, `quantity_basis`, `pricing_behavior`, `notes`, timestamps.
+- **public.hardware_template** — manufacturer prep template. Cols: `id`, `manufacturer_id`, `manufacturer_name`, `model_series`, `template_number`, `revision`, `document_link`, `dimensions` JSONB, timestamps.
+- **public.hardware_set_template** — reusable hardware set per opening type. Cols: `id`, `name`, `use_case`, `fire_rated`, `access_controlled`, `rated_flags` JSONB, `selection_conditions` JSONB, timestamps.
+- **public.hardware_set_item** — one category/quantity-formula within a set. Cols: `id`, `hardware_set_template_id` CASCADE, `category`, `quantity_formula`, `required`, `position`, `compatible_variants` JSONB, `created_at`.
+- **public.linear_hardware_rule** — length-driven weather/threshold/accessory pricing. Cols: `id`, `hardware_category`, `length_basis` CHECK('width','height','perimeter','head_plus_jambs','custom'), `cut_increment`, `waste_pct`, `minimum_length`, `per_foot_price`, `hardware_variant_id`, timestamps.
+- **public.service_scope** — install/labor/wiring/glazing/freight/tax price sources. Cols: `id`, `scope_type` CHECK('install','labor','wiring','glazing','freight','packaging','tax','commissioning','field_work'), `name`, `basis` CHECK('per_opening','per_leaf','per_unit','percent_of','flat','per_hour'), `rate`, `percent`, `reference_basis`, `notes`, timestamps.
+
+### Hardware estimate-scoped (full authenticated CRUD)
+- **public.keying_schedule** — project-level keying system. Cols: `id`, `estimate_id` CASCADE, `format`, `keyway`, `master_key_hierarchy` JSONB, `construction_core_strategy`, `notes`, timestamps.
+- **public.access_control_bundle** — door access-control BOM. Cols: `id`, `opening_id` CASCADE, `estimate_id` CASCADE, `reader`, `lock_strike`, `power_transfer`, `power_supply`, `dps`, `panel_io`, `cable_requirements`, `components` JSONB, `notes`, timestamps.
+- **public.opening_hardware_item** — selected hardware for one opening. Cols: `id`, `opening_id` CASCADE, `estimate_id` CASCADE, `component_id`→estimate_items, `hardware_variant_id`, `category`, `quantity`, `selected_finish`, `selected_function`, `selected_hand`, `source`, timestamps.
+- **public.quote_hardware_line** — resolved commercial hardware line. Cols: `id`, `opening_hardware_item_id` CASCADE, `estimate_id` CASCADE, `list_price`, `net_cost`, `sell_price`, `quantity`, `extension`, `gross_margin`, `gross_margin_pct`, `source`, `prep_links` JSONB, `status` CHECK('PRICED','EXTERNAL_PENDING','MANUAL_QUOTE','INVALID'), `created_at`.
+
+### Extended existing tables
+- **public.estimates** — added `price_book_id`→price_book_document (version pin) and `priced_as_of` TIMESTAMPTZ.
+- **public.estimate_openings** — added `configuration_type` CHECK('single','pair','double_egress','communicating','dutch','borrowed_lite','sidelite_transom','storefront','specialty'), `leaf_count` INTEGER, `opening_config` JSONB (OPN-* selectors).
+- **public.estimate_items** — added `product_family_id`→product_family and `spec_data` JSONB (resolved spec snapshot).
+
+### Migrations applied (Phase 0)
+`cpq_v2_rls_helpers`, `cpq_v2_raw_and_catalog_tables`, `cpq_v2_spec_dictionary`, `cpq_v2_rule_layer`, `cpq_v2_estimate_layer`, `cpq_v2_hardware_catalog`, `cpq_v2_hardware_estimate_scoped`, `cpq_v2_extend_estimate_tables`, `cpq_v2_helpers_search_path`.
+
+### Seed data (Phase 1)
+Seeded from the Pioneer Spec Field Dictionary + Hardware Data Integration workbooks (SQL committed in `db/seeds/cpq_v2/`):
+- `opening_spec_field` — 172 master spec fields (OPN/DOR/FRM/PNL/CNN/HWR).
+- `spec_field_mapping` — 172 machine `field_path`s (e.g. `DOR-002 -> door.door_series_construction`).
+- `option_definition` — ~472 controlled codes: door (~196), frame (~219), panel (~29) option/prep/anchor codes + 14 `entity_type='hardware'` `category='hardware_category'` taxonomy rows.
+- `product_family` — 38 door/frame series (H, CH, F, DW, specialty, ...).
+- `hardware_prep_crosswalk` — 21 hardware→door/frame prep mappings (the integration bridge).
+- `hardware_set_template`/`hardware_set_item` — 2 starter sets (Exterior fire-rated single; Interior pair).
+
+Migrations: `cpq_v2_seed_product_family`, `cpq_v2_seed_hardware_prep_crosswalk`, `cpq_v2_seed_hardware_category_dict`, `cpq_v2_seed_opening_spec_field_opn_dor`, `cpq_v2_seed_opening_spec_field_frm_hwr`, `cpq_v2_seed_spec_field_mapping`, `cpq_v2_seed_option_definition_door`, `cpq_v2_seed_option_definition_frame`, `cpq_v2_seed_option_definition_panel`, `cpq_v2_seed_hardware_set_templates`.
+
+Known follow-ups (Phase 1 polish): a few `option_definition` rows contain descriptive phrases or fraction-split noise from multi-code source cells (e.g. undercut `5/8`); harmless for vocabulary and can be cleaned later. Manufacturer alias map is deferred to Phase 2b (parser/normalizer concern).
+
+### Staging/extraction bridge (Phase 2.0)
+Wires the existing ingestion staging onto the canonical rule model without touching the legacy grid tables. Migration `cpq_v2_staging_extraction_bridge`:
+- **public.price_books** — added `price_book_document_id`→price_book_document (ON DELETE SET NULL). A draft document is created when ingestion begins; publishing flips its `status` to `published`. Indexed.
+- **public.price_book_extractions** — added `archetype` (classifier result), `source_region_id`→source_region (raw evidence), `price_book_document_id`→price_book_document, `compiled_rule_count` (rules emitted). `status` CHECK extended with `compiled`. Indexed on the two new FKs.
+- **public.pricing_change_proposals** — `proposal_type` CHECK extended with `price_rule`, `dependency_rule`, `option`, `product_family`, `hardware_product`, `hardware_price`; added `price_book_document_id`→price_book_document (ON DELETE CASCADE). Indexed.
+- Legacy `pricing_tables`/`pricing_cells`/`pricing_adder_cells` are NOT written by the new pipeline (read-only until Phase 6 retirement).
+
+### Output, QA & cutover (Phase 5 / Phase 6)
+Phase 5 (auditable output + QA gate):
+- **public.estimate_line** gained `entity_type` + `charge_category` (migrations `cpq_v2_add_entity_type_to_estimate_line`, `cpq_v2_add_charge_category_to_estimate_line`) so the persisted lines group into the auditable quote layers (Pioneer base/adders/preps · hardware · linear · keying · access control · services). The engine (`persistEngineResult`) writes both.
+- Auditable quote model + completeness validation + prep↔device reconciliation are pure libs (`src/lib/cpq/auditable-quote.ts`, `src/lib/cpq/completeness.ts`), rendered by `AuditableQuote.tsx` in both the live builder review and the wizard ReviewStep. The wizard "Save & Finish" is gated on completeness blockers (missing prices/templates, incompatible ratings, CF, unresolved scope) with an explicit acknowledge-override.
+- **QA publication gate** (`src/lib/cpq/qa-checks.ts`): `runAndPersistQaChecks(documentId)` writes findings to **public.qa_issue** (source completeness, value semantics, unit basis, rule overlap, hardware net reconciliation, dependency coverage); `publishPriceBookDocumentWithQa` blocks publish on ERROR/BLOCK findings unless overridden. Wired into `RuleReviewPanel`'s Publish action.
+- The **Example Opening** (`src/lib/cpq/example-opening.ts`) is the end-to-end round-trip fixture (3-0×7-0 exterior fire-rated single: cyl lock, closer, butt hinges, threshold, gasketing, DPS).
+
+Phase 6 (cutover, GATED — not yet executed; preconditions: Pioneer book ingested + round-trip QA green + estimates migrated + grid editors removed):
+- Legacy grid tables marked deprecated/read-only via comments (migration `cpq_v2_deprecate_legacy_grid_tables`).
+- The destructive drop lives in `db/migrations/retire_legacy_grid.sql` (drops `pricing_adder_cells`, `pricing_cells`, `pricing_rows`, `pricing_columns`, `pricing_tables`) — run only once the preconditions hold.
+- Existing estimates are re-entered into the engine model via `migrateAllEstimates()` (`src/lib/cpq/migrate-estimates.ts`), which reconstructs a NormalizedOpeningSpec per opening and persists `estimate_line` (explicit exceptions where no published rule exists yet).
 
 ---
 

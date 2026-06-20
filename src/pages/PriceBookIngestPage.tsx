@@ -22,8 +22,10 @@ import {
   approveAdderExtraction, listBaseTablesForVendor,
   findMatchingPricingTable, computeGridDiff,
   approveHardwareExtraction, resetExtractionGrid,
+  compilePriceBookTable, compileAllPriceBookTables, ingestHardwareBook,
   type ColumnMapping, type RowMapping, type BaseTableOption, type GridDiff, type HardwareRowMapping,
 } from '@/lib/price-books-api';
+import RuleReviewPanel from '@/components/pricing/RuleReviewPanel';
 import { getProposalForExtraction } from '@/lib/pricing-proposals-api';
 import { getFieldDefinitions } from '@/lib/estimates-api';
 import type {
@@ -110,10 +112,17 @@ export default function PriceBookIngestPage() {
   const [extraction, setExtraction] = useState<PriceBookExtraction | null>(null);
   // Read-only view of an already-extracted (often approved) table's grid.
   const [viewExtraction, setViewExtraction] = useState<PriceBookExtraction | null>(null);
+  // CPQ v2 rule review/approval (replaces grid mapping). Set to the extraction
+  // whose compiled price/dependency rules are being reviewed.
+  const [ruleReviewExt, setRuleReviewExt] = useState<PriceBookExtraction | null>(null);
+  const [compilingIds, setCompilingIds] = useState<Set<string>>(new Set());
+  const [compilingAll, setCompilingAll] = useState(false);
+  const [hardwareIngestingId, setHardwareIngestingId] = useState<string | null>(null);
   const [proposalId, setProposalId] = useState<string | null>(null);
   const [reviewName, setReviewName] = useState('');
   const [reviewCategory, setReviewCategory] = useState<PriceBookCategory>('doors');
   const [reviewSeries, setReviewSeries] = useState('');
+  const [reviewTableKind, setReviewTableKind] = useState<'base' | 'component'>('base');
   const [reviewVendorIds, setReviewVendorIds] = useState<string[]>([]);
   const [columnDrafts, setColumnDrafts] = useState<ColumnDraft[]>([]);
   const [rowDrafts, setRowDrafts] = useState<RowDraft[]>([]);
@@ -211,10 +220,12 @@ export default function PriceBookIngestPage() {
     }
   };
 
-  const reloadBookExtractions = async (book: PriceBook) => {
+  const reloadBookExtractions = async (book: PriceBook): Promise<PriceBookExtraction[] | undefined> => {
     try {
-      setBookExtractions(await listExtractionsForBook(book.id));
-    } catch { /* ignore */ }
+      const list = await listExtractionsForBook(book.id);
+      setBookExtractions(list);
+      return list;
+    } catch { /* ignore */ return undefined; }
   };
 
   const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set());
@@ -422,6 +433,10 @@ export default function PriceBookIngestPage() {
       setAdderMode(false);
       setHardwareMode(false);
       setDiffPreview(null);
+      // Auto-detect component tables from the title
+      const titleLower = (ext.title ?? '').toLowerCase();
+      const isComponent = /component|head|jamb|\bkd\b|knock.?down|parts/.test(titleLower);
+      setReviewTableKind(isComponent ? 'component' : 'base');
       setSpecDrafts(parseSpecSelectors(cat, ext.title ?? ''));
       setColumnDrafts(ext.grid.columnLabels.map((label, i) => ({
         gridCol: i,
@@ -574,6 +589,7 @@ export default function PriceBookIngestPage() {
         rows,
         grid: extraction.grid,
         selectionCriteria,
+        tableKind: reviewTableKind,
       });
       const action = result.wasUpdate ? 'Pricing table updated' : 'Pricing table created';
       toast({ title: action, description: `${result.cellsWritten} price${result.cellsWritten !== 1 ? 's' : ''} written (${result.rowsCreated} new rows, ${result.columnsCreated} new columns).` });
@@ -601,6 +617,64 @@ export default function PriceBookIngestPage() {
     }
   };
 
+  /**
+   * CPQ v2 — compile ONE extracted table's grid into canonical price/dependency
+   * rules on the worker, then reload. Opens the rule-review panel on success.
+   */
+  const compileGrid = async (ext: PriceBookExtraction) => {
+    if (!reviewBook) return;
+    setCompilingIds((prev) => new Set(prev).add(ext.id));
+    try {
+      const r = await compilePriceBookTable(ext.id);
+      toast({ title: 'Compiled to rules', description: `"${ext.title ?? 'Table'}" → ${r.ruleCount} rule(s) (${r.archetype}).` });
+      const updated = await reloadBookExtractions(reviewBook);
+      const fresh = updated?.find((e) => e.id === ext.id) ?? null;
+      if (fresh) setRuleReviewExt(fresh);
+    } catch (err) {
+      toast({ title: 'Compile failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setCompilingIds((prev) => { const next = new Set(prev); next.delete(ext.id); return next; });
+    }
+  };
+
+  /** CPQ v2 — compile every extracted table for the open book into rules. */
+  const compileAllGrids = async () => {
+    if (!reviewBook) return;
+    setCompilingAll(true);
+    try {
+      const r = await compileAllPriceBookTables(reviewBook.id);
+      toast({ title: 'Compiled all tables', description: `${r.done}/${r.total} tables → ${r.totalRules} rule(s)${r.failed ? ` (${r.failed} failed)` : ''}.` });
+      await reloadBookExtractions(reviewBook);
+    } catch (err) {
+      toast({ title: 'Compile-all failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setCompilingAll(false);
+    }
+  };
+
+  /**
+   * Phase 2b — ingest a hardware catalog workbook via the source-specific parser.
+   * Runs in the background; polls extract_status. The parsed catalog + queued net
+   * mismatches land as pricing_change_proposals for review.
+   */
+  const handleIngestHardware = async (book: PriceBook) => {
+    if (!confirm(`Ingest "${book.name}" as a hardware catalog? This parses it via the source-column map and queues products + price mismatches for review.`)) return;
+    setHardwareIngestingId(book.id);
+    try {
+      await ingestHardwareBook(book.id);
+      const finished = await pollExtractAllStatus(book.id, {});
+      toast({
+        title: 'Hardware ingested',
+        description: `${finished.extractDone} variant(s) built${finished.extractFailed ? `, ${finished.extractFailed} net mismatch(es) queued for review` : ''}. Review in the proposals queue.`,
+      });
+      await loadList();
+    } catch (err) {
+      toast({ title: 'Hardware ingestion failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setHardwareIngestingId(null);
+    }
+  };
+
   const handleDelete = async (book: PriceBook) => {
     if (!confirm(`Delete price book "${book.name}"? This cannot be undone.`)) return;
     try {
@@ -615,6 +689,22 @@ export default function PriceBookIngestPage() {
     const cell = extraction?.grid.cells.find((c) => c.row === rowIdx && c.col === colIdx);
     return cell?.price ?? null;
   };
+
+  // ---------------------------------------------------------------- Rule review/approval (CPQ v2)
+  if (reviewBook && ruleReviewExt) {
+    return (
+      <RuleReviewPanel
+        book={reviewBook}
+        extraction={ruleReviewExt}
+        onClose={() => setRuleReviewExt(null)}
+        onChanged={async () => {
+          const list = await reloadBookExtractions(reviewBook);
+          const fresh = list?.find((e) => e.id === ruleReviewExt.id);
+          if (fresh) setRuleReviewExt(fresh);
+        }}
+      />
+    );
+  }
 
   // ---------------------------------------------------------------- Read-only grid view
   if (reviewBook && viewExtraction) {
@@ -917,6 +1007,19 @@ export default function PriceBookIngestPage() {
                 >
                   Assign
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                  onClick={() => {
+                    // Remove selected rows and re-index selection
+                    setAdderRows((prev) => prev.filter((_, i) => !adderSelectedRows.has(i)));
+                    setAdderSelectedRows(new Set());
+                  }}
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                  Delete {adderSelectedRows.size}
+                </Button>
                 <Button size="sm" variant="ghost" onClick={() => setAdderSelectedRows(new Set())}>
                   Clear
                 </Button>
@@ -1152,13 +1255,28 @@ export default function PriceBookIngestPage() {
             </div>
             <div className="space-y-1">
               <Label>Series / product line</Label>
-              <Input value={reviewSeries} onChange={(e) => setReviewSeries(e.target.value)} placeholder="e.g. CH" />
+              <Input value={reviewSeries} onChange={(e) => setReviewSeries(e.target.value)} placeholder="e.g. F Series" />
             </div>
             <div className="space-y-1">
+              <Label>Table kind</Label>
+              <Select value={reviewTableKind} onValueChange={(v) => setReviewTableKind(v as 'base' | 'component')}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="base">Base — complete unit size grid</SelectItem>
+                  <SelectItem value="component">Component — heads &amp; jambs sold separately (KD)</SelectItem>
+                </SelectContent>
+              </Select>
+              {reviewTableKind === 'component' && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Used when <code className="bg-muted px-0.5 rounded text-[11px]">frame_construction=KD</code> is selected on the frame item.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1 sm:col-span-2">
               <Label>Manufacturers</Label>
-              <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border p-2">
+              <div className="flex flex-wrap gap-3 rounded-md border p-3">
                 {manufacturers.map((m) => (
-                  <label key={m.id} className="flex items-center gap-2 text-sm">
+                  <label key={m.id} className="flex items-center gap-2 text-sm cursor-pointer">
                     <Checkbox checked={reviewVendorIds.includes(m.id)} onCheckedChange={() => toggleVendor(m.id)} />
                     {m.name}
                   </label>
@@ -1345,7 +1463,7 @@ export default function PriceBookIngestPage() {
                   setDiffLoading(true);
                   try {
                     const sc = Object.fromEntries(specDrafts.filter((s) => s.key.trim() && s.value.trim()).map((s) => [s.key.trim(), s.value.trim()]));
-                    const existingId = await findMatchingPricingTable(reviewVendorIds[0], reviewCategory, sc);
+                    const existingId = await findMatchingPricingTable(reviewVendorIds[0], reviewCategory, sc, reviewTableKind);
                     if (existingId) {
                       const columns: ColumnMapping[] = columnDrafts.map((c) => {
                         const criteria: import('@/types').ColumnCriteria = c.fieldKey.trim() ? { [c.fieldKey.trim()]: c.value.trim() } : {};
@@ -1420,6 +1538,12 @@ export default function PriceBookIngestPage() {
                     : 'Extract all grids'}
                 </Button>
               )}
+              {hasPriceBookWorker && bookExtractions.some((e) => e.gridExtracted && e.status !== 'approved' && e.status !== 'discarded') && (
+                <Button size="sm" variant="outline" onClick={compileAllGrids} disabled={compilingAll}>
+                  {compilingAll ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                  {compilingAll ? 'Compiling…' : 'Compile all to rules'}
+                </Button>
+              )}
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -1435,12 +1559,14 @@ export default function PriceBookIngestPage() {
                   ? <Badge className="bg-green-600 hover:bg-green-600 shrink-0"><CheckCircle2 className="mr-1 h-3 w-3" />Approved</Badge>
                   : ext.status === 'discarded'
                     ? <Badge variant="outline" className="shrink-0">Discarded</Badge>
+                    : ext.status === 'compiled'
+                      ? <Badge className="bg-indigo-600 hover:bg-indigo-600 shrink-0">{ext.compiledRuleCount} rule(s) · review</Badge>
                     : gridEmpty
                       ? <Badge variant="destructive" className="shrink-0"><AlertCircle className="mr-1 h-3 w-3" />Empty grid</Badge>
                       : gridTruncated
                         ? <Badge className="bg-amber-500 hover:bg-amber-500 shrink-0"><AlertCircle className="mr-1 h-3 w-3" />Truncated</Badge>
                         : ext.gridExtracted
-                          ? <Badge variant="secondary" className="shrink-0">Ready to map</Badge>
+                          ? <Badge variant="secondary" className="shrink-0">Ready to compile</Badge>
                           : <Badge variant="outline" className="text-muted-foreground shrink-0">Not extracted</Badge>;
 
                 return (
@@ -1479,11 +1605,37 @@ export default function PriceBookIngestPage() {
 
                     {/* Right: action buttons */}
                     <div className="flex items-center gap-2 shrink-0">
-                      {/* Approved: view only */}
+                      {/* Approved: view grid + (CPQ v2) view compiled rules */}
                       {ext.status === 'approved' && (
-                        <Button size="sm" variant="outline" onClick={() => setViewExtraction(ext)}>
-                          <Eye className="mr-1.5 h-3.5 w-3.5" />View
-                        </Button>
+                        <>
+                          {ext.sourceRegionId && (
+                            <Button size="sm" variant="outline" onClick={() => setRuleReviewExt(ext)}>
+                              <Eye className="mr-1.5 h-3.5 w-3.5" />Rules
+                            </Button>
+                          )}
+                          <Button size="sm" variant="outline" onClick={() => setViewExtraction(ext)}>
+                            <Eye className="mr-1.5 h-3.5 w-3.5" />Grid
+                          </Button>
+                        </>
+                      )}
+
+                      {/* Compiled: review + approve the rules (CPQ v2) */}
+                      {ext.status === 'compiled' && (
+                        <>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            title="Re-compile rules from the extracted grid"
+                            disabled={compilingIds.has(ext.id)}
+                            onClick={() => compileGrid(ext)}
+                          >
+                            {compilingIds.has(ext.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                          </Button>
+                          <Button size="sm" onClick={() => setRuleReviewExt(ext)}>
+                            Review rules
+                          </Button>
+                        </>
                       )}
 
                       {/* Pending + not yet extracted */}
@@ -1526,8 +1678,14 @@ export default function PriceBookIngestPage() {
                             </Button>
                           )}
 
-                          <Button size="sm" onClick={() => openTable(reviewBook, ext)} disabled={busy}>
-                            Map &amp; approve
+                          {hasPriceBookWorker && !needsReExtract && (
+                            <Button size="sm" onClick={() => compileGrid(ext)} disabled={busy || compilingIds.has(ext.id)}>
+                              {compilingIds.has(ext.id) ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                              Compile to rules
+                            </Button>
+                          )}
+                          <Button size="sm" variant="outline" onClick={() => openTable(reviewBook, ext)} disabled={busy} title="Legacy grid mapping (retired at cutover)">
+                            Map (legacy)
                           </Button>
                         </>
                       )}
@@ -1628,6 +1786,12 @@ export default function PriceBookIngestPage() {
                     <TableCell>{statusBadge(b.ocrStatus)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
+                        {hasPriceBookWorker && b.category === 'hardware' && (b.fileType === 'xlsx' || b.fileType === 'csv') && (
+                          <Button size="sm" variant="outline" onClick={() => handleIngestHardware(b)} disabled={hardwareIngestingId === b.id}>
+                            {hardwareIngestingId === b.id ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                            Ingest hardware
+                          </Button>
+                        )}
                         {b.ocrStatus === 'done' && (
                           <Button size="sm" onClick={() => openReview(b)}>Review &amp; approve</Button>
                         )}

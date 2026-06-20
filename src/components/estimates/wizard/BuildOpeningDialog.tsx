@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import {
@@ -549,20 +550,40 @@ export function BuildOpeningDialog({
     const activeDoor = doorItems[0] ?? null;
     const handingValue = activeDoor?.fields.find((f) => f.fieldKey === DOOR_HANDING_KEY)?.fieldValue ?? '';
 
+    let updatedItem: LocalTopLevelItem = item;
+
+    // Sync handing from door → frame.
     if (handingValue) {
-      const hasHandField = item.fields.some((f) => f.fieldKey === FRAME_HANDING_KEY);
-      const updatedItem: LocalTopLevelItem = hasHandField
-        ? {
-            ...item,
-            fields: item.fields.map((f) =>
-              f.fieldKey === FRAME_HANDING_KEY ? { ...f, fieldValue: handingValue } : f
-            ),
-          }
-        : item;
-      setFrameItems((prev) => [...prev, updatedItem]);
-    } else {
-      setFrameItems((prev) => [...prev, item]);
+      const hasHandField = updatedItem.fields.some((f) => f.fieldKey === FRAME_HANDING_KEY);
+      if (hasHandField) {
+        updatedItem = {
+          ...updatedItem,
+          fields: updatedItem.fields.map((f) =>
+            f.fieldKey === FRAME_HANDING_KEY ? { ...f, fieldValue: handingValue } : f
+          ),
+        };
+      }
     }
+
+    // Inject opening dimensions from the door so frame pricing can find a row.
+    // Frame catalog items don't carry opening_width/opening_height — we add them
+    // as locked hidden fields so the pricing engine (resolveFramePrice) has what
+    // it needs. handleDoorFieldChange will keep them in sync if the door dims change.
+    const openingWidth = activeDoor?.fields.find((f) => f.fieldKey === 'opening_width')?.fieldValue ?? '';
+    const openingHeight = activeDoor?.fields.find((f) => f.fieldKey === 'opening_height')?.fieldValue ?? '';
+
+    const dimFields: LocalField[] = [];
+    if (openingWidth && !updatedItem.fields.some((f) => f.fieldKey === 'opening_width')) {
+      dimFields.push({ localId: newLocalId(), fieldKey: 'opening_width', fieldLabel: 'Nominal Width', fieldValue: openingWidth, valueType: 'string', isRequired: false, isLocked: true });
+    }
+    if (openingHeight && !updatedItem.fields.some((f) => f.fieldKey === 'opening_height')) {
+      dimFields.push({ localId: newLocalId(), fieldKey: 'opening_height', fieldLabel: 'Nominal Height', fieldValue: openingHeight, valueType: 'string', isRequired: false, isLocked: true });
+    }
+    if (dimFields.length > 0) {
+      updatedItem = { ...updatedItem, fields: [...dimFields, ...updatedItem.fields] };
+    }
+
+    setFrameItems((prev) => [...prev, updatedItem]);
   };
 
   const handleSelectPanel = (item: LocalTopLevelItem) => {

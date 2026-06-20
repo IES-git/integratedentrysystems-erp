@@ -1,13 +1,27 @@
 /**
- * Live (read-only) pricing for in-progress builder items (CPQ Phase 5).
+ * Live (read-only) pricing for the in-progress builder.
  *
- * Builds a synthetic EstimateItem + ItemField[] from an unsaved opening-builder
- * selection and runs it through the same pricing engine used at Review time,
- * so the builder can show a per-piece price before anything is persisted.
+ * Phase 3+: the unified spec builder prices a whole opening through the
+ * rule-based engine (`priceOpeningLive`). The legacy per-item path
+ * (`priceLocalItem`) still runs the grid lookup for the old builders until the
+ * Phase 6 cutover; new code should use `priceOpeningLive`.
  */
 
 import { resolveItemPrice } from '@/lib/pricing-lookup';
+import { priceOpening } from '@/lib/pricing';
+import type { EngineOptions, EngineResult, NormalizedOpeningSpec } from '@/lib/pricing';
 import type { ItemField, PriceResult } from '@/types';
+
+/**
+ * Prices a whole opening spec through the rule engine without persisting — the
+ * canonical live-pricing path for the unified builder.
+ */
+export async function priceOpeningLive(
+  spec: NormalizedOpeningSpec,
+  options: Omit<EngineOptions, 'persist'> = { priceBookDocumentId: null },
+): Promise<EngineResult> {
+  return priceOpening(spec, { ...options, persist: false });
+}
 
 export interface LivePriceInput {
   /** item_type slug, e.g. 'doors', 'frames', 'panels', 'lites_louvers_glass', 'hardware-hinge'. */

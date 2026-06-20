@@ -31,7 +31,7 @@ import {
   updateEstimateOpening,
 } from '@/lib/estimates-api';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
-import { BuildOpeningDialog } from './BuildOpeningDialog';
+import { SpecOpeningBuilder } from './SpecOpeningBuilder';
 import { ChooseExistingOpeningDialog } from './ChooseExistingOpeningDialog';
 import type { EstimateOpeningWithItems, OpeningTemplateType } from '@/types';
 
@@ -437,12 +437,17 @@ export function OpeningsStep({
     }
   };
 
-  const handleOpeningSaved = (newOpening: EstimateOpeningWithItems) => {
-    setOpenings((prev) => [...prev, newOpening]);
-  };
-
-  const handleOpeningUpdated = (updated: EstimateOpeningWithItems) => {
-    setOpenings((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+  /**
+   * Refresh the openings list from the server. The unified spec builder persists
+   * components/hardware/lines directly, so we re-read to reflect the saved shape.
+   */
+  const refreshOpenings = async (eid: string) => {
+    try {
+      const fresh = await getEstimateOpenings(eid);
+      setOpenings(fresh);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to refresh openings.');
+    }
   };
 
   const handleEditOpening = (opening: EstimateOpeningWithItems) => {
@@ -481,19 +486,23 @@ export function OpeningsStep({
 
   return (
     <>
-      {/* BuildOpeningDialog — estimate created lazily inside handleSave */}
-      <BuildOpeningDialog
+      {/* SpecOpeningBuilder — unified spec-driven configurator (estimate created lazily) */}
+      <SpecOpeningBuilder
         estimateId={resolvedId}
         resolveEstimateId={resolvedId ? undefined : getOrCreateId}
         open={buildDialogOpen}
         onOpenChange={handleBuildDialogOpenChange}
         onSaved={(opening) => {
-          if (!resolvedId && opening.estimateId) setResolvedId(opening.estimateId);
-          handleOpeningSaved(opening);
+          const eid = opening.estimateId ?? resolvedId;
+          if (eid) {
+            if (!resolvedId) setResolvedId(eid);
+            void refreshOpenings(eid);
+          }
         }}
-        onUpdated={handleOpeningUpdated}
         openingCount={openings.length}
-        editingOpening={editingOpening ?? undefined}
+        editingOpeningId={editingOpening?.id ?? null}
+        editingName={editingOpening?.name}
+        editingQuantity={editingOpening?.quantity}
       />
 
       {/* ChooseExistingOpeningDialog — estimate created lazily inside handleCopy */}

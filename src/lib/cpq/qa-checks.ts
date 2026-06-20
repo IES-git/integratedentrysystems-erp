@@ -1,0 +1,308 @@
+/**
+ * Price-book QA publication gate (Phase 5).
+ *
+ * Implements the Pioneer "QA Checks" tab + the hardware data-quality checks as
+ * a gate that runs before a `price_book_document` is published: source
+ * completeness, value semantics, unit basis, rule overlap, hardware net
+ * reconciliation, and dependency coverage. Findings persist to `qa_issue` and
+ * ERROR/BLOCK findings stop publication so no book goes live with silent gaps.
+ *
+ * The pure evaluators (`evaluateRuleQa` / `evaluateHardwareQa`) are DB-free and
+ * unit-tested; the DB wrapper loads, persists, and gates.
+ */
+
+import { supabase } from '@/lib/supabase';
+import { publishPriceBookDocument } from '@/lib/price-rules-api';
+import type { QaIssueSeverity } from '@/types';
+
+export interface QaFinding {
+  checkName: string;
+  severity: QaIssueSeverity;
+  detail: string;
+  priceRuleId?: string | null;
+  sourceRegionId?: string | null;
+}
+
+export interface QaResult {
+  findings: QaFinding[];
+  /** ERROR + BLOCK findings — these stop publication. */
+  blockingCount: number;
+  warningCount: number;
+  /** True when no blocking findings remain. */
+  passed: boolean;
+}
+
+/** Minimal rule shape the QA evaluators need (one per price_rule). */
+export interface QaRule {
+  id: string;
+  entityType: string;
+  chargeCategory: string | null;
+  itemOrOptionCode: string | null;
+  priceStatus: string;
+  actionType: string;
+  amount: number | null;
+  percentage: number | null;
+  referenceRuleId: string | null;
+  unitOfMeasure: string | null;
+  quantityBasisField: string | null;
+  sourceRegionId: string | null;
+  rawValueText: string | null;
+  exclusiveGroup: string | null;
+  /** Stable serialization of the rule's conditions, for overlap detection. */
+  conditionsKey: string;
+}
+
+export interface QaHardwarePrice {
+  id: string;
+  listPrice: number | null;
+  discountMultiplier: number | null;
+  netCost: number | null;
+}
+
+/** Actions whose price legitimately has no numeric amount. */
+const NON_NUMERIC_ACTIONS = new Set([
+  'CONTACT_FACTORY',
+  'EXTERNAL_REQUIRED',
+  'NO_CHARGE',
+  'INCLUDED',
+  'NOT_APPLICABLE',
+  'WAIVER',
+  'PERCENT_OF',
+  'REFERENCE_PLUS_ADD',
+  'TIERED_ADD',
+]);
+
+const QTY_BASED_ACTIONS = new Set(['RATE_X_QUANTITY', 'FIXED_ADD_X_QTY']);
+
+/**
+ * Evaluates the rule-side QA checks (source completeness, value semantics, unit
+ * basis, rule overlap) over a document's price rules.
+ */
+export function evaluateRuleQa(rules: QaRule[]): QaFinding[] {
+  const findings: QaFinding[] = [];
+
+  for (const r of rules) {
+    // Source completeness — every rule must cite its evidence.
+    if (!r.sourceRegionId) {
+      findings.push({ checkName: 'source_completeness', severity: 'WARNING', priceRuleId: r.id, detail: `Rule ${r.id} has no source region citation.` });
+    }
+    if (!r.rawValueText) {
+      findings.push({ checkName: 'source_completeness', severity: 'INFO', priceRuleId: r.id, sourceRegionId: r.sourceRegionId, detail: `Rule ${r.id} has no raw source text snapshot.` });
+    }
+
+    // Value semantics — numeric actions must carry a sane amount.
+    if (!NON_NUMERIC_ACTIONS.has(r.actionType)) {
+      if (r.amount == null) {
+        findings.push({ checkName: 'value_semantics', severity: 'ERROR', priceRuleId: r.id, sourceRegionId: r.sourceRegionId, detail: `Rule ${r.id} (${r.actionType}) has no amount.` });
+      } else if (r.amount < 0) {
+        findings.push({ checkName: 'value_semantics', severity: 'ERROR', priceRuleId: r.id, sourceRegionId: r.sourceRegionId, detail: `Rule ${r.id} has a negative amount (${r.amount}).` });
+      }
+    }
+    if (r.actionType === 'PERCENT_OF' && (r.percentage == null || r.percentage <= 0)) {
+      findings.push({ checkName: 'value_semantics', severity: 'ERROR', priceRuleId: r.id, sourceRegionId: r.sourceRegionId, detail: `PERCENT_OF rule ${r.id} has no valid percentage.` });
+    }
+    if ((r.actionType === 'PERCENT_OF' || r.actionType === 'REFERENCE_PLUS_ADD') && !r.referenceRuleId) {
+      findings.push({ checkName: 'value_semantics', severity: 'ERROR', priceRuleId: r.id, sourceRegionId: r.sourceRegionId, detail: `Reference action ${r.id} (${r.actionType}) has no reference rule.` });
+    }
+
+    // Unit basis — quantity-based rules need a unit + basis field.
+    if (QTY_BASED_ACTIONS.has(r.actionType)) {
+      if (!r.unitOfMeasure) {
+        findings.push({ checkName: 'unit_basis', severity: 'WARNING', priceRuleId: r.id, sourceRegionId: r.sourceRegionId, detail: `Quantity-based rule ${r.id} has no unit of measure.` });
+      }
+      if (!r.quantityBasisField) {
+        findings.push({ checkName: 'unit_basis', severity: 'WARNING', priceRuleId: r.id, sourceRegionId: r.sourceRegionId, detail: `Quantity-based rule ${r.id} has no quantity basis field.` });
+      }
+    }
+  }
+
+  // Rule overlap — two unconditioned BASE rules for the same entity/category
+  // that aren't in an exclusive group would double-count the base.
+  const baseKey = new Map<string, QaRule[]>();
+  for (const r of rules) {
+    if (r.actionType !== 'BASE_AMOUNT') continue;
+    const key = `${r.entityType}|${r.chargeCategory ?? ''}|${r.conditionsKey}`;
+    if (!baseKey.has(key)) baseKey.set(key, []);
+    baseKey.get(key)!.push(r);
+  }
+  for (const [key, group] of baseKey) {
+    if (group.length < 2) continue;
+    const allInExclusive = group.every((g) => g.exclusiveGroup);
+    if (allInExclusive) continue;
+    findings.push({
+      checkName: 'rule_overlap',
+      severity: 'WARNING',
+      priceRuleId: group[0].id,
+      detail: `${group.length} BASE rules share conditions (${key}) without an exclusive group — risk of double-counting.`,
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * Evaluates the hardware data-quality checks (net reconciliation) — list ×
+ * discount should equal net within 1%; rows that don't reconcile or have no
+ * resolvable net are flagged for human review before publish.
+ */
+export function evaluateHardwareQa(prices: QaHardwarePrice[]): QaFinding[] {
+  const findings: QaFinding[] = [];
+  for (const p of prices) {
+    const hasNet = p.netCost != null;
+    const canCompute = p.listPrice != null && p.discountMultiplier != null;
+    if (!hasNet && !canCompute) {
+      findings.push({ checkName: 'net_reconciliation', severity: 'ERROR', detail: `Hardware price ${p.id} has neither a net cost nor list × discount.` });
+      continue;
+    }
+    if (hasNet && canCompute) {
+      const computed = p.listPrice! * p.discountMultiplier!;
+      const denom = Math.abs(p.netCost!) || 1;
+      const drift = Math.abs(computed - p.netCost!) / denom;
+      if (drift > 0.01) {
+        findings.push({
+          checkName: 'net_reconciliation',
+          severity: 'WARNING',
+          detail: `Hardware price ${p.id}: list × discount (${computed.toFixed(2)}) ≠ net (${p.netCost!.toFixed(2)}), drift ${(drift * 100).toFixed(1)}%.`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+/** Dependency coverage — a published book should carry at least some narrative deps. */
+export function evaluateDependencyCoverage(ruleCount: number, dependencyCount: number): QaFinding[] {
+  if (ruleCount > 0 && dependencyCount === 0) {
+    return [{ checkName: 'dependency_coverage', severity: 'INFO', detail: 'No dependency rules compiled — verify the book has no requires/excludes/auto-add narrative.' }];
+  }
+  return [];
+}
+
+function summarize(findings: QaFinding[]): QaResult {
+  const blockingCount = findings.filter((f) => f.severity === 'ERROR' || f.severity === 'BLOCK').length;
+  const warningCount = findings.filter((f) => f.severity === 'WARNING').length;
+  return { findings, blockingCount, warningCount, passed: blockingCount === 0 };
+}
+
+/** Combines all pure QA evaluators into one result. */
+export function evaluateQa(input: {
+  rules: QaRule[];
+  hardwarePrices: QaHardwarePrice[];
+  dependencyCount: number;
+}): QaResult {
+  return summarize([
+    ...evaluateRuleQa(input.rules),
+    ...evaluateHardwareQa(input.hardwarePrices),
+    ...evaluateDependencyCoverage(input.rules.length, input.dependencyCount),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// DB-backed gate
+// ---------------------------------------------------------------------------
+
+function conditionsKey(conds: Record<string, unknown>[]): string {
+  return conds
+    .map((c) => `${c.field_path ?? c.field_id ?? ''}:${c.operator ?? ''}:${c.value_1 ?? ''}:${c.value_2 ?? ''}`)
+    .sort()
+    .join('|');
+}
+
+/** Loads a document's rules + hardware prices and runs the QA evaluators. */
+export async function runQaChecks(documentId: string): Promise<QaResult> {
+  const [{ data: ruleRows, error: rErr }, { data: depRows, error: dErr }, { data: priceRows, error: pErr }] = await Promise.all([
+    supabase.from('price_rule').select('*, rule_condition(field_path, field_id, operator, value_1, value_2)').eq('price_book_id', documentId),
+    supabase.from('dependency_rule').select('id', { count: 'exact' }).eq('price_book_id', documentId),
+    supabase.from('hardware_price').select('id, list_price, discount_multiplier, net_cost').neq('review_status', 'REJECTED'),
+  ]);
+  if (rErr) throw new Error(`QA: failed to load rules: ${rErr.message}`);
+  if (dErr) throw new Error(`QA: failed to load dependency rules: ${dErr.message}`);
+  if (pErr) throw new Error(`QA: failed to load hardware prices: ${pErr.message}`);
+
+  const rules: QaRule[] = (ruleRows ?? []).map((row) => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      entityType: (r.entity_type as string) ?? '',
+      chargeCategory: (r.charge_category as string | null) ?? null,
+      itemOrOptionCode: (r.item_or_option_code as string | null) ?? null,
+      priceStatus: (r.price_status as string) ?? '',
+      actionType: (r.action_type as string) ?? '',
+      amount: r.amount == null ? null : Number(r.amount),
+      percentage: r.percentage == null ? null : Number(r.percentage),
+      referenceRuleId: (r.reference_rule_id as string | null) ?? null,
+      unitOfMeasure: (r.unit_of_measure as string | null) ?? null,
+      quantityBasisField: (r.quantity_basis_field as string | null) ?? null,
+      sourceRegionId: (r.source_region_id as string | null) ?? null,
+      rawValueText: (r.raw_value_text as string | null) ?? null,
+      exclusiveGroup: (r.exclusive_group as string | null) ?? null,
+      conditionsKey: conditionsKey((r.rule_condition as Record<string, unknown>[] | undefined) ?? []),
+    };
+  });
+
+  const hardwarePrices: QaHardwarePrice[] = (priceRows ?? []).map((row) => {
+    const p = row as Record<string, unknown>;
+    return {
+      id: p.id as string,
+      listPrice: p.list_price == null ? null : Number(p.list_price),
+      discountMultiplier: p.discount_multiplier == null ? null : Number(p.discount_multiplier),
+      netCost: p.net_cost == null ? null : Number(p.net_cost),
+    };
+  });
+
+  return evaluateQa({ rules, hardwarePrices, dependencyCount: depRows?.length ?? 0 });
+}
+
+/** Runs QA, replaces the document's open qa_issue rows, and returns the result. */
+export async function runAndPersistQaChecks(documentId: string): Promise<QaResult> {
+  const result = await runQaChecks(documentId);
+
+  // Clear prior open issues for this document, then persist the fresh findings.
+  await supabase.from('qa_issue').delete().eq('price_book_id', documentId).eq('status', 'open');
+
+  if (result.findings.length > 0) {
+    const rows = result.findings.map((f) => ({
+      price_book_id: documentId,
+      price_rule_id: f.priceRuleId ?? null,
+      source_region_id: f.sourceRegionId ?? null,
+      check_name: f.checkName,
+      severity: f.severity,
+      detail: f.detail,
+      status: 'open',
+    }));
+    const { error } = await supabase.from('qa_issue').insert(rows);
+    if (error) throw new Error(`QA: failed to persist issues: ${error.message}`);
+  }
+
+  return result;
+}
+
+export class QaGateError extends Error {
+  constructor(public readonly result: QaResult) {
+    super(`QA gate blocked publication: ${result.blockingCount} blocking issue(s).`);
+    this.name = 'QaGateError';
+  }
+}
+
+export interface PublishWithQaOptions {
+  supersedesId?: string | null;
+  /** Publish despite blocking QA findings (records an explicit override). */
+  override?: boolean;
+}
+
+/**
+ * Publishes a draft price_book_document only after the QA gate passes. Throws a
+ * `QaGateError` (carrying the result) when blocking findings remain and no
+ * override was given. Findings are always persisted to `qa_issue` first.
+ */
+export async function publishPriceBookDocumentWithQa(
+  documentId: string,
+  opts: PublishWithQaOptions = {},
+): Promise<QaResult> {
+  const result = await runAndPersistQaChecks(documentId);
+  if (!result.passed && !opts.override) {
+    throw new QaGateError(result);
+  }
+  await publishPriceBookDocument(documentId, opts.supersedesId ?? null);
+  return result;
+}

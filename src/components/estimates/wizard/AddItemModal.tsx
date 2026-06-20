@@ -559,6 +559,24 @@ export function AddItemModal({
 
         if (cat === 'frames' && sourceDoor && passToFrameKeys && passToFrameKeys.size > 0) {
           item = applyDoorValuesToFrame(item, sourceDoor, passToFrameKeys);
+
+          // applyDoorValuesToFrame only updates fields that already exist on the
+          // frame. opening_width / opening_height are door-specific fields that
+          // don't appear on frame catalog items, but the pricing engine needs them
+          // to match a pricing row. Inject them as locked fields when the source
+          // door has values for them.
+          const doorWidth = sourceDoor.fields.find((f) => f.fieldKey === 'opening_width')?.fieldValue ?? '';
+          const doorHeight = sourceDoor.fields.find((f) => f.fieldKey === 'opening_height')?.fieldValue ?? '';
+          const dimInjects: typeof item.fields = [];
+          if (doorWidth && !item.fields.some((f) => f.fieldKey === 'opening_width')) {
+            dimInjects.push({ localId: newLocalId(), fieldKey: 'opening_width', fieldLabel: 'Nominal Width', fieldValue: doorWidth, valueType: 'string', isRequired: false, isLocked: true });
+          }
+          if (doorHeight && !item.fields.some((f) => f.fieldKey === 'opening_height')) {
+            dimInjects.push({ localId: newLocalId(), fieldKey: 'opening_height', fieldLabel: 'Nominal Height', fieldValue: doorHeight, valueType: 'string', isRequired: false, isLocked: true });
+          }
+          if (dimInjects.length > 0) {
+            item = { ...item, fields: [...dimInjects, ...item.fields] };
+          }
         }
 
         setLocalItem(item);

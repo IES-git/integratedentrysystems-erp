@@ -13,6 +13,8 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 import { runCatalog, runExtractTable, runExtractAll } from './jobs.js';
+import { runCompileTable, runCompileAll } from './compile.js';
+import { runIngestHardware } from './hardware.js';
 
 const {
   SUPABASE_URL,
@@ -97,6 +99,51 @@ app.post('/extract', requireUser, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
+});
+
+// Compile ONE extracted table into canonical price/dependency rules (synchronous).
+app.post('/compile', requireUser, async (req, res) => {
+  const { extractionId } = req.body || {};
+  if (!extractionId) return res.status(400).json({ error: 'Missing extractionId' });
+  try {
+    const result = await runCompileTable(admin, extractionId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Compile EVERY extracted table for a book into rules (synchronous; bounded by table count).
+app.post('/compile-all', requireUser, async (req, res) => {
+  const { priceBookId } = req.body || {};
+  if (!priceBookId) return res.status(400).json({ error: 'Missing priceBookId' });
+  const { data: book, error } = await admin.from('price_books').select('id').eq('id', priceBookId).single();
+  if (error || !book) return res.status(404).json({ error: 'Price book not found' });
+  try {
+    const result = await runCompileAll(admin, priceBookId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// Phase 2b — ingest a hardware catalog workbook (Hardware.xlsx) via the
+// source-specific parser. Background (can touch hundreds of rows); poll
+// price_books.extract_status.
+app.post('/ingest-hardware', requireUser, async (req, res) => {
+  const { priceBookId } = req.body || {};
+  if (!priceBookId) return res.status(400).json({ error: 'Missing priceBookId' });
+  const { data: book, error } = await admin.from('price_books').select('id').eq('id', priceBookId).single();
+  if (error || !book) return res.status(404).json({ error: 'Price book not found' });
+
+  await admin.from('price_books').update({ extract_status: 'processing', extract_error: null }).eq('id', priceBookId);
+  res.status(202).json({ success: true, started: true, priceBookId });
+
+  runIngestHardware(admin, priceBookId).catch(async (e) => {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error('[ingest-hardware] background error:', message);
+    await admin.from('price_books').update({ extract_status: 'error', extract_error: message }).eq('id', priceBookId);
+  });
 });
 
 const port = Number(PORT) || 8080;

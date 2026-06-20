@@ -31,8 +31,12 @@ import { listManufacturerCompanies } from '@/lib/pricing-api';
 import { supabase } from '@/lib/supabase';
 import { ExceptionReviewPanel } from './ExceptionReviewPanel';
 import { CompareVendorsPanel } from './CompareVendorsPanel';
+import { AuditableQuote } from './AuditableQuote';
+import { loadEstimateLinesByOpening } from '@/lib/cpq/estimate-lines-api';
+import { buildAuditableQuoteFromEstimateLines } from '@/lib/cpq/auditable-quote';
+import { validateQuoteCompleteness, type CompletenessReport } from '@/lib/cpq/completeness';
 import { ShieldAlert } from 'lucide-react';
-import type { EstimateOpeningWithItems, EstimateItem, CompatibilityViolation, Company } from '@/types';
+import type { EstimateOpeningWithItems, EstimateItem, CompatibilityViolation, Company, EstimateLine } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -305,12 +309,22 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
   const [exceptionsReloadKey, setExceptionsReloadKey] = useState(0);
   const [violations, setViolations] = useState<CompatibilityViolation[]>([]);
   const [manufacturers, setManufacturers] = useState<Company[]>([]);
+  const [linesByOpening, setLinesByOpening] = useState<Map<string, EstimateLine[]>>(new Map());
+  const [acknowledgeExceptions, setAcknowledgeExceptions] = useState(false);
 
   const loadOpenings = useCallback(async () => {
     setLoading(true);
     try {
       const data = await getEstimateOpenings(estimateId);
       setOpenings(data);
+
+      // Auditable engine lines (new spec-driven model), grouped per opening.
+      try {
+        setLinesByOpening(await loadEstimateLinesByOpening(estimateId));
+      } catch (lineErr) {
+        console.error('Failed to load engine lines:', lineErr);
+        setLinesByOpening(new Map());
+      }
 
       // Resolve manufacturer names
       const mfrIds = [...new Set(
@@ -412,7 +426,20 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
   const hasAnyPrice = allItems.some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
   const errorViolations = violations.filter((v) => v.severity === 'error');
   const warningViolations = violations.filter((v) => v.severity === 'warning');
-  const hasBlockingViolations = errorViolations.length > 0;
+
+  // Auditable engine quote (new spec-driven model) — across all openings that
+  // were built through the unified builder. Drives the completeness gate.
+  const hasEngineLines = [...linesByOpening.values()].some((l) => l.length > 0);
+  const combinedQuote = hasEngineLines
+    ? buildAuditableQuoteFromEstimateLines([...linesByOpening.values()].flat())
+    : null;
+  const completeness: CompletenessReport | null = combinedQuote
+    ? validateQuoteCompleteness(combinedQuote)
+    : null;
+  const hasCompletenessBlockers = (completeness?.blockingCount ?? 0) > 0;
+
+  const hasBlockingViolations =
+    errorViolations.length > 0 || (hasCompletenessBlockers && !acknowledgeExceptions);
 
   if (loading) {
     return (
@@ -540,23 +567,45 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
         </Card>
       ) : (
         <div className="space-y-3">
-          {openings.map((opening) => (
-            <div key={opening.id} className="space-y-1.5">
-              <div className="flex justify-end">
-                <CompareVendorsPanel
+          {openings.map((opening) => {
+            const engineLines = linesByOpening.get(opening.id) ?? [];
+            if (engineLines.length > 0) {
+              // New spec-driven model — render the auditable end-to-end quote.
+              const quote = buildAuditableQuoteFromEstimateLines(engineLines);
+              const oc = validateQuoteCompleteness(quote);
+              return (
+                <Card key={opening.id} className="overflow-hidden">
+                  <CardHeader className="py-3 px-4">
+                    <span className="font-semibold text-sm">{opening.name}</span>
+                    {opening.quantity > 1 && (
+                      <span className="ml-2 text-xs text-muted-foreground">× {opening.quantity} openings</span>
+                    )}
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <AuditableQuote quote={quote} completeness={oc} />
+                  </CardContent>
+                </Card>
+              );
+            }
+            // Legacy item-based opening.
+            return (
+              <div key={opening.id} className="space-y-1.5">
+                <div className="flex justify-end">
+                  <CompareVendorsPanel
+                    opening={opening}
+                    manufacturers={manufacturers}
+                    onApplied={handleRefreshPrices}
+                  />
+                </div>
+                <OpeningReviewCard
                   opening={opening}
-                  manufacturers={manufacturers}
-                  onApplied={handleRefreshPrices}
+                  manufacturerNameById={manufacturerNameById}
+                  onPriceChange={handlePriceChange}
+                  highlightedItemIds={highlightedItemIds}
                 />
               </div>
-              <OpeningReviewCard
-                opening={opening}
-                manufacturerNameById={manufacturerNameById}
-                onPriceChange={handlePriceChange}
-                highlightedItemIds={highlightedItemIds}
-              />
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -578,6 +627,28 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
         </Card>
       )}
 
+      {/* Completeness gate — block on unresolved exceptions (never silent zeros) */}
+      {hasCompletenessBlockers && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-sm">
+          <div className="flex items-center gap-2 font-medium text-destructive">
+            <ShieldAlert className="h-4 w-4" />
+            {completeness!.blockingCount} pricing exception{completeness!.blockingCount !== 1 ? 's' : ''} block finalization
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Missing prices, templates, incompatible ratings, contact-factory items, or unresolved external scope must be
+            resolved (see each opening above). You may finish anyway and leave them in the manual-quote queue.
+          </p>
+          <label className="mt-2 flex items-center gap-2 text-xs text-foreground">
+            <input
+              type="checkbox"
+              checked={acknowledgeExceptions}
+              onChange={(e) => setAcknowledgeExceptions(e.target.checked)}
+            />
+            Acknowledge open exceptions and finish anyway
+          </label>
+        </div>
+      )}
+
       {/* Footer */}
       <div className="flex justify-between pt-4 border-t">
         <Button variant="outline" onClick={onBack}>
@@ -587,7 +658,7 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
           onClick={onFinish}
           size="lg"
           disabled={finishLoading || openings.length === 0 || hasBlockingViolations}
-          title={hasBlockingViolations ? 'Resolve configuration errors before saving' : undefined}
+          title={hasBlockingViolations ? 'Resolve configuration errors / pricing exceptions before saving' : undefined}
         >
           {finishLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
           Save & Finish

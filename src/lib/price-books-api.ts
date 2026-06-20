@@ -192,6 +192,7 @@ function mapPriceBook(row: Record<string, unknown>): PriceBook {
     extractError: (row.extract_error as string | null) ?? null,
     effectiveDate: (row.effective_date as string | null) ?? null,
     supersedesPriceBookId: (row.supersedes_price_book_id as string | null) ?? null,
+    priceBookDocumentId: (row.price_book_document_id as string | null) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -212,6 +213,10 @@ function mapExtraction(row: Record<string, unknown>): PriceBookExtraction {
     detectedVendorName: (row.detected_vendor_name as string | null) ?? null,
     grid: (row.grid ?? { columnLabels: [], rowLabels: [], cells: [] }) as ExtractedGrid,
     warnings: (row.warnings ?? []) as string[],
+    archetype: (row.archetype as PriceBookExtraction['archetype']) ?? null,
+    sourceRegionId: (row.source_region_id as string | null) ?? null,
+    priceBookDocumentId: (row.price_book_document_id as string | null) ?? null,
+    compiledRuleCount: (row.compiled_rule_count as number) ?? 0,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -343,6 +348,47 @@ export async function extractAllPriceBookTables(priceBookId: string): Promise<{ 
 }
 
 /**
+ * Step 3 — COMPILE ONE TABLE'S RULES. Turns an extracted grid into canonical
+ * price_rule/dependency_rule rows (raw evidence -> source_region/raw_table_cell)
+ * via the deterministic rule compiler on the worker. Worker-only (the compiler
+ * lives there); throws a helpful error when no worker is configured.
+ */
+export async function compilePriceBookTable(extractionId: string): Promise<{
+  success: boolean;
+  extractionId: string;
+  archetype: string;
+  ruleCount: number;
+}> {
+  if (!WORKER_URL) throw new Error('Rule compilation requires the price-book worker (VITE_PRICE_BOOK_WORKER_URL).');
+  return callWorker('/compile', { extractionId });
+}
+
+/**
+ * Phase 2b — INGEST A HARDWARE CATALOG (Hardware.xlsx) via the source-specific
+ * parser on the worker. Runs in the background (touches hundreds of rows);
+ * returns 202 immediately. Poll progress with `pollExtractAllStatus` (the
+ * parser reports through `price_books.extract_*`). Worker-only.
+ */
+export async function ingestHardwareBook(priceBookId: string): Promise<{ success: boolean; started: boolean }> {
+  if (!WORKER_URL) throw new Error('Hardware ingestion requires the price-book worker (VITE_PRICE_BOOK_WORKER_URL).');
+  return callWorker('/ingest-hardware', { priceBookId });
+}
+
+/**
+ * Step 3 (bulk) — COMPILE ALL extracted tables for a book into rules. Worker-only.
+ */
+export async function compileAllPriceBookTables(priceBookId: string): Promise<{
+  success: boolean;
+  total: number;
+  done: number;
+  failed: number;
+  totalRules: number;
+}> {
+  if (!WORKER_URL) throw new Error('Rule compilation requires the price-book worker (VITE_PRICE_BOOK_WORKER_URL).');
+  return callWorker('/compile-all', { priceBookId });
+}
+
+/**
  * Polls a price book while a background extract-all run is in progress. Calls
  * `onProgress` with the latest book on each tick. Resolves when the run leaves
  * 'processing' (returns the final book) or rejects on error/timeout.
@@ -454,6 +500,12 @@ export interface ApproveExtractionInput {
    * the engine resolves this table from the item's specs instead of series.
    */
   selectionCriteria?: SelectionCriteria;
+  /**
+   * Whether this is a base size grid or a component-parts table.
+   * Defaults to 'base'. Use 'component' for frames sold as individual
+   * heads & jambs (KD) rather than complete units.
+   */
+  tableKind?: 'base' | 'component';
 }
 
 export interface ApproveExtractionResult {
@@ -580,13 +632,17 @@ export async function computeGridDiff(tableId: string, input: ApproveExtractionI
 
 /**
  * Finds an existing pricing table matching the fingerprint for a proposed
- * extraction approval (same vendor, category, and selection_criteria).
+ * extraction approval (same vendor, category, kind, and selection_criteria).
  * Returns null when no match is found (first-time upload → create new table).
+ *
+ * Pass `kind='component'` when looking for a KD/component-parts table so the
+ * dedup logic doesn't incorrectly match a base table with the same specs.
  */
 export async function findMatchingPricingTable(
   vendorId: string,
   category: PriceBookCategory,
   selectionCriteria: SelectionCriteria,
+  kind: 'base' | 'component' = 'base',
 ): Promise<string | null> {
   if (Object.keys(selectionCriteria).length === 0) return null; // No criteria → can't fingerprint safely
 
@@ -594,7 +650,7 @@ export async function findMatchingPricingTable(
     .from('pricing_tables')
     .select('id, selection_criteria, pricing_table_vendors!inner(company_id)')
     .eq('category', category)
-    .eq('kind', 'base')
+    .eq('kind', kind)
     .eq('pricing_table_vendors.company_id', vendorId);
 
   if (!tables || tables.length === 0) return null;
@@ -624,8 +680,9 @@ export async function approveExtraction(input: ApproveExtractionInput): Promise<
   let tableId: string;
   let wasUpdate = false;
 
+  const tableKind = input.tableKind ?? 'base';
   const existingTableId = input.vendorIds.length === 1
-    ? await findMatchingPricingTable(input.vendorIds[0], input.category, selectionCriteria)
+    ? await findMatchingPricingTable(input.vendorIds[0], input.category, selectionCriteria, tableKind)
     : null;
 
   if (existingTableId) {
@@ -640,7 +697,7 @@ export async function approveExtraction(input: ApproveExtractionInput): Promise<
     }).eq('id', tableId);
   } else {
     const table = await createPricingTable(
-      input.category, input.seriesValue, input.tableName, undefined, 'base', selectionCriteria,
+      input.category, input.seriesValue, input.tableName, undefined, tableKind, selectionCriteria,
     );
     tableId = table.id;
     for (const vendorId of input.vendorIds) {

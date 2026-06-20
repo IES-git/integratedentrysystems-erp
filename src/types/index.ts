@@ -1,3 +1,7 @@
+// CPQ v2 - spec-driven pricing & hardware integration model
+export * from './cpq';
+import type { PriceTableArchetype } from './cpq';
+
 // User & Auth Types
 export type UserRole = 'admin' | 'sales' | 'ops' | 'finance' | 'hr';
 
@@ -733,7 +737,20 @@ export interface PricingAdderCell {
 /** Where a change originated. The agent only ever produces 'ingestion'/'exception_agent'. */
 export type PricingChangeSource = 'ingestion' | 'exception_agent' | 'manual';
 
-export type PricingProposalType = 'cell' | 'column' | 'row' | 'adder' | 'table' | 'spec';
+export type PricingProposalType =
+  | 'cell'
+  | 'column'
+  | 'row'
+  | 'adder'
+  | 'table'
+  | 'spec'
+  // CPQ v2 (Phase 2.0 bridge) rule/catalog/hardware proposals:
+  | 'price_rule'
+  | 'dependency_rule'
+  | 'option'
+  | 'product_family'
+  | 'hardware_product'
+  | 'hardware_price';
 
 export type PricingProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied';
 
@@ -754,6 +771,8 @@ export interface PricingChangeProposal {
   confidence: number | null;
   explanation: string | null;
   status: PricingProposalStatus;
+  /** CPQ v2 (Phase 2.0): the draft/published document version this proposal compiles into. */
+  priceBookDocumentId?: string | null;
   createdBy: string | null;
   reviewedBy: string | null;
   reviewedAt: string | null;
@@ -810,6 +829,8 @@ export interface PriceBook {
   effectiveDate: string | null;
   /** The price book this one supersedes (older book whose prices are replaced). */
   supersedesPriceBookId: string | null;
+  /** CPQ v2 (Phase 2.0): the immutable published price_book_document version this book links to. */
+  priceBookDocumentId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -940,7 +961,7 @@ export interface CompatibilityViolation {
   itemLabel: string;
 }
 
-export type PriceBookExtractionStatus = 'pending' | 'mapped' | 'approved' | 'discarded';
+export type PriceBookExtractionStatus = 'pending' | 'mapped' | 'compiled' | 'approved' | 'discarded';
 
 /** What kind of table the agent detected. */
 export type PriceBookTableKind = 'size_grid' | 'flat_list' | 'adder' | string;
@@ -967,6 +988,14 @@ export interface PriceBookExtraction {
   detectedVendorName: string | null;
   grid: ExtractedGrid;
   warnings: string[];
+  /** CPQ v2 (Phase 2.0): table-archetype classifier result; drives rule compilation. */
+  archetype: PriceTableArchetype | null;
+  /** CPQ v2: the raw-evidence source_region this extraction produced. */
+  sourceRegionId: string | null;
+  /** CPQ v2: the document version this extraction compiles rules into. */
+  priceBookDocumentId: string | null;
+  /** CPQ v2: number of price_rule/dependency_rule rows the compiler emitted. */
+  compiledRuleCount: number;
   createdAt: string;
   updatedAt: string;
 }
