@@ -27,6 +27,9 @@ import { supabase } from '@/lib/supabase';
 import type {
   DependencyRule,
   EstimateLinePriceStatus,
+  NgpOption,
+  NgpCommercialPolicy,
+  RuleEntityType,
 } from '@/types';
 import { readField, type EngineOptions, type NormalizedOpeningSpec, type SpecComponent, type SpecValue } from './spec';
 import type {
@@ -41,6 +44,16 @@ import { resolveAction, type ActionContext } from './actions';
 import { loadHardwareCatalog, loadRuleSet, loadVariantsWithPrices, type HardwareCatalog, type LoadedRuleSet } from './loader';
 import { priceHardware, type PrepRequirement } from './hardware';
 import { parseDoorDimension } from '@/components/pricing/dimension-utils';
+import { loadNgpCatalog, resolveActiveNgpDocument } from '@/lib/ngp-catalog-api';
+
+const NGP_ENTITY_SET: ReadonlySet<RuleEntityType> = new Set<RuleEntityType>(['lite_kit', 'louver', 'glass', 'glazing_tape']);
+
+/** NGP data threaded into the pure core for the option + commercial-policy passes. */
+export interface NgpEngineData {
+  options: NgpOption[];
+  optionRuleById: Map<string, LoadedPriceRule>;
+  policies: NgpCommercialPolicy[];
+}
 
 const EXCEPTION_STATUSES: EstimateLinePriceStatus[] = ['INVALID', 'CONTACT_FACTORY', 'EXTERNAL_PENDING'];
 
@@ -234,7 +247,12 @@ function priceComponent(
 
   // No base rule matched at all → explicit exception (never a silent zero).
   const hasBase = lines.some((l) => l.lineType === 'BASE' && l.priceStatus === 'PRICED');
-  if (!hasBase && (component.entityType === 'door' || component.entityType === 'frame' || component.entityType === 'panel')) {
+  const requiresBase = component.entityType === 'door' || component.entityType === 'frame' ||
+    component.entityType === 'panel' || component.entityType === 'lite_kit' ||
+    component.entityType === 'louver' || component.entityType === 'glass' ||
+    component.entityType === 'glazing_tape';
+  const hasException = lines.some((l) => isException(l.priceStatus));
+  if (!hasBase && !hasException && requiresBase) {
     lines.push({
       lineType: 'WARNING', priceRuleId: null, entityType: component.entityType,
       chargeCategory: 'base', description: `${component.label}: no base price matched`,
@@ -423,6 +441,146 @@ function evaluateDependencies(spec: NormalizedOpeningSpec, deps: DependencyRule[
   return outcomes;
 }
 
+/** Numeric infill field reader from an NGP component. */
+function infillNum(component: SpecComponent, key: string): number | null {
+  const v = component.fields[key];
+  if (v == null) return null;
+  const n = typeof v === 'number' ? v : Number(String(v).replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * NGP option-adder pass: for each priced NGP component, applies the selected
+ * option codes (finish %, galvanneal %, zinc, torx, STC/area, lead/perimeter,
+ * mullion×qty, ...) using each component's resolved base amount. Reuses the same
+ * action math as the Pioneer engine. Returns ADDER/MANUAL_QUOTE lines.
+ */
+function priceNgpOptions(
+  spec: NormalizedOpeningSpec,
+  componentLines: EngineLine[],
+  ngp: NgpEngineData,
+  priceBookId: string | null,
+  startSort: number,
+): { lines: EngineLine[]; manualQuotes: EngineManualQuote[] } {
+  const lines: EngineLine[] = [];
+  const manualQuotes: EngineManualQuote[] = [];
+  let sort = startSort;
+  const optionByCode = new Map(ngp.options.filter((o) => o.optionCode).map((o) => [o.optionCode!.toLowerCase(), o]));
+
+  for (const component of spec.components) {
+    if (!NGP_ENTITY_SET.has(component.entityType)) continue;
+    const raw = component.fields['infill.options'];
+    if (raw == null || String(raw).trim() === '') continue;
+    const codes = String(raw).split(',').map((c) => c.trim()).filter(Boolean);
+    if (codes.length === 0) continue;
+
+    const baseLine = componentLines.find(
+      (l) => l.componentId === component.id && l.lineType === 'BASE' && l.priceStatus === 'PRICED',
+    );
+    const baseAmount = baseLine?.extendedListPrice ?? 0;
+
+    for (const code of codes) {
+      const opt = optionByCode.get(code.toLowerCase());
+      const rule = opt?.priceRuleId ? ngp.optionRuleById.get(opt.priceRuleId) : undefined;
+      if (!opt || !rule) continue;
+
+      const ctx: ActionContext = {
+        quantity: component.quantity,
+        quantityBasisValue: rule.quantityBasisField ? infillNum(component, rule.quantityBasisField) : null,
+        minConfidence: 0,
+        // PERCENT_OF references the NGP component's resolved base amount.
+        resolveReference: () => baseAmount,
+      };
+      // PERCENT_OF needs a non-null reference id to resolve; synthesize one.
+      const ruleForAction = rule.actionType === 'PERCENT_OF' ? { ...rule, referenceRuleId: rule.id } : rule;
+      const res = resolveAction(ruleForAction, ctx);
+      const amount = res.amount;
+      lines.push({
+        lineType: res.lineType, priceRuleId: rule.id, entityType: component.entityType,
+        chargeCategory: `option:${code}`,
+        description: `${component.label}: ${opt.optionName ?? code}`,
+        selectedOptionCode: code, quantity: 1, unitOfMeasure: rule.unitOfMeasure,
+        unitListPrice: amount, extendedListPrice: amount, discountMultiplier: null,
+        extendedNetPrice: amount, sellPrice: amount, grossMargin: null, grossMarginPct: null,
+        priceStatus: res.status, calculationExpression: res.expression, matchedConditions: { option: code },
+        includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: rule.sourceRegionId,
+        priceBookId, confidence: rule.extractionConfidence, exceptionMessage: res.exceptionMessage,
+        componentId: component.id, sortOrder: sort++,
+      });
+      if (res.manualReason) {
+        manualQuotes.push({ componentId: component.id, priceRuleId: rule.id, reason: res.manualReason, requestedInputs: res.exceptionMessage });
+      }
+    }
+  }
+  return { lines, manualQuotes };
+}
+
+/** Finds an NGP commercial policy amount by id (falls back to a default). */
+function policyAmount(policies: NgpCommercialPolicy[], id: string, fallback: number): number {
+  const p = policies.find((x) => x.policyId === id);
+  return p?.amountOrThreshold ?? fallback;
+}
+
+/**
+ * NGP order-level commercial policies: oversize surcharge (>60" any infill dim),
+ * material minimum ($30 floor) and small-order handling ($25 ≤ $125 net). Freight
+ * and special-marking are order/shipment-level and applied at order finalization,
+ * not per opening.
+ */
+function priceNgpPolicies(
+  spec: NormalizedOpeningSpec,
+  ngpLines: EngineLine[],
+  policies: NgpCommercialPolicy[],
+  priceBookId: string | null,
+  startSort: number,
+): EngineLine[] {
+  const lines: EngineLine[] = [];
+  let sort = startSort;
+  const ngpNet = ngpLines.reduce((s, l) => s + (l.extendedNetPrice ?? 0), 0);
+  if (ngpNet <= 0) return lines;
+
+  const policyLine = (charge: string, desc: string, amount: number, expr: string): EngineLine => ({
+    lineType: 'ADDER', priceRuleId: null, entityType: 'lite_kit', chargeCategory: charge,
+    description: desc, selectedOptionCode: null, quantity: 1, unitOfMeasure: 'order',
+    unitListPrice: amount, extendedListPrice: amount, discountMultiplier: null, extendedNetPrice: amount,
+    sellPrice: amount, grossMargin: null, grossMarginPct: null, priceStatus: 'PRICED',
+    calculationExpression: expr, matchedConditions: null, includedOrSuppressedBy: null,
+    sourcePage: null, sourceRegionId: null, priceBookId, confidence: null, exceptionMessage: null,
+    componentId: null, sortOrder: sort++,
+  });
+
+  // Oversize surcharge: any infill cutout dimension over 60".
+  const oversize = spec.components.some(
+    (c) => NGP_ENTITY_SET.has(c.entityType) &&
+      ((infillNum(c, 'infill.order_width_in') ?? 0) > 60 || (infillNum(c, 'infill.order_height_in') ?? 0) > 60),
+  );
+  if (oversize) {
+    const amt = policyAmount(policies, 'POL-OVERSIZE-100', 100);
+    lines.push(policyLine('ngp_policy', 'NGP oversize surcharge (>60")', amt, `Oversize surcharge ${fmtUsd(amt)}`));
+  }
+
+  // Material minimum: floor the NGP material subtotal.
+  const matMin = policyAmount(policies, 'POL-MATERIAL-MIN', 30);
+  if (ngpNet < matMin) {
+    const adj = Math.round((matMin - ngpNet) * 100) / 100;
+    lines.push(policyLine('ngp_policy', 'NGP material minimum adjustment', adj, `Material minimum ${fmtUsd(matMin)} (net was ${fmtUsd(ngpNet)})`));
+  }
+
+  // Small-order handling charge.
+  const handleP = policies.find((x) => x.policyId === 'POL-HANDLING-MIN');
+  const handleThreshold = handleP ? Number((handleP.condition ?? '').replace(/[^0-9.]/g, '')) || 125 : 125;
+  if (ngpNet <= handleThreshold) {
+    const amt = handleP?.amountOrThreshold ?? 25;
+    lines.push(policyLine('ngp_policy', 'NGP packing/handling charge', amt, `Handling ${fmtUsd(amt)} (order ≤ ${fmtUsd(handleThreshold)} net)`));
+  }
+
+  return lines;
+}
+
+function fmtUsd(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
 /**
  * Resolves the published price_book_document to price against when none is pinned
  * (the latest published Pioneer document).
@@ -448,6 +606,7 @@ export function priceOpeningCore(
   catalog: HardwareCatalog,
   variantMap: Map<string, import('./loader').VariantWithPrice>,
   options: EngineOptions,
+  ngp?: NgpEngineData | null,
 ): EngineResult {
   const priceBookId = options.priceBookDocumentId;
   const minConfidence = options.minConfidence ?? 0.5;
@@ -457,13 +616,22 @@ export function priceOpeningCore(
   const manualQuotes: EngineManualQuote[] = [];
   const warnings: string[] = [];
 
-  // 1. Pioneer components.
+  // 1. Pioneer + NGP infill components (both priced through the rule path).
   let sort = 0;
+  const componentLines: EngineLine[] = [];
   for (const component of spec.components) {
     const priced = priceComponent(spec, component, ruleSet.rules, opts, sort);
     lines.push(...priced.lines);
+    componentLines.push(...priced.lines);
     manualQuotes.push(...priced.manualQuotes);
     sort += priced.lines.length + 1;
+  }
+
+  // 1b. NGP option adders (finish/galv/zinc/torx/STC/lead/mullion) per component.
+  if (ngp) {
+    const opt = priceNgpOptions(spec, componentLines, ngp, priceBookId, 1500);
+    lines.push(...opt.lines);
+    manualQuotes.push(...opt.manualQuotes);
   }
 
   // 2. Hardware branch (sets → variants → prep requirements → linear → sell).
@@ -485,6 +653,12 @@ export function priceOpeningCore(
   const ka = priceKeyingAndAccess(spec, priceBookId, 3000);
   lines.push(...ka.lines);
   manualQuotes.push(...ka.manualQuotes);
+
+  // 4b. NGP order-level commercial policies (oversize / minimums / handling).
+  if (ngp && ngp.policies.length > 0) {
+    const ngpLines = lines.filter((l) => l.entityType != null && NGP_ENTITY_SET.has(l.entityType));
+    lines.push(...priceNgpPolicies(spec, ngpLines, ngp.policies, priceBookId, 3500));
+  }
 
   // Subtotal of priced sell before services (services percent_of references it).
   const subtotalSell = lines.reduce((sum, l) => sum + (l.sellPrice ?? 0), 0);
@@ -519,16 +693,33 @@ export async function priceOpening(
 ): Promise<EngineResult> {
   const pricedAsOf = options.pricedAsOf ?? new Date().toISOString().slice(0, 10);
   const documentId = options.priceBookDocumentId ?? (await resolveActivePriceBookDocument());
+  const ngpDocumentId = await resolveActiveNgpDocument();
 
-  const [ruleSet, catalog] = await Promise.all([
+  const [ruleSet, catalog, ngpRuleSet, ngpCatalog] = await Promise.all([
     documentId ? loadRuleSet(documentId, pricedAsOf) : Promise.resolve<LoadedRuleSet>({ rules: [], dependencyRules: [] }),
     loadHardwareCatalog(pricedAsOf),
+    ngpDocumentId ? loadRuleSet(ngpDocumentId, pricedAsOf) : Promise.resolve<LoadedRuleSet>({ rules: [], dependencyRules: [] }),
+    loadNgpCatalog(ngpDocumentId),
   ]);
+
+  // NGP matrix/direct/tape rules are priced through the same component path, so
+  // merge them into the rule set. Option rules carry a non-matching selector and
+  // are applied by the dedicated NGP option pass via optionRuleById.
+  const mergedRuleSet: LoadedRuleSet = {
+    rules: [...ruleSet.rules, ...ngpRuleSet.rules],
+    dependencyRules: [...ruleSet.dependencyRules, ...ngpRuleSet.dependencyRules],
+  };
+  const optionRuleById = new Map(ngpRuleSet.rules.map((r) => [r.id, r]));
+  const ngpData: NgpEngineData = {
+    options: ngpCatalog.options,
+    optionRuleById,
+    policies: ngpCatalog.commercialPolicies,
+  };
 
   const variantIds = spec.hardware.map((h) => h.variantId).filter((v): v is string => !!v);
   const variantMap = await loadVariantsWithPrices(variantIds, pricedAsOf);
 
-  const result = priceOpeningCore(spec, ruleSet, catalog, variantMap, { ...options, priceBookDocumentId: documentId });
+  const result = priceOpeningCore(spec, mergedRuleSet, catalog, variantMap, { ...options, priceBookDocumentId: documentId }, ngpData);
 
   if (!documentId) {
     result.warnings.unshift('No published price book document — Pioneer base/adder/prep lines cannot be priced.');

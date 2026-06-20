@@ -37,18 +37,28 @@ export function getOppositeHanding(handing: string): string {
   return OPPOSITE_HANDING[handing] ?? handing;
 }
 
-/** Door height threshold (in inches) above which 4 hinges are required. 7'4" = 88". */
-export const HINGE_HEIGHT_THRESHOLD_IN = 88;
+/**
+ * Hinges per leaf by door height, per NFPA 80 / ANSI-BHMA A156.1:
+ *   - up to 60"            : 2 hinges
+ *   - over 60" up to 90"   : 3 hinges
+ *   - over 90" up to 120"  : 4 hinges
+ *   - over 120"            : +1 hinge for each additional 30" (or fraction)
+ *
+ * When the height is unknown we assume a standard commercial leaf (3 hinges),
+ * which is the practical minimum for steel doors.
+ */
+export function hingesPerLeaf(heightIn: number | null): number {
+  if (heightIn == null) return 3;
+  if (heightIn <= 60) return 2;
+  // 2 hinges through 60", then one more per 30" (or fraction) of height above 60".
+  return 2 + Math.ceil((heightIn - 60) / 30);
+}
 
 /**
- * Calculates the recommended number of hinges based on door height and pair status.
- *
- * Rules:
- *   - Height > 88" (7'4"): 4 hinges per door
- *   - Height ≤ 88"       : 3 hinges per door
- *   - Pair opening multiplies by 2
+ * Total hinge count for an opening: hinges per leaf × leaves.
+ * `isPair` doubles the per-leaf count for two-leaf openings.
  */
 export function calcHingeQty(heightIn: number | null, isPair: boolean): number {
-  const perDoor = heightIn != null && heightIn > HINGE_HEIGHT_THRESHOLD_IN ? 4 : 3;
-  return isPair ? perDoor * 2 : perDoor;
+  const perLeaf = hingesPerLeaf(heightIn);
+  return isPair ? perLeaf * 2 : perLeaf;
 }

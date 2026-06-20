@@ -22,7 +22,7 @@ import {
   approveAdderExtraction, listBaseTablesForVendor,
   findMatchingPricingTable, computeGridDiff,
   approveHardwareExtraction, resetExtractionGrid,
-  compilePriceBookTable, compileAllPriceBookTables, ingestHardwareBook,
+  compilePriceBookTable, compileAllPriceBookTables, ingestHardwareBook, ingestNgpCatalog,
   type ColumnMapping, type RowMapping, type BaseTableOption, type GridDiff, type HardwareRowMapping,
 } from '@/lib/price-books-api';
 import RuleReviewPanel from '@/components/pricing/RuleReviewPanel';
@@ -120,6 +120,7 @@ export default function PriceBookIngestPage() {
   const [compilingIds, setCompilingIds] = useState<Set<string>>(new Set());
   const [compilingAll, setCompilingAll] = useState(false);
   const [hardwareIngestingId, setHardwareIngestingId] = useState<string | null>(null);
+  const [ngpIngestingId, setNgpIngestingId] = useState<string | null>(null);
   const [proposalId, setProposalId] = useState<string | null>(null);
   const [reviewName, setReviewName] = useState('');
   const [reviewCategory, setReviewCategory] = useState<PriceBookCategory>('doors');
@@ -797,6 +798,30 @@ export default function PriceBookIngestPage() {
       toast({ title: 'Hardware ingestion failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
     } finally {
       setHardwareIngestingId(null);
+    }
+  };
+
+  /**
+   * NGP infill — ingest a normalized NGP catalog workbook (glass / lite kits /
+   * louvers / tape) via the deterministic importer. Background; polls
+   * extract_status. Writes the ngp_* catalog + compiles dimensional matrices and
+   * option rules into a draft price_book_document for review/approve/publish.
+   */
+  const handleIngestNgp = async (book: PriceBook) => {
+    if (!confirm(`Ingest "${book.name}" as the NGP infill catalog? This loads the NGP glass/lite-kit/louver products + compatibility rules and compiles the dimensional price matrices for review.`)) return;
+    setNgpIngestingId(book.id);
+    try {
+      await ingestNgpCatalog(book.id);
+      const finished = await pollExtractAllStatus(book.id, {});
+      toast({
+        title: 'NGP catalog ingested',
+        description: `${finished.extractDone} price rule(s) compiled. Review and approve in the proposals queue, then publish.`,
+      });
+      await loadList();
+    } catch (err) {
+      toast({ title: 'NGP ingestion failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setNgpIngestingId(null);
     }
   };
 
@@ -1943,6 +1968,12 @@ export default function PriceBookIngestPage() {
                           <Button size="sm" variant="outline" onClick={() => handleIngestHardware(b)} disabled={hardwareIngestingId === b.id}>
                             {hardwareIngestingId === b.id ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
                             Ingest hardware
+                          </Button>
+                        )}
+                        {hasPriceBookWorker && b.category === 'lites_louvers_glass' && (b.fileType === 'xlsx' || b.fileType === 'csv') && (
+                          <Button size="sm" variant="outline" onClick={() => handleIngestNgp(b)} disabled={ngpIngestingId === b.id}>
+                            {ngpIngestingId === b.id ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                            Ingest NGP catalog
                           </Button>
                         )}
                         {b.ocrStatus === 'done' && (

@@ -49,6 +49,7 @@ export type QuoteLayerId =
   | 'pioneer_base'
   | 'pioneer_adders'
   | 'pioneer_preps'
+  | 'ngp_infill'
   | 'hardware'
   | 'linear'
   | 'keying'
@@ -112,6 +113,7 @@ const LAYER_TITLES: Record<QuoteLayerId, string> = {
   pioneer_base: 'Pioneer base (door / frame / panel)',
   pioneer_adders: 'Pioneer adders & options',
   pioneer_preps: 'Pioneer preparations (crosswalk)',
+  ngp_infill: 'NGP infill (glass / lite kits / louvers)',
   hardware: 'Actual hardware',
   linear: 'Linear accessories',
   keying: 'Keying',
@@ -123,12 +125,20 @@ const LAYER_ORDER: QuoteLayerId[] = [
   'pioneer_base',
   'pioneer_adders',
   'pioneer_preps',
+  'ngp_infill',
   'hardware',
   'linear',
   'keying',
   'access_control',
   'services',
 ];
+
+const NGP_ENTITIES: ReadonlySet<RuleEntityType> = new Set<RuleEntityType>([
+  'lite_kit',
+  'louver',
+  'glass',
+  'glazing_tape',
+]);
 
 const PIONEER_ENTITIES: ReadonlySet<RuleEntityType> = new Set<RuleEntityType>([
   'door',
@@ -146,6 +156,7 @@ export function classifyLayer(line: QuoteLine): QuoteLayerId {
   const entity = line.entityType;
 
   if (entity === 'prep' || cat === 'prep') return 'pioneer_preps';
+  if ((entity && NGP_ENTITIES.has(entity)) || cat === 'ngp_policy') return 'ngp_infill';
   if (cat === 'keying') return 'keying';
   if (cat === 'access_control') return 'access_control';
   if (SERVICE_SCOPE_TYPES.has(cat)) return 'services';

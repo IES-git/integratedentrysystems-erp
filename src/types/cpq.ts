@@ -55,7 +55,16 @@ export type RuleEntityType =
   | 'prep'
   | 'anchor'
   | 'packaging'
-  | 'hardware';
+  | 'hardware'
+  // NGP infill (glass / lite kits / louvers) — priced via the same rule engine.
+  | 'lite_kit'
+  | 'louver'
+  | 'glass'
+  | 'glazing_tape';
+
+/** NGP infill entity types (a subset of RuleEntityType). */
+export const NGP_INFILL_ENTITY_TYPES = ['lite_kit', 'louver', 'glass', 'glazing_tape'] as const;
+export type NgpInfillEntityType = (typeof NGP_INFILL_ENTITY_TYPES)[number];
 
 export type ProductEntityType = 'door' | 'frame' | 'panel' | 'stick' | 'specialty';
 
@@ -728,4 +737,155 @@ export interface QuoteHardwareLine {
   prepLinks: Record<string, unknown>;
   status: QuoteHardwareLineStatus | null;
   createdAt: string;
+}
+
+// ===== NGP infill catalog (glass / lite kits / louvers / tape) =====
+
+export type NgpInfillType = 'NONE' | 'LITE' | 'LOUVER';
+
+/** NGP product categories as normalized by the importer. */
+export type NgpProductCategory =
+  | 'GLASS'
+  | 'LITE_KIT'
+  | 'LOUVER'
+  | 'GLAZING_ACCESSORY'
+  | 'LOUVER_ACCESSORY'
+  | 'FINISH_ACCESSORY';
+
+/** glass_scope on a kit/product: how separate glass is treated at pricing time. */
+export type NgpGlassScope =
+  | 'SEPARATE_REQUIRED'
+  | 'BUNDLED'
+  | 'BUNDLED_IN_ASSEMBLY'
+  | 'NOT_APPLICABLE';
+
+export interface NgpProduct {
+  id: string;
+  priceBookDocumentId: string | null;
+  productId: string;
+  manufacturer: string | null;
+  category: string;
+  subcategory: string | null;
+  model: string | null;
+  modelAliases: string | null;
+  productName: string | null;
+  material: string | null;
+  standardFinish: string | null;
+  doorThicknessMinIn: number | null;
+  doorThicknessMaxIn: number | null;
+  glassThicknessMinIn: number | null;
+  glassThicknessMaxIn: number | null;
+  fireRatingMax: number | null;
+  preferredPriceUom: string | null;
+  glassScope: string | null;
+  active: boolean;
+  sourcePage: string | null;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface NgpKitGlassCapacity {
+  id: string;
+  priceBookDocumentId: string | null;
+  capacityId: string | null;
+  kitModel: string;
+  doorThicknessIn: number | null;
+  glassThicknessIn: number | null;
+  requiredTapeModel: string | null;
+  profileGroup: string | null;
+  allowed: boolean;
+  sourcePage: string | null;
+}
+
+export interface NgpGlassRating {
+  id: string;
+  priceBookDocumentId: string | null;
+  ratingId: string | null;
+  glassModel: string;
+  fireMinutes: string | null;
+  application: string | null;
+  maxVisibleAreaSqIn: number | null;
+  maxVisibleWidthIn: number | null;
+  maxVisibleHeightIn: number | null;
+  sourcePage: string | null;
+}
+
+export interface NgpSizeRule {
+  id: string;
+  priceBookDocumentId: string | null;
+  sizeRuleId: string | null;
+  modelOrFamily: string;
+  outputField: string;
+  operator: string | null;
+  value: number | null;
+  unit: string | null;
+  inputBasis: string | null;
+  sourcePage: string | null;
+}
+
+export interface NgpRelationship {
+  id: string;
+  priceBookDocumentId: string | null;
+  relationshipId: string | null;
+  sourceModel: string | null;
+  targetModel: string | null;
+  relationshipType: string;
+  rule: string | null;
+  inclusionScope: string | null;
+  confidence: string | null;
+  sourcePage: string | null;
+}
+
+export interface NgpFinishCode {
+  id: string;
+  priceBookDocumentId: string | null;
+  finishCode: string;
+  finishName: string | null;
+  availability: string | null;
+  notes: string | null;
+}
+
+export interface NgpOption {
+  id: string;
+  priceBookDocumentId: string | null;
+  optionId: string | null;
+  appliesTo: string | null;
+  optionCode: string | null;
+  optionName: string | null;
+  optionType: string | null;
+  requirements: string | null;
+  exclusions: string | null;
+  pricingStatus: string | null;
+  priceRuleId: string | null;
+  sourcePage: string | null;
+}
+
+export interface NgpCommercialPolicy {
+  id: string;
+  priceBookDocumentId: string | null;
+  policyId: string | null;
+  policyType: string;
+  description: string | null;
+  basis: string | null;
+  amountOrThreshold: number | null;
+  unit: string | null;
+  condition: string | null;
+  sourcePage: string | null;
+}
+
+export interface NgpPriceTableMap {
+  id: string;
+  priceBookDocumentId: string | null;
+  mapId: string | null;
+  ngpPriceTableId: string;
+  priceTableId: string | null;
+  model: string;
+  relationship: string | null;
+  multiplier: number | null;
+  condition: string | null;
+  includedScope: string | null;
+  glassModel: string | null;
+  tapeModel: string | null;
+  entityType: string | null;
+  sourcePage: string | null;
 }

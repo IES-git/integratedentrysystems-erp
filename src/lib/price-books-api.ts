@@ -375,6 +375,18 @@ export async function ingestHardwareBook(priceBookId: string): Promise<{ success
 }
 
 /**
+ * NGP infill — INGEST A NORMALIZED NGP CATALOG (glass / lite kits / louvers /
+ * tape) via the deterministic importer on the worker. Runs in the background
+ * (writes the ngp_* catalog + compiles dimensional matrices/option rules into
+ * the shared price_book_document); returns 202 immediately. Poll progress with
+ * `pollExtractAllStatus` (it reports through `price_books.extract_*`). Worker-only.
+ */
+export async function ingestNgpCatalog(priceBookId: string): Promise<{ success: boolean; started: boolean }> {
+  if (!WORKER_URL) throw new Error('NGP catalog ingestion requires the price-book worker (VITE_PRICE_BOOK_WORKER_URL).');
+  return callWorker('/ingest-ngp-catalog', { priceBookId });
+}
+
+/**
  * Step 3 (bulk) — COMPILE ALL extracted tables for a book into rules. Worker-only.
  */
 export async function compileAllPriceBookTables(priceBookId: string): Promise<{

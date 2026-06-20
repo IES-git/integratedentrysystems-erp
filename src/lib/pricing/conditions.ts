@@ -8,7 +8,7 @@
  * is an unconditional match (e.g. a flat base amount).
  */
 
-import { parseDoorDimension } from '@/components/pricing/dimension-utils';
+import { parseDoorDimension, parseDimension } from '@/components/pricing/dimension-utils';
 import type { ConditionOperator, ConditionValueType, RuleCondition } from '@/types';
 import { readField, type NormalizedOpeningSpec, type SpecComponent, type SpecValue } from './spec';
 
@@ -20,7 +20,10 @@ export interface ConditionMatch {
   missingFields: string[];
 }
 
-/** Coerce a spec value to a number for numeric/dimension comparisons. */
+/**
+ * Coerce a SPEC value (user/builder input) to inches. Door notation applies:
+ * "3-0" → 36, "36" → 3'6" = 42 (the field wizard's compact-nominal convention).
+ */
 function toNumber(value: SpecValue, valueType: ConditionValueType | null): number | null {
   if (value == null) return null;
   if (typeof value === 'number') return value;
@@ -29,6 +32,23 @@ function toNumber(value: SpecValue, valueType: ConditionValueType | null): numbe
   if (str === '') return null;
   if (valueType === 'DIMENSION') {
     const parsed = parseDoorDimension(str);
+    if (parsed != null) return parsed;
+  }
+  const n = Number(str.replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Coerce a RULE BOUND (compiled from a price-book size grid) to inches. These
+ * are authored in PLAIN inches ("36" = 36", "84" = 84"), so they must NOT use
+ * the compact-nominal door reading (which would turn "36" into 3'6" = 42").
+ */
+function boundToNumber(value: string | null, valueType: ConditionValueType | null): number | null {
+  if (value == null) return null;
+  const str = String(value).trim();
+  if (str === '') return null;
+  if (valueType === 'DIMENSION') {
+    const parsed = parseDimension(str);
     if (parsed != null) return parsed;
   }
   const n = Number(str.replace(/[^0-9.-]/g, ''));
@@ -78,14 +98,14 @@ function evalOne(
     case 'LTE':
     case 'BETWEEN': {
       const num = toNumber(value, cond.valueType);
-      const a = toNumber(cond.value1, cond.valueType);
+      const a = boundToNumber(cond.value1, cond.valueType);
       if (num == null) return { ok: false, value, missing: true };
       if (op === 'GT') return { ok: a != null && num > a, value, missing: false };
       if (op === 'GTE') return { ok: a != null && num >= a, value, missing: false };
       if (op === 'LT') return { ok: a != null && num < a, value, missing: false };
       if (op === 'LTE') return { ok: a != null && num <= a, value, missing: false };
       // BETWEEN
-      const b = toNumber(cond.value2, cond.valueType);
+      const b = boundToNumber(cond.value2, cond.valueType);
       const lowOk = a == null || (cond.inclusiveMin === false ? num > a : num >= a);
       const highOk = b == null || (cond.inclusiveMax === false ? num < b : num <= b);
       return { ok: lowOk && highOk, value, missing: false };

@@ -176,9 +176,11 @@ export async function loadRuleSet(
   priceBookDocumentId: string,
   pricedAsOf: string,
 ): Promise<LoadedRuleSet> {
+  // rule_action_parameter has TWO FKs to price_rule (price_rule_id + reference_rule_id),
+  // so the embed must name the FK explicitly or PostgREST errors on the ambiguity.
   const { data: ruleRows, error } = await supabase
     .from('price_rule')
-    .select('*, rule_condition(*), rule_action_parameter(*), included_scope(*), quantity_tier(*)')
+    .select('*, rule_condition(*), rule_action_parameter!rule_action_parameter_price_rule_id_fkey(*), included_scope(*), quantity_tier(*)')
     .eq('price_book_id', priceBookDocumentId)
     .eq('review_status', 'APPROVED')
     .order('priority', { ascending: true });

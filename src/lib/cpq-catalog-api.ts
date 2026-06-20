@@ -145,6 +145,34 @@ export async function loadOptionDefinitions(): Promise<Map<string, OptionDefinit
   return byEntity;
 }
 
+/**
+ * Loads `option_definition` descriptions into a lookup keyed by entity then by
+ * upper-cased code, e.g. descriptors.get('door').get('H') -> "Honeycomb core…".
+ * Powers the abbreviation + meaning labels in the builder dropdowns.
+ */
+export async function loadOptionDescriptors(): Promise<Map<string, Map<string, string>>> {
+  const { data, error } = await supabase
+    .from('option_definition')
+    .select('entity_type, code, description');
+  if (error) throw new Error(`Failed to load option descriptors: ${error.message}`);
+  const byEntity = new Map<string, Map<string, string>>();
+  for (const r of data ?? []) {
+    const entity = (r.entity_type as string | null) ?? '';
+    const code = (r.code as string | null)?.trim();
+    const desc = (r.description as string | null)?.trim();
+    if (!entity || !code || !desc) continue;
+    let map = byEntity.get(entity);
+    if (!map) {
+      map = new Map<string, string>();
+      byEntity.set(entity, map);
+    }
+    const key = code.toUpperCase();
+    // Keep the first (shortest-context) description for a code.
+    if (!map.has(key)) map.set(key, desc);
+  }
+  return byEntity;
+}
+
 export interface VariantOption {
   variant: HardwareVariant;
   price: HardwarePrice | null;
