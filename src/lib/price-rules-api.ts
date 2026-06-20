@@ -182,6 +182,88 @@ export async function approveCompiledExtraction(input: ApproveCompiledInput): Pr
   return { approvedRules: priceRows?.length ?? 0, approvedDependencies: depRows?.length ?? 0 };
 }
 
+export interface BulkApproveResult {
+  approvedExtractions: number;
+  approvedRules: number;
+  approvedDependencies: number;
+  /** The document these rules hang off (publish target), if resolvable. */
+  documentId: string | null;
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Bulk-approves every COMPILED table for a book in one pass: flips all their
+ * UNREVIEWED price_rule + dependency_rule rows to APPROVED, marks the
+ * extractions approved, and applies their ingestion proposals. This replaces
+ * opening and approving 200 tables one at a time.
+ *
+ * Safe to auto-approve at scale: the pricing engine still routes low-confidence
+ * rules to the manual-quote queue at quote time, and the QA gate blocks publish
+ * on structural errors — so nothing unreviewed silently reaches a customer quote.
+ */
+export async function approveAllCompiledExtractions(priceBookId: string): Promise<BulkApproveResult> {
+  const { data: exts, error } = await supabase
+    .from('price_book_extractions')
+    .select('id, source_region_id, price_book_document_id')
+    .eq('price_book_id', priceBookId)
+    .eq('status', 'compiled');
+  if (error) throw new Error(error.message);
+
+  const compiled = (exts ?? []).filter((e) => e.source_region_id) as {
+    id: string; source_region_id: string; price_book_document_id: string | null;
+  }[];
+  if (compiled.length === 0) {
+    return { approvedExtractions: 0, approvedRules: 0, approvedDependencies: 0, documentId: null };
+  }
+
+  const regionIds = compiled.map((e) => e.source_region_id);
+  const extIds = compiled.map((e) => e.id);
+  const documentId = compiled.find((e) => e.price_book_document_id)?.price_book_document_id ?? null;
+
+  let approvedRules = 0;
+  let approvedDependencies = 0;
+  for (const ids of chunk(regionIds, 100)) {
+    const { data: pr, error: prErr } = await supabase
+      .from('price_rule').update({ review_status: 'APPROVED' })
+      .in('source_region_id', ids).eq('review_status', 'UNREVIEWED').select('id');
+    if (prErr) throw new Error(prErr.message);
+    approvedRules += pr?.length ?? 0;
+
+    const { data: dr, error: drErr } = await supabase
+      .from('dependency_rule').update({ review_status: 'APPROVED' })
+      .in('source_region_id', ids).eq('review_status', 'UNREVIEWED').select('id');
+    if (drErr) throw new Error(drErr.message);
+    approvedDependencies += dr?.length ?? 0;
+  }
+
+  for (const ids of chunk(extIds, 100)) {
+    const { error: exErr } = await supabase.from('price_book_extractions').update({ status: 'approved' }).in('id', ids);
+    if (exErr) throw new Error(exErr.message);
+  }
+
+  // Apply the matching ingestion proposals (best-effort; never blocks approval).
+  const { data: props } = await supabase
+    .from('pricing_change_proposals')
+    .select('id, target_ids')
+    .eq('source', 'ingestion')
+    .eq('status', 'pending');
+  const extIdSet = new Set(extIds);
+  const proposalIds = (props ?? [])
+    .filter((p) => extIdSet.has((p.target_ids as { extractionId?: string } | null)?.extractionId ?? ''))
+    .map((p) => p.id as string);
+  for (const ids of chunk(proposalIds, 100)) {
+    await supabase.from('pricing_change_proposals')
+      .update({ status: 'applied', reviewed_at: new Date().toISOString() }).in('id', ids);
+  }
+
+  return { approvedExtractions: extIds.length, approvedRules, approvedDependencies, documentId };
+}
+
 /**
  * Rejects a compiled table: marks its rules REJECTED (kept for audit), the
  * extraction discarded, and the proposal rejected. No prices are published.

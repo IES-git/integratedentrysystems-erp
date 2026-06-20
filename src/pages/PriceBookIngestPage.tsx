@@ -26,6 +26,8 @@ import {
   type ColumnMapping, type RowMapping, type BaseTableOption, type GridDiff, type HardwareRowMapping,
 } from '@/lib/price-books-api';
 import RuleReviewPanel from '@/components/pricing/RuleReviewPanel';
+import { approveAllCompiledExtractions } from '@/lib/price-rules-api';
+import { publishPriceBookDocumentWithQa, QaGateError } from '@/lib/cpq/qa-checks';
 import { getProposalForExtraction } from '@/lib/pricing-proposals-api';
 import { getFieldDefinitions } from '@/lib/estimates-api';
 import type {
@@ -656,6 +658,107 @@ export default function PriceBookIngestPage() {
       toast({ title: 'Compile failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
     } finally {
       setCompilingIds((prev) => { const next = new Set(prev); next.delete(ext.id); return next; });
+    }
+  };
+
+  const [approvingAll, setApprovingAll] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [processingBook, setProcessingBook] = useState(false);
+  const [processPhase, setProcessPhase] = useState('');
+
+  /**
+   * One-click pipeline for a whole book: extract every pending grid → compile
+   * all to rules → approve all compiled. Leaves the final Publish as an explicit
+   * step (so the QA gate / override decision stays a deliberate action).
+   * Worker-only (compile lives on the worker).
+   */
+  const processEntireBook = async () => {
+    if (!reviewBook) return;
+    setProcessingBook(true);
+    try {
+      // 1. Extract all not-yet-pulled grids (background job; poll to completion).
+      const pending = bookExtractions.filter((e) => e.status === 'pending' && !e.gridExtracted);
+      if (pending.length > 0) {
+        setProcessPhase(`Extracting ${pending.length} grid(s)…`);
+        await extractAllPriceBookTables(reviewBook.id);
+        await pollExtractAllStatus(reviewBook.id, {
+          onProgress: (b) =>
+            setProcessPhase(`Extracting grids ${b.extractDone}/${b.extractTotal}${b.extractFailed ? ` (${b.extractFailed} failed)` : ''}…`),
+        });
+        await reloadBookExtractions(reviewBook);
+      }
+
+      // 2. Compile every extracted grid into canonical rules.
+      setProcessPhase('Compiling tables to rules…');
+      const compiled = await compileAllPriceBookTables(reviewBook.id);
+      await reloadBookExtractions(reviewBook);
+
+      // 3. Bulk-approve all compiled tables.
+      setProcessPhase('Approving rules…');
+      const approved = await approveAllCompiledExtractions(reviewBook.id);
+      await reloadBookExtractions(reviewBook);
+
+      toast({
+        title: 'Book processed',
+        description: `${compiled.done}/${compiled.total} table(s) compiled → ${approved.approvedRules} price rule(s) + ${approved.approvedDependencies} dependency rule(s) approved.${compiled.failed ? ` ${compiled.failed} table(s) failed to compile — re-run those.` : ''} Click "Publish version" to go live.`,
+      });
+    } catch (err) {
+      toast({ title: 'Processing failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+      await reloadBookExtractions(reviewBook);
+    } finally {
+      setProcessingBook(false);
+      setProcessPhase('');
+    }
+  };
+
+  /** CPQ v2 — bulk-approve every compiled table for the open book in one pass. */
+  const approveAllCompiled = async () => {
+    if (!reviewBook) return;
+    setApprovingAll(true);
+    try {
+      const r = await approveAllCompiledExtractions(reviewBook.id);
+      toast({
+        title: 'Rules approved',
+        description: `${r.approvedExtractions} table(s) approved → ${r.approvedRules} price rule(s), ${r.approvedDependencies} dependency rule(s). You can publish the version now.`,
+      });
+      await reloadBookExtractions(reviewBook);
+    } catch (err) {
+      toast({ title: 'Bulk approve failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+    } finally {
+      setApprovingAll(false);
+    }
+  };
+
+  /** CPQ v2 — publish the book's draft document (QA-gated) so its rules go live. */
+  const publishBook = async (override = false) => {
+    if (!reviewBook) return;
+    const documentId = bookExtractions.find((e) => e.priceBookDocumentId)?.priceBookDocumentId ?? null;
+    if (!documentId) {
+      toast({ title: 'Nothing to publish', description: 'No compiled document found for this book yet.', variant: 'destructive' });
+      return;
+    }
+    setPublishing(true);
+    try {
+      const result = await publishPriceBookDocumentWithQa(documentId, { override });
+      toast({
+        title: 'Version published',
+        description: `Approved rules are now the active priced version.${result.warningCount > 0 ? ` (${result.warningCount} QA warning(s))` : ''}`,
+      });
+      await reloadBookExtractions(reviewBook);
+      await loadList();
+    } catch (err) {
+      if (err instanceof QaGateError) {
+        const proceed = confirm(
+          `QA gate found ${err.result.blockingCount} blocking issue(s):\n\n` +
+          err.result.findings.filter((f) => f.severity === 'ERROR' || f.severity === 'BLOCK').slice(0, 8).map((f) => `• [${f.checkName}] ${f.detail}`).join('\n') +
+          `\n\nPublish anyway (override the QA gate)?`,
+        );
+        if (proceed) { setPublishing(false); return publishBook(true); }
+      } else {
+        toast({ title: 'Publish failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+      }
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -1550,22 +1653,50 @@ export default function PriceBookIngestPage() {
                 <CardTitle className="text-base">Extracted pricing tables</CardTitle>
                 <CardDescription>Every table found in the book. Pull each grid, then map &amp; approve it into a pricing table.</CardDescription>
               </div>
-              {(extractingAll || bookExtractions.some((e) => e.status === 'pending' && !e.gridExtracted)) && (
-                <Button size="sm" variant="outline" onClick={extractAllGrids} disabled={extractingAll}>
-                  {extractingAll ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
-                  {extractingAll
-                    ? (extractProgress
-                        ? `Extracting ${extractProgress.done}/${extractProgress.total}${extractProgress.failed ? ` (${extractProgress.failed} failed)` : ''}…`
-                        : 'Extracting…')
-                    : 'Extract all grids'}
-                </Button>
-              )}
-              {hasPriceBookWorker && bookExtractions.some((e) => e.gridExtracted && e.status !== 'approved' && e.status !== 'discarded') && (
-                <Button size="sm" variant="outline" onClick={compileAllGrids} disabled={compilingAll}>
-                  {compilingAll ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
-                  {compilingAll ? 'Compiling…' : 'Compile all to rules'}
-                </Button>
-              )}
+              <div className="flex flex-col items-end gap-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {/* One-click pipeline: extract → compile → approve (worker-only). */}
+                  {hasPriceBookWorker && bookExtractions.some((e) => e.status !== 'approved' && e.status !== 'discarded') && (
+                    <Button size="sm" onClick={processEntireBook} disabled={processingBook || extractingAll || compilingAll || approvingAll}>
+                      {processingBook ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                      {processingBook ? 'Processing…' : 'Process entire book'}
+                    </Button>
+                  )}
+                  {(extractingAll || bookExtractions.some((e) => e.status === 'pending' && !e.gridExtracted)) && (
+                    <Button size="sm" variant="outline" onClick={extractAllGrids} disabled={extractingAll || processingBook}>
+                      {extractingAll ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                      {extractingAll
+                        ? (extractProgress
+                            ? `Extracting ${extractProgress.done}/${extractProgress.total}${extractProgress.failed ? ` (${extractProgress.failed} failed)` : ''}…`
+                            : 'Extracting…')
+                        : 'Extract all grids'}
+                    </Button>
+                  )}
+                  {hasPriceBookWorker && bookExtractions.some((e) => e.gridExtracted && e.status !== 'approved' && e.status !== 'discarded') && (
+                    <Button size="sm" variant="outline" onClick={compileAllGrids} disabled={compilingAll || processingBook}>
+                      {compilingAll ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                      {compilingAll ? 'Compiling…' : 'Compile all to rules'}
+                    </Button>
+                  )}
+                  {bookExtractions.some((e) => e.status === 'compiled') && (
+                    <Button size="sm" variant="outline" onClick={approveAllCompiled} disabled={approvingAll || processingBook}>
+                      {approvingAll ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />}
+                      {approvingAll ? 'Approving…' : 'Approve all compiled'}
+                    </Button>
+                  )}
+                  {!bookExtractions.some((e) => e.status === 'compiled') && bookExtractions.some((e) => e.status === 'approved' && e.priceBookDocumentId) && (
+                    <Button size="sm" onClick={() => publishBook(false)} disabled={publishing || processingBook}>
+                      {publishing ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                      {publishing ? 'Publishing…' : 'Publish version'}
+                    </Button>
+                  )}
+                </div>
+                {processingBook && processPhase && (
+                  <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                    <Loader2 className="h-3 w-3 animate-spin" /> {processPhase}
+                  </p>
+                )}
+              </div>
             </div>
           </CardHeader>
           <CardContent className="p-0">
