@@ -147,4 +147,13 @@ app.post('/ingest-hardware', requireUser, async (req, res) => {
 });
 
 const port = Number(PORT) || 8080;
-app.listen(port, () => console.log(`price-book-worker listening on :${port}`));
+// Bind explicitly to 0.0.0.0 (IPv4). Without a host, Node may bind IPv6-only
+// (`::`), which Render's port scan can't detect → "no open ports detected" and
+// the new deploy never takes over routing (stale build keeps serving).
+const routes = app._router.stack
+  .filter((l) => l.route)
+  .map((l) => `${Object.keys(l.route.methods).join(',').toUpperCase()} ${l.route.path}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`price-book-worker listening on 0.0.0.0:${port}`);
+  console.log(`registered routes: ${routes.join(' | ')}`);
+});
