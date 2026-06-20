@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Upload, FileText, Loader2, CheckCircle2, AlertCircle, ArrowLeft, Trash2, Sparkles, RefreshCw, Eye } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -169,6 +169,28 @@ export default function PriceBookIngestPage() {
   };
 
   useEffect(() => { void loadList(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Silent book-list refresh (no spinner) — used by the background poller. */
+  const refreshBooks = useCallback(async () => {
+    try {
+      setBooks(await listPriceBooks());
+    } catch {
+      /* transient — the next tick retries */
+    }
+  }, []);
+
+  // Background poller: while any book is still cataloging or extracting, keep the
+  // list fresh so its status flips to "Extracted" automatically when the worker
+  // finishes — without needing a manual page refresh. Survives re-mounts because
+  // it's driven by the loaded `books` state, not a one-shot upload promise.
+  const anyBookProcessing = books.some(
+    (b) => b.ocrStatus === 'processing' || b.extractStatus === 'processing',
+  );
+  useEffect(() => {
+    if (!anyBookProcessing) return;
+    const id = setInterval(() => { void refreshBooks(); }, 4000);
+    return () => clearInterval(id);
+  }, [anyBookProcessing, refreshBooks]);
 
   const handleUpload = async () => {
     if (!file || !name.trim() || !user) {
