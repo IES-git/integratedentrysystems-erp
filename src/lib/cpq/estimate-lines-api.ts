@@ -46,6 +46,8 @@ function mapLine(row: Record<string, unknown>): EstimateLine {
     exceptionMessage: (row.exception_message as string | null) ?? null,
     sortOrder: (row.sort_order as number) ?? 0,
     createdAt: row.created_at as string,
+    manualSellPrice: row.manual_sell_price != null ? Number(row.manual_sell_price) : null,
+    isManualOverride: (row.is_manual_override as boolean | null) ?? null,
   };
 }
 
@@ -68,4 +70,32 @@ export async function loadEstimateLinesByOpening(
     byOpening.get(key)!.push(line);
   }
   return byOpening;
+}
+
+/** Sets or clears a manual sell price override on a single estimate_line row. */
+export async function updateEstimateLineOverride(
+  lineId: string,
+  manualSellPrice: number | null,
+): Promise<void> {
+  const { error } = await supabase
+    .from('estimate_line')
+    .update({
+      manual_sell_price: manualSellPrice,
+      is_manual_override: manualSellPrice !== null,
+    })
+    .eq('id', lineId);
+  if (error) throw new Error(`Failed to update line override: ${error.message}`);
+}
+
+/** Updates the sell adjustment percentage and/or notes on an estimate. */
+export async function updateEstimateReviewFields(
+  estimateId: string,
+  updates: { sellAdjustmentPct?: number | null; estimateNotes?: string | null },
+): Promise<void> {
+  const row: Record<string, unknown> = {};
+  if ('sellAdjustmentPct' in updates) row.sell_adjustment_pct = updates.sellAdjustmentPct ?? null;
+  if ('estimateNotes' in updates) row.estimate_notes = updates.estimateNotes ?? null;
+  if (Object.keys(row).length === 0) return;
+  const { error } = await supabase.from('estimates').update(row).eq('id', estimateId);
+  if (error) throw new Error(`Failed to update estimate review fields: ${error.message}`);
 }

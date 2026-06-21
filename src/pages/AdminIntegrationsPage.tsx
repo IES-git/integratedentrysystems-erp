@@ -116,26 +116,46 @@ export default function AdminIntegrationsPage() {
           <CardHeader>
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-muted">
-                  <span className="text-xl font-bold text-muted-foreground">✉️</span>
+                <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-[#FF6B35]/10">
+                  <span className="text-xl font-bold text-[#FF6B35]">Re</span>
                 </div>
                 <div>
                   <CardTitle>Email Service</CardTitle>
-                  <CardDescription>Quote delivery & notifications</CardDescription>
+                  <CardDescription>Quote delivery via Resend</CardDescription>
                 </div>
               </div>
-              <Badge variant="secondary" className="flex items-center gap-1">
-                <XCircle className="h-3 w-3" />
-                Not Configured
+              <Badge variant="outline" className="flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3 text-success" />
+                Configured
               </Badge>
             </div>
           </CardHeader>
           <CardContent>
             <p className="mb-4 text-sm text-muted-foreground">
-              Configure email service for sending quotes to customers and
-              receiving notifications on quote status changes.
+              Quotes are delivered to customers via{' '}
+              <a
+                href="https://resend.com"
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2"
+              >
+                Resend
+              </a>
+              . To change the sending address or API key, update the{' '}
+              <code className="text-xs bg-muted px-1 py-0.5 rounded">RESEND_API_KEY</code> and{' '}
+              <code className="text-xs bg-muted px-1 py-0.5 rounded">QUOTE_EMAIL_FROM</code> secrets
+              in the Supabase dashboard under Edge Function secrets.
             </p>
-            <Button variant="outline">Configure Email</Button>
+            <Button variant="outline" asChild>
+              <a
+                href="https://supabase.com/dashboard/project/_/settings/functions"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Manage Secrets
+                <ExternalLink className="ml-2 h-4 w-4" />
+              </a>
+            </Button>
           </CardContent>
         </Card>
       </div>

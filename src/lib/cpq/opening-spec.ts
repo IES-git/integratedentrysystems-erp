@@ -8,7 +8,7 @@
  */
 
 import { parseDoorDimension } from '@/components/pricing/dimension-utils';
-import { deriveBuilderContext, mergeDerived, type DerivedMap } from './builder-logic';
+import { deriveBuilderContext, mergeDerived, coreUpgradeOptionCode, type DerivedMap } from './builder-logic';
 import { resolveInfill, type NgpInfillType } from './ngp-infill';
 import type { NgpCatalog } from '@/lib/ngp-catalog-api';
 import type {
@@ -177,6 +177,17 @@ export function resolveComponentFields(draft: ComponentDraft, derived: DerivedMa
   const seriesPath = SERIES_FIELD_PATH[draft.entityType];
   if (draft.familyCode && seriesPath && !(seriesPath in effective)) {
     effective[seriesPath] = draft.familyCode;
+  }
+  // Bridge a door core-upgrade pick (DOR-003) into the door.option_code the
+  // published core-upgrade adder matches on, so choosing polystyrene/poly-
+  // urethane/temperature-rise over the H base prices the upgrade. Honeycomb
+  // (the included base core) maps to no code, so no adder fires.
+  if (draft.entityType === 'door' && !effective['door.option_code']) {
+    const code = coreUpgradeOptionCode(
+      effective['door.door_series_construction'] ?? draft.familyCode ?? '',
+      effective['door.core_type'] ?? '',
+    );
+    if (code) effective['door.option_code'] = code;
   }
   return effective;
 }

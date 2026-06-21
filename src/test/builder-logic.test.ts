@@ -147,7 +147,10 @@ describe('fieldTier', () => {
   it('marks curated fields essential and others advanced', () => {
     const draft = baseDraft();
     const ctx = deriveBuilderContext(draft);
-    expect(fieldTier(makeField('DOR-002', 'door'), draft, ctx, draft.doors[0])).toBe('essential');
+    // Core type is an entered requirement (essential); the manufacturer series
+    // DOR-002 is a resolver OUTPUT, so it is advanced (audit/technical detail).
+    expect(fieldTier(makeField('DOR-003', 'door'), draft, ctx, draft.doors[0])).toBe('essential');
+    expect(fieldTier(makeField('DOR-002', 'door'), draft, ctx, draft.doors[0])).toBe('advanced');
     expect(fieldTier(makeField('DOR-061', 'door'), draft, ctx, draft.doors[0])).toBe('advanced');
   });
 
@@ -214,6 +217,68 @@ describe('allowedEnumOptions', () => {
     });
     const ctx = deriveBuilderContext(draft);
     expect(allowedEnumOptions(frameSeries, draft, ctx, draft.frames[0])).toEqual(['F', 'F-BL']);
+  });
+
+  const coreType = makeField('DOR-003', 'door', {
+    enumOptions: ['Honeycomb', 'polystyrene', 'polyurethane', 'temperature rise', 'steel stiffened', 'fiberglass', 'specialty'],
+  });
+
+  it('offers the four glued-core options on H and CH', () => {
+    for (const series of ['H', 'CH']) {
+      const draft = createOpeningDraft({ doors: [door({ 'door.door_series_construction': series })] });
+      const ctx = deriveBuilderContext(draft);
+      expect(allowedEnumOptions(coreType, draft, ctx, draft.doors[0]))
+        .toEqual(['Honeycomb', 'polystyrene', 'polyurethane', 'temperature rise']);
+    }
+  });
+
+  it('offers steel-stiffened + the two between-stiffener cores on LW and C', () => {
+    for (const series of ['LW', 'C']) {
+      const draft = createOpeningDraft({ doors: [door({ 'door.door_series_construction': series })] });
+      const ctx = deriveBuilderContext(draft);
+      // keep() preserves the field's enum order (poly/urethane precede steel).
+      expect(allowedEnumOptions(coreType, draft, ctx, draft.doors[0]))
+        .toEqual(['polystyrene', 'polyurethane', 'steel stiffened']);
+    }
+  });
+});
+
+describe('core-upgrade option_code bridge', () => {
+  const mappings = [
+    { id: '1', fieldId: 'DOR-002', fieldPath: 'door.door_series_construction', valueType: null, notes: null, createdAt: '' },
+    { id: '2', fieldId: 'DOR-003', fieldPath: 'door.core_type', valueType: null, notes: null, createdAt: '' },
+    { id: '3', fieldId: 'DOR-OPT', fieldPath: 'door.option_code', valueType: null, notes: null, createdAt: '' },
+  ];
+
+  it('maps each series core upgrade to its published option_code', () => {
+    const cases: Array<[string, string, string]> = [
+      ['H', 'polystyrene', 'HP'],
+      ['H', 'polyurethane', 'HT'],
+      ['H', 'temperature rise', 'HR'],
+      ['CH', 'polystyrene', 'CHP'],
+      ['CH', 'polyurethane', 'CHT'],
+      ['CH', 'temperature rise', 'CHR'],
+      ['LW', 'polystyrene', 'PS'],
+      ['LW', 'polyurethane', 'TS'],
+      ['C', 'polystyrene', 'PS'],
+      ['C', 'polyurethane', 'TS'],
+      ['EH', 'polystyrene', 'EP'],
+    ];
+    for (const [series, core, code] of cases) {
+      const d = door({ 'door.door_series_construction': series, 'door.core_type': core });
+      const spec = buildNormalizedSpec(createOpeningDraft({ doors: [d] }), mappings);
+      const doorComp = spec.components.find((c) => c.entityType === 'door')!;
+      expect(doorComp.fields['door.option_code']).toBe(code);
+    }
+  });
+
+  it('emits no option_code for the included base core', () => {
+    for (const [series, core] of [['H', 'Honeycomb'], ['C', 'steel stiffened']] as const) {
+      const d = door({ 'door.door_series_construction': series, 'door.core_type': core });
+      const spec = buildNormalizedSpec(createOpeningDraft({ doors: [d] }), mappings);
+      const doorComp = spec.components.find((c) => c.entityType === 'door')!;
+      expect(doorComp.fields['door.option_code']).toBeUndefined();
+    }
   });
 });
 

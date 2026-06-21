@@ -7,6 +7,51 @@ import type { Quote, QuoteItem, QuoteWithItems, QuoteStatus, QuoteType } from '@
 import type { EstimateItem, ItemField } from '@/types';
 
 // ---------------------------------------------------------------------------
+// Email sending
+// ---------------------------------------------------------------------------
+
+export interface SendQuoteEmailInput {
+  quoteId: string;
+  recipientEmail: string;
+  ccEmails?: string[];
+  subject: string;
+  message: string;
+  /** Customer-facing quote PDF, base64-encoded. */
+  pdfBase64: string;
+  pdfFileName: string;
+  /** Optional manufacturer RFQ PDF, base64-encoded. */
+  manufacturerPdfBase64?: string;
+  manufacturerPdfFileName?: string;
+}
+
+export interface SendQuoteEmailResult {
+  quote: Quote;
+}
+
+/**
+ * Invoke the send-quote-email Supabase Edge Function.
+ * On success, the edge function flips the quote status to 'sent' and
+ * stamps sent_at / sent_to_email; returns the updated quote.
+ */
+export async function sendQuoteEmail(
+  input: SendQuoteEmailInput
+): Promise<SendQuoteEmailResult> {
+  const { data, error } = await supabase.functions.invoke('send-quote-email', {
+    body: input,
+  });
+
+  if (error) {
+    throw new Error(`Failed to send quote email: ${error.message}`);
+  }
+
+  if (!data?.quote) {
+    throw new Error('Unexpected response from send-quote-email function');
+  }
+
+  return { quote: mapQuoteRow(data.quote) };
+}
+
+// ---------------------------------------------------------------------------
 // Input types
 // ---------------------------------------------------------------------------
 
@@ -318,6 +363,8 @@ function mapQuoteRow(row: any): Quote {
     currency: row.currency,
     notes: row.notes,
     pricedAsOf: row.priced_as_of ?? null,
+    sentAt: row.sent_at ?? null,
+    sentToEmail: row.sent_to_email ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

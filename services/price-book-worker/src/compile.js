@@ -158,6 +158,60 @@ async function insertConditions(sb, priceRuleId, conditions) {
   if (error) throw new Error(`rule_condition insert failed: ${error.message}`);
 }
 
+/**
+ * Load the governed value vocabulary (`spec_value_alias`) once per compile run,
+ * keyed by `${field_path}\0${lower(raw_value)}`. Lets compilation emit CANONICAL
+ * enum values (the same tokens the builder offers) instead of source labels, so
+ * re-ingestion needs no post-hoc cleanup.
+ */
+export async function loadValueAliases(sb) {
+  const { data, error } = await sb
+    .from('spec_value_alias')
+    .select('field_path, raw_value, canonical_value, target_operator, status');
+  if (error) throw new Error(`Failed to load spec_value_alias: ${error.message}`);
+  const map = new Map();
+  for (const r of data ?? []) {
+    map.set(`${r.field_path}\u0000${String(r.raw_value).trim().toLowerCase()}`, {
+      canonical: r.canonical_value,
+      targetOperator: r.target_operator,
+      status: r.status,
+    });
+  }
+  return map;
+}
+
+/**
+ * Normalize an array of rule conditions through the alias map:
+ *   - status='alias'  -> rewrite value_1 to the canonical token (and switch the
+ *                        operator to IN when the alias is a multi-value list).
+ *   - status='reject' -> the value is unrecoverable junk (e.g. a series code or
+ *                        header leaked into a gauge column); signal the caller to
+ *                        SKIP the whole rule rather than emit an over-matching one.
+ * Returns { conds, rejected }.
+ *
+ * @param {object[]} conds
+ * @param {Map<string, {canonical: string|null, targetOperator: string, status: string}>} aliases
+ */
+export function aliasConds(conds, aliases) {
+  if (!aliases || aliases.size === 0) return { conds, rejected: false };
+  const out = [];
+  for (const c of conds) {
+    const key = c.fieldPath != null && c.value1 != null
+      ? `${c.fieldPath}\u0000${String(c.value1).trim().toLowerCase()}`
+      : null;
+    const hit = key ? aliases.get(key) : null;
+    if (!hit) { out.push(c); continue; }
+    if (hit.status === 'reject') return { conds: [], rejected: true };
+    out.push({
+      ...c,
+      operator: hit.targetOperator === 'IN' ? 'IN' : c.operator,
+      value1: hit.canonical,
+      normalizedValue: hit.canonical != null ? String(hit.canonical).toLowerCase() : c.normalizedValue,
+    });
+  }
+  return { conds: out, rejected: false };
+}
+
 function baseRule(documentId, regionId, priceTableId, entityType, ext, overrides) {
   return {
     price_book_id: documentId,
@@ -175,10 +229,17 @@ function baseRule(documentId, regionId, priceTableId, entityType, ext, overrides
   };
 }
 
+/** Strip a trailing " Series" suffix the extractor appends ("F Series" -> "F"),
+ *  so the series value matches the canonical family code the builder emits. */
+function normalizeSeriesToken(v) {
+  if (v == null) return v;
+  return String(v).replace(/\s+series$/i, '').trim();
+}
+
 /** Conditions shared by every rule in a size/component matrix (series + column attr). */
 function seriesCondition(paths, ext) {
   if (!ext.detected_series || !paths.series) return [];
-  return [{ fieldPath: paths.series, operator: 'EQ', valueType: 'CODE', value1: ext.detected_series, sourcePhrase: `series ${ext.detected_series}` }];
+  return [{ fieldPath: paths.series, operator: 'EQ', valueType: 'CODE', value1: normalizeSeriesToken(ext.detected_series), sourcePhrase: `series ${ext.detected_series}` }];
 }
 
 function columnConditions(paths, colLabel) {
@@ -260,8 +321,10 @@ async function compileMatrix(sb, ctx, archetype) {
   const { documentId, regionId, priceTableId, entityType, ext, grid, paths } = ctx;
   const colLabels = grid.columnLabels ?? [];
   const rowLabels = grid.rowLabels ?? [];
+  const aliases = ctx.aliases;
   let count = 0;
   let skippedUnparseableSize = 0;
+  let skippedRejected = 0;
   for (const cell of grid.cells ?? []) {
     const price = parsePrice(cell.price);
     if (price == null || price <= 0) continue;
@@ -271,7 +334,14 @@ async function compileMatrix(sb, ctx, archetype) {
     // (e.g. a "Price" column header parsed as a gauge value).
     if (isHeaderish(rowLabel) || isHeaderish(colLabel)) continue;
 
-    const colConds = columnConditions(paths, colLabel);
+    // Normalize series + column attrs to the governed vocabulary. A 'reject'
+    // value (e.g. a series code/header leaked into the gauge column) skips the
+    // whole cell instead of emitting an over-matching rule.
+    const seriesRes = aliasConds(seriesCondition(paths, ext), aliases);
+    const colRes = aliasConds(columnConditions(paths, colLabel), aliases);
+    if (seriesRes.rejected || colRes.rejected) { skippedRejected++; continue; }
+    const colConds = colRes.conds;
+
     const sizeConds = sizeConditions(paths, rowLabel);
     // A base/component matrix row must carry a size axis; otherwise it's noise
     // or a mis-parsed size code — skip it (and tally) rather than emit a rule
@@ -292,7 +362,7 @@ async function compileMatrix(sb, ctx, archetype) {
       raw_value_text: `${rowLabel} | ${colLabel} = ${price}`,
     }));
     await insertConditions(sb, ruleId, [
-      ...seriesCondition(paths, ext),
+      ...seriesRes.conds,
       ...colConds,
       ...sizeConds,
     ]);
@@ -300,6 +370,9 @@ async function compileMatrix(sb, ctx, archetype) {
   }
   if (skippedUnparseableSize > 0) {
     console.warn(`[compile] ${archetype} table ${priceTableId}: skipped ${skippedUnparseableSize} priced cell(s) with an unparseable/implausible size row — re-ingest the size grid for these.`);
+  }
+  if (skippedRejected > 0) {
+    console.warn(`[compile] ${archetype} table ${priceTableId}: skipped ${skippedRejected} priced cell(s) whose series/column value was rejected by the governed vocabulary (spec_value_alias).`);
   }
   return count;
 }
@@ -334,6 +407,13 @@ async function compileAdderList(sb, ctx) {
     else if (token?.kind === 'next_larger') { action = 'REFERENCE_PLUS_ADD'; amount = price; }
     else if (price == null) { continue; } // no price and no recognized token -> skip noise row
 
+    // Normalize series to the governed vocabulary; skip if rejected.
+    const { conds: addConds, rejected } = aliasConds([
+      ...seriesCondition(ctx.paths, ext),
+      { fieldPath: `${entityType}.option_code`, operator: 'EQ', valueType: 'CODE', value1: code, sourcePhrase: label, nullBehavior: 'IGNORE' },
+    ], ctx.aliases);
+    if (rejected) continue;
+
     const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
       action_type: action,
       price_status: status,
@@ -344,10 +424,7 @@ async function compileAdderList(sb, ctx) {
       unit_of_measure: uom,
       raw_value_text: `${label}${price != null ? ` = ${price}` : ''}`,
     }));
-    await insertConditions(sb, ruleId, [
-      ...seriesCondition(ctx.paths, ext),
-      { fieldPath: `${entityType}.option_code`, operator: 'EQ', valueType: 'CODE', value1: code, sourcePhrase: label, nullBehavior: 'IGNORE' },
-    ]);
+    await insertConditions(sb, ruleId, addConds);
     count++;
   }
   return count;
@@ -381,20 +458,37 @@ async function compilePerFoot(sb, ctx) {
   return count;
 }
 
+/**
+ * Map narrative wording to a dependency severity so blocking requirements are
+ * compiled as blocks, not soft warnings. "must / shall / required / not allowed
+ * / prohibited" => ERROR (blocks); "recommend / should / may" => WARNING/INFO.
+ */
+function narrativeSeverity(line) {
+  const t = String(line).toLowerCase();
+  if (/\b(must|shall|required|not allowed|prohibit|cannot|may not|do not)\b/.test(t)) return 'ERROR';
+  if (/\b(recommend|should|preferred)\b/.test(t)) return 'WARNING';
+  if (/\b(note|typically|generally|may)\b/.test(t)) return 'INFO';
+  return 'WARNING';
+}
+
 /** Compile a narrative/notes table into dependency_rule rows. */
 async function compileNarrative(sb, ctx) {
-  const { documentId, regionId, ext, grid } = ctx;
+  const { documentId, regionId, entityType, ext, grid } = ctx;
   const lines = [...(grid.rowLabels ?? []), ...(grid.warnings ?? [])].map((l) => String(l).trim()).filter(Boolean);
   let count = 0;
   for (const line of lines) {
     const token = normalizeToken(line);
     if (token?.kind !== 'dependency') continue;
+    // Trigger carries a `scope` (component the note applies to) and a `predicates`
+    // array the engine can execute. Extraction confidence is low for free text,
+    // so predicates start empty and are filled during review; the note + scope +
+    // severity are compiled deterministically.
     const { error } = await sb.from('dependency_rule').insert({
       price_book_id: documentId,
-      trigger_conditions: { source: ext.title ?? null, note: line },
+      trigger_conditions: { source: ext.title ?? null, note: line, scope: entityType ?? null, predicates: [], mode: 'all' },
       relationship_type: token.relationship,
       target_type: 'spec_field',
-      severity: 'WARNING',
+      severity: narrativeSeverity(line),
       auto_apply_allowed: false,
       message_template: line,
       source_region_id: regionId,
@@ -410,6 +504,8 @@ async function compileNarrative(sb, ctx) {
 /** Compile a whole-table status (included / NC / NA / CF). */
 async function compileStatusTable(sb, ctx, status) {
   const { documentId, regionId, priceTableId, entityType, ext } = ctx;
+  const { conds, rejected } = aliasConds(seriesCondition(ctx.paths, ext), ctx.aliases);
+  if (rejected) return 0;
   const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
     action_type: statusToAction(status),
     price_status: status,
@@ -417,7 +513,78 @@ async function compileStatusTable(sb, ctx, status) {
     amount: null,
     raw_value_text: ext.title ?? status,
   }));
-  await insertConditions(sb, ruleId, seriesCondition(ctx.paths, ext));
+  await insertConditions(sb, ruleId, conds);
+
+  // Record the included scope so the engine can suppress duplicate charges for
+  // whatever this rule bundles. We can only extract an option code from the
+  // title heuristically; the scope is recorded for review either way.
+  if (status === 'INCLUDED') {
+    const code = ext.title ? extractOptionCode(ext.title) : null;
+    const { error } = await sb.from('included_scope').insert({
+      price_rule_id: ruleId,
+      included_feature: ext.title ?? null,
+      included_option_code: code && /^[A-Z0-9]/.test(code) ? code : null,
+      suppresses_charge_category: null,
+      notes: 'Compiled from an Included/N-C status table; confirm the suppressed scope on review.',
+    });
+    if (error) throw new Error(`included_scope insert failed: ${error.message}`);
+  }
+  return 1;
+}
+
+/** Parse a quantity bracket label ("1-9", "10+", "25 and up", "5") -> {minQty,maxQty}. */
+function parseQtyBracket(label) {
+  const s = String(label ?? '').trim().toLowerCase();
+  let m;
+  if ((m = /^(\d+)\s*(?:[-–]|to)\s*(\d+)$/.exec(s))) return { minQty: +m[1], maxQty: +m[2] };
+  if ((m = /^(\d+)\s*(?:\+|and\s*up|or\s*more|plus)$/.exec(s))) return { minQty: +m[1], maxQty: null };
+  if ((m = /^(?:≥|>=)\s*(\d+)$/.exec(s))) return { minQty: +m[1], maxQty: null };
+  if ((m = /^(\d+)$/.exec(s))) return { minQty: +m[1], maxQty: +m[1] };
+  return null;
+}
+
+/**
+ * Compile a quantity-tier table into ONE TIERED_ADD rule whose `quantity_tier`
+ * children bracket the opening quantity. Falls back to the option-adder compiler
+ * when the rows are not recognizable quantity brackets, so nothing regresses.
+ */
+async function compileQuantityTier(sb, ctx) {
+  const { documentId, regionId, priceTableId, entityType, ext, grid } = ctx;
+  const rowLabels = grid.rowLabels ?? [];
+  const priceByRow = new Map();
+  for (const c of grid.cells ?? []) if (!priceByRow.has(c.row)) priceByRow.set(c.row, parsePrice(c.price));
+
+  const tiers = [];
+  for (let r = 0; r < rowLabels.length; r++) {
+    const label = String(rowLabels[r] ?? '').trim();
+    const price = priceByRow.get(r);
+    if (!label || price == null) continue;
+    const br = parseQtyBracket(label);
+    if (br) tiers.push({ ...br, amount: price, label });
+  }
+  if (tiers.length < 2) return compileAdderList(sb, ctx); // not actually a tier grid
+
+  const { conds, rejected } = aliasConds(seriesCondition(ctx.paths, ext), ctx.aliases);
+  if (rejected) return 0;
+  const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
+    action_type: 'TIERED_ADD',
+    charge_category: 'quantity_tier',
+    quantity_basis_field: 'opening.quantity',
+    amount: null,
+    raw_value_text: ext.title ?? 'quantity tiers',
+  }));
+  await insertConditions(sb, ruleId, conds);
+  const tierRows = tiers.map((t) => ({
+    price_rule_id: ruleId,
+    quantity_field: 'opening.quantity',
+    min_qty: t.minQty,
+    max_qty: t.maxQty,
+    amount: t.amount,
+    status: 'PRICED',
+    is_setup_charge: false,
+  }));
+  const { error } = await sb.from('quantity_tier').insert(tierRows);
+  if (error) throw new Error(`quantity_tier insert failed: ${error.message}`);
   return 1;
 }
 
@@ -468,7 +635,8 @@ export async function runCompileTable(sb, extractionId) {
   );
   const priceTableId = await insertPriceTable(sb, documentId, regionId, entityType, archetype, ext);
 
-  const ctx = { documentId, regionId, priceTableId, entityType, ext, grid, paths };
+  const aliases = await loadValueAliases(sb);
+  const ctx = { documentId, regionId, priceTableId, entityType, ext, grid, paths, aliases };
 
   let count = 0;
   let proposalType = 'price_rule';
@@ -486,8 +654,10 @@ export async function runCompileTable(sb, extractionId) {
     case 'fabrication':
     case 'install_kit':
     case 'anchor':
-    case 'quantity_tier':
       count = await compileAdderList(sb, ctx);
+      break;
+    case 'quantity_tier':
+      count = await compileQuantityTier(sb, ctx);
       break;
     case 'per_foot':
       count = await compilePerFoot(sb, ctx);

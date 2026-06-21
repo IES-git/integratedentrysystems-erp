@@ -10,7 +10,12 @@ import { useToast } from '@/hooks/use-toast';
 import {
   createManualEstimate,
   updateEstimate as apiUpdateEstimate,
+  getEstimateOpenings,
 } from '@/lib/estimates-api';
+import {
+  loadEstimateLinesByOpening,
+} from '@/lib/cpq/estimate-lines-api';
+import { estimateGrandTotal } from '@/lib/cpq/opening-totals';
 import { supabase } from '@/lib/supabase';
 import type { Company } from '@/types';
 
@@ -60,6 +65,9 @@ export default function ManualEstimateWizardPage() {
   const [noCustomer, setNoCustomer] = useState(false);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [saving, setSaving] = useState(false);
+  // When the user clicks "Edit configuration" on the Review step, we store the
+  // target opening here, step back to Openings, and OpeningsStep auto-opens it.
+  const [pendingEditOpening, setPendingEditOpening] = useState<import('@/types').EstimateOpeningWithItems | null>(null);
 
   useEffect(() => {
     const init = async () => {
@@ -83,7 +91,12 @@ export default function ManualEstimateWizardPage() {
               .select('id, company_id')
               .eq('id', existingId)
               .single(),
-            supabase.from('companies').select('*').eq('active', true).order('name'),
+            supabase
+              .from('companies')
+              .select('*')
+              .eq('active', true)
+              .in('company_type', ['customer', 'both'])
+              .order('name'),
           ]);
 
           if (estimateResult.error || !estimateResult.data) {
@@ -105,6 +118,7 @@ export default function ManualEstimateWizardPage() {
             .from('companies')
             .select('*')
             .eq('active', true)
+            .in('company_type', ['customer', 'both'])
             .order('name');
 
           if (companiesResult.data) {
@@ -194,16 +208,32 @@ export default function ManualEstimateWizardPage() {
 
     setSaving(true);
     try {
+      // Compute the authoritative grand total from engine lines so it's stored
+      // on estimates.total_price (used in the list view and quote creation).
+      let totalPrice: number | null = null;
+      try {
+        const [openings, linesByOpening] = await Promise.all([
+          getEstimateOpenings(finalId),
+          loadEstimateLinesByOpening(finalId),
+        ]);
+        // Fetch the current adjustment pct so we include it in the total.
+        const { data: adjRow } = await supabase
+          .from('estimates')
+          .select('sell_adjustment_pct')
+          .eq('id', finalId)
+          .single();
+        const adjustmentPct = adjRow?.sell_adjustment_pct as number | null | undefined;
+        totalPrice = estimateGrandTotal(openings, linesByOpening, adjustmentPct ?? null);
+      } catch {
+        // Non-fatal: if we can't compute the total, just save without it.
+      }
+
       await apiUpdateEstimate(finalId, {
         companyId: noCustomer ? null : selectedCustomerId,
+        totalPrice,
       });
-      toast({ title: 'Estimate saved', description: 'Your estimate has been saved as a draft.' });
-
-      if (existingId) {
-        navigate('/app/estimates');
-      } else {
-        navigate(`/app/estimates/wizard?id=${finalId}&step=1`);
-      }
+      toast({ title: 'Estimate saved', description: 'Your estimate has been saved.' });
+      navigate('/app/estimates');
     } catch (err) {
       toast({
         title: 'Error',
@@ -297,6 +327,8 @@ export default function ManualEstimateWizardPage() {
               onFinish={handleAdvanceToReview}
               finishLabel={saving ? 'Saving…' : 'Review & Pricing →'}
               finishLoading={saving}
+              autoEditOpening={pendingEditOpening}
+              onAutoEditDone={() => setPendingEditOpening(null)}
             />
           )}
 
@@ -306,6 +338,10 @@ export default function ManualEstimateWizardPage() {
               onBack={() => setCurrentStepIndex(1)}
               onFinish={handleFinish}
               finishLoading={saving}
+              onEditOpening={(opening) => {
+                setPendingEditOpening(opening);
+                setCurrentStepIndex(1);
+              }}
             />
           )}
         </div>

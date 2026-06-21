@@ -1,14 +1,32 @@
 # Current Supabase Schema
 
-Last updated: 2026-06-20 (CPQ Phase 1 pricing-data remediation — added spec_value_alias governance table, qa_issue_summary view, cleaned rule_condition vocabulary, assigned exclusive groups, seeded service_scope defaults; see "Pricing data remediation" section)
+Last updated: 2026-06-21 (Auth overhaul: invite-only flow, role enum simplified to admin/sales/ops, active-user gate, role-based route guards; blocked_field_labels and item_type_base_fields policies migrated to use is_admin())
 
 ## Authentication Status
 
-✅ **Supabase Authentication is LIVE**
-- Login page using `auth.signInWithPassword()`
-- Signup page with automatic profile creation
+✅ **Supabase Authentication is LIVE — Invite-Only**
+- Login page using `auth.signInWithPassword()` with active-user gate
+- Invite-only: no public signup page; admins invite users via Edge Function (`invite-user`)
+- Invited users set their password via `/accept-invite` on first login
+- Password reset flow via `/forgot-password` → `/reset-password`
 - AuthContext integrated with Supabase sessions
 - Session persistence enabled
+- Role-based route guards enforced at frontend (`RoleGuard`) and DB (RLS + `is_admin()`)
+
+### Required Manual Configuration (Supabase Dashboard)
+
+Go to: https://supabase.com/dashboard/project/osgxfggpqecspyvfrvqe/auth/url-configuration
+
+1. **Site URL** — set to your production domain (e.g. `https://your-app.vercel.app`)
+2. **Redirect URLs allowlist** — add all of the following:
+   ```
+   https://your-app.vercel.app/accept-invite
+   https://your-app.vercel.app/reset-password
+   http://localhost:5173/accept-invite
+   http://localhost:5173/reset-password
+   ```
+3. **Edge Function secret** — set `SITE_URL` in the Supabase Edge Functions secrets to your production domain so invite emails link to the right URL:
+   - Dashboard → Edge Functions → Manage secrets → add `SITE_URL=https://your-app.vercel.app`
 
 ## Storage Buckets
 
@@ -33,8 +51,11 @@ Storage bucket for uploaded estimate files (PDFs and images).
 
 ### user_role
 ```sql
-CREATE TYPE user_role AS ENUM ('admin', 'sales', 'ops', 'finance', 'hr');
+CREATE TYPE user_role AS ENUM ('admin', 'sales', 'ops');
 ```
+- `admin` — full access including user management
+- `sales` — main nav only (estimates, quotes, customers, etc.)
+- `ops` — main + admin nav except user management
 
 ## Tables
 
@@ -133,7 +154,11 @@ Maps manufacturer-specific field terminology to master field definitions. Allows
 
 ### public.companies
 
-Business entity table replacing the old flat `customers` table.
+Unified business entity table with a `company_type` discriminator.
+
+- **`'customer'`** — Companies IES builds estimates and sells doors to. Shown in the Customers page and selectable in the estimate/quote wizard.
+- **`'manufacturer'`** — Suppliers IES sources door, frame, and hardware product from. Shown in the Manufacturers page and selectable when building opening estimates/quotes to drive pricing.
+- **`'both'`** — Companies that act in both roles (e.g. a distributor that also places orders). Appear in both customer and manufacturer selection lists.
 
 **Columns:**
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
@@ -222,10 +247,12 @@ Main estimate record from uploaded files.
 - `extracted_customer_email` (TEXT) - AI-extracted email
 - `extracted_customer_phone` (TEXT) - AI-extracted phone
 - `customer_confidence` (NUMERIC) - Confidence score for customer extraction
-- `total_price` (NUMERIC, DEFAULT NULL) - Total estimate price extracted from document
+- `total_price` (NUMERIC, DEFAULT NULL) - Total estimate price extracted from document; updated by handleFinish with the engine grand total (including sell_adjustment_pct)
 - `extracted_at` (TIMESTAMPTZ) - When extraction completed
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
+- `sell_adjustment_pct` (NUMERIC, NULLABLE) - Optional sell adjustment applied to the engine grand total on the Review step. Positive = markup %, negative = discount %. E.g. 10 = +10%.
+- `estimate_notes` (TEXT, NULLABLE) - Free-text notes entered on the Review step before saving the estimate.
 
 **Draft Flow:**
 1. Upload: File uploaded to Supabase Storage, estimate record created with `ocr_status = 'pending'`
@@ -263,6 +290,8 @@ Groups of estimate items (doors/frames + hardware) within an estimate. Each open
 - `quantity` (INTEGER, NOT NULL, DEFAULT 1) - How many times this opening repeats
 - `sort_order` (INTEGER, NOT NULL, DEFAULT 0) - Display order within the estimate
 - `template_type` (ENUM `opening_template_type`, NULLABLE) - Template type for the opening; NULL means custom. Values: `single`, `pair`, `single_with_panel`, `pair_with_panel`
+- `spec_snapshot` (JSONB, NULLABLE) - Full `OpeningDraft` JSON written by the spec builder on save. Enables faithful round-trip editing and re-pricing without lossy reconstruction from `item_fields`. NULL for legacy openings created before this column was added.
+- `resolver_version` (INTEGER, NULLABLE, DEFAULT NULL) - Gating flag for the spec-driven resolver. NULL = legacy/unmigrated opening (legacy pricing authority); `>=1` = managed by the spec resolver at that `RESOLVER_VERSION` (new engine is the sole pricing authority). Added by `cpq_v2_spec_resolver`.
 - `created_at` (TIMESTAMPTZ, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, DEFAULT NOW()) - Last update timestamp
 
@@ -536,6 +565,8 @@ Quote records generated from estimates, supporting customer-facing and manufactu
 - `currency` (TEXT, NOT NULL, DEFAULT 'USD') - ISO currency code
 - `notes` (TEXT, nullable) - Quote notes / payment terms / special instructions
 - `priced_as_of` (TIMESTAMPTZ, nullable) - Pins the catalog snapshot this quote was priced against, for reproducibility/audit (CPQ Phase 0). NULL for quotes created before this column existed.
+- `sent_at` (TIMESTAMPTZ, nullable) - Timestamp of the first successful email delivery. NULL means never sent.
+- `sent_to_email` (TEXT, nullable) - Primary recipient email address the quote was last sent to.
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
 
@@ -555,6 +586,34 @@ Quote records generated from estimates, supporting customer-facing and manufactu
 
 **Triggers:**
 - `set_quotes_updated_at` - Automatically updates updated_at timestamp
+
+### public.quote_emails
+
+Audit log of every email send attempt for a quote, including failures.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `quote_id` (UUID, NOT NULL) - FK to quotes.id, CASCADE on delete
+- `recipient_email` (TEXT, NOT NULL) - Primary recipient address
+- `cc_emails` (TEXT[], NOT NULL, DEFAULT '{}') - CC recipient addresses
+- `subject` (TEXT, NOT NULL) - Email subject line
+- `body` (TEXT, NOT NULL) - Email body (HTML or plain text)
+- `sent_by_user_id` (UUID, NOT NULL) - FK to users.id, RESTRICT on delete
+- `provider_message_id` (TEXT, nullable) - Message ID returned by Resend on success
+- `status` (TEXT, NOT NULL) - 'sent' | 'failed'
+- `error` (TEXT, nullable) - Error message if status = 'failed'
+- `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Attempt timestamp
+
+**Indexes:**
+- `idx_quote_emails_quote_id` on quote_id
+- `idx_quote_emails_created_at` on created_at DESC
+
+**RLS Policies:**
+- ✅ Row Level Security is ENABLED
+- `Authenticated users can read quote emails` - All authenticated users can SELECT
+- Inserts are performed by the `send-quote-email` edge function via service-role key (bypasses RLS)
+
+---
 
 ### public.quote_items
 
@@ -1727,7 +1786,7 @@ One NGP source workbook = one `price_book_document`. Dimensional matrices + opti
 - **public.external_scope_requirement** — required item not priced by this book. Cols: `id`, `price_rule_id` (NULL), `category`, `required_attributes` JSONB, `description`, `created_at`.
 
 ### Estimate layer
-- **public.estimate_line** — auditable price build-up (per "Estimate Output" tab). Cols: `id`, `estimate_id` CASCADE, `opening_id` CASCADE, `component_id`→estimate_items, `entity_type` (Phase 5: door/frame/panel/specialty/prep/hardware/anchor/packaging — drives the auditable-quote layer grouping), `line_type` CHECK('BASE','ADDER','INCLUDED','EXTERNAL','MANUAL_QUOTE','WARNING'), `price_rule_id`, `charge_category` (Phase 5: base/option/prep code/hardware category/keying/access_control/service scope — drives layer grouping + hardware rollups), `description`, `selected_option_code`, `quantity`, `unit_of_measure`, `unit_list_price`, `extended_list_price`, `discount_multiplier`, `extended_net_price`, `sell_price`, `gross_margin`, `gross_margin_pct`, `price_status` CHECK('PRICED','INCLUDED','NO_CHARGE','CONTACT_FACTORY','EXTERNAL_PENDING','INVALID'), `calculation_expression`, `matched_conditions` JSONB, `included_or_suppressed_by`, `source_page`, `source_region_id`, `price_book_id`, `confidence`, `review_status`, `exception_message`, `sort_order`, `created_at`. (Full authenticated CRUD.) Read into the auditable quote via `loadEstimateLinesByOpening` → `buildAuditableQuoteFromEstimateLines` (`src/lib/cpq/auditable-quote.ts`); completeness gated by `validateQuoteCompleteness` (`src/lib/cpq/completeness.ts`).
+- **public.estimate_line** — auditable price build-up (per "Estimate Output" tab). Cols: `id`, `estimate_id` CASCADE, `opening_id` CASCADE, `component_id`→estimate_items, `entity_type` (Phase 5: door/frame/panel/specialty/prep/hardware/anchor/packaging — drives the auditable-quote layer grouping), `line_type` CHECK('BASE','ADDER','INCLUDED','EXTERNAL','MANUAL_QUOTE','WARNING'), `price_rule_id`, `charge_category` (Phase 5: base/option/prep code/hardware category/keying/access_control/service scope — drives layer grouping + hardware rollups), `description`, `selected_option_code`, `quantity`, `unit_of_measure`, `unit_list_price`, `extended_list_price`, `discount_multiplier`, `extended_net_price`, `sell_price`, `gross_margin`, `gross_margin_pct`, `price_status` CHECK('PRICED','INCLUDED','NO_CHARGE','CONTACT_FACTORY','EXTERNAL_PENDING','INVALID'), `calculation_expression`, `matched_conditions` JSONB, `included_or_suppressed_by`, `source_page`, `source_region_id`, `price_book_id`, `confidence`, `review_status`, `exception_message`, `sort_order`, `created_at`, `manual_sell_price` NUMERIC (user override on Review step, supersedes sell_price in totals), `is_manual_override` BOOLEAN DEFAULT false (true when manual_sell_price is set). (Full authenticated CRUD.) Read into the auditable quote via `loadEstimateLinesByOpening` → `buildAuditableQuoteFromEstimateLines` (`src/lib/cpq/auditable-quote.ts`); completeness gated by `validateQuoteCompleteness` (`src/lib/cpq/completeness.ts`).
 - **public.manual_quote_queue** — CF/low-confidence/unresolved/invalid combos. Cols: `id`, `estimate_id` CASCADE, `opening_id`, `component_id`, `price_rule_id`, `reason` CHECK('CONTACT_FACTORY','LOW_CONFIDENCE','UNRESOLVED_REFERENCE','INVALID_COMBINATION','MISSING_PRICE'), `requested_inputs`, `status` CHECK('open','in_progress','resolved','cancelled'), `resolution_note`, timestamps. (Full authenticated CRUD.)
 - **public.qa_issue** — extraction/pricing validation issues (publication gate). Cols: `id`, `price_book_id` CASCADE, `price_rule_id`, `source_region_id`, `check_name`, `severity` CHECK('INFO','WARNING','ERROR','BLOCK'), `detail`, `status` CHECK('open','resolved','waived'), timestamps.
 
@@ -1796,7 +1855,7 @@ Phase 6 (cutover, GATED — not yet executed; preconditions: Pioneer book ingest
 
 Remediation of price-book data gaps and the builder↔rules value disconnect. Migrations: `cpq_v2_spec_value_alias`, `cpq_v2_clean_rule_condition_vocab`, `cpq_v2_drop_literal_null_conditions`, `cpq_v2_assign_exclusive_groups`, `cpq_v2_seed_service_scope`, `cpq_v2_review_rules_and_hardware_coverage`, `cpq_v2_qa_issue_summary_view`.
 
-- **public.spec_value_alias** (NEW) — governed vocabulary. Maps raw extracted `rule_condition` values to the canonical token in `opening_spec_field.allowed_values`.
+- **public.spec_value_alias** (NEW) — governed vocabulary. Maps raw extracted `rule_condition` values to the canonical token in `opening_spec_field.allowed_values`. Consumed at **compile time** by the price-book worker (`services/price-book-worker/src/compile.js` `loadValueAliases`/`aliasConds`) so freshly ingested rules emit canonical enum values (and reject-flagged junk skips the rule), and at **publish time** by the QA vocabulary gate.
   - Columns: `id` (uuid PK), `field_path` (text), `raw_value` (text), `canonical_value` (text, NULL for rejects), `target_operator` (text CHECK `EQ`|`IN`, default `EQ`), `status` (text CHECK `alias`|`reject`), `notes` (text), `created_at`. UNIQUE(`field_path`, `raw_value`).
   - RLS: `auth_read` (using true); `admin_insert`/`admin_update`/`admin_delete` via `is_admin()`.
   - Seed (`db/seeds`/migration): recoverable aliases (e.g. `FEMA 361`→`FEMA`, `Piocane 50`→`F50`/`W50`, `STK 14`→`STK`, `F/DW`→IN `F|DW`, `Galvannealed`→`galvannealed`) and rejects (series codes / jamb depths / STC table dumps / headers leaked into gauge fields).
@@ -1815,6 +1874,140 @@ Live validation showed multiple "base" lines stacking on one component (e.g. a d
 - **Regression revert:** the combined series+gauge `door.door_gauge` aliases (`H or CH 18`, `LW or C 16`, …) from `cpq_v2_clean_rule_condition_vocab` had activated ~36 mis-parsed door size-rows once the `series='null'` guards were dropped. Their `rule_condition.value_1` is restored from `source_phrase` and those `spec_value_alias` rows reclassified `alias`→`reject`.
 
 UI: `AuditableQuote` now shows each line's matched spec (`matchedConditions`) and warns when one `componentId` matches more than one BASE price (`src/lib/cpq/auditable-quote.ts` `duplicateBaseWarning`).
+
+#### Dev price-book reset (2026-06-20, migration `cpq_v2_reset_price_books`)
+All ingestion-derived data was wiped for a clean re-ingest with the hardened size-code parser (no production users yet). **Emptied:** `price_books`, `price_book_extractions`, `price_book_document` (→ cascade `price_rule`/`rule_condition`/`rule_action_parameter`/`included_scope`/`quantity_tier`/`price_table`/`source_region`/`raw_table_cell`/`qa_issue`/`dependency_rule`/`pricing_change_proposals`/all `ngp_*`), the hardware catalog (`hardware_product`/`hardware_variant`/`hardware_attribute`/`hardware_price`/`hardware_price_book`/`linear_hardware_rule`/`hardware_compatibility_rule`), the legacy `pricing_*` grid, and engine output (`estimate_line`/`manual_quote_queue`/`quote_hardware_line`). **Preserved:** the seeded dictionary/governance (`opening_spec_field`, `spec_field_mapping`, `option_definition`, `product_family`, `hardware_prep_crosswalk`, `hardware_set_template`/`_item`, `spec_value_alias`, `service_scope`, `hardware_sell_rule`) and all user/test data (`companies`, `estimates`, `estimate_items`, `estimate_openings`). The `price-book-files` storage bucket must be emptied separately via the Storage API/Dashboard (direct `storage.objects` DELETE is blocked).
+
+#### Publish NGP catalog (2026-06-21, migration `cpq_v2_publish_ngp_catalog`)
+Data-only status fix (no schema change). Two `price_book_document`s titled "NGP" existed: an older partial ingest (`adfdd074…`, `published`, 0 catalog products, 5 price tables, 147 `option` rules) and a complete re-ingest (`cb183520…`, `draft`, 83 `ngp_product` rows, 50 price tables, ~18k lite_kit/louver/glass/glazing_tape/option rules). The builder's `resolveActiveNgpDocument()` requires a *published* document carrying `ngp_product` rows, so the opening builder reported "No published NGP catalog found" even though the data existed. The migration sets `cb183520` → `status='published'`, `review_status='APPROVED'`, `supersedes_id = adfdd074`, and sets `adfdd074` → `status='superseded'` (fully superseded by `cb183520`; reversible). No data deleted.
+
+#### Door core-upgrade selector + per-series normalization (2026-06-21)
+Polystyrene/polyurethane/temperature-rise are not ingested as base door series — they are published as `FIXED_ADD` core-upgrade adders keyed on `door.option_code` and gated on the base series. The published book defines core options **per series**, so the codes and prices differ:
+
+| Series | Base core (N/C) | Upgrades (`option_code` → adder) |
+|---|---|---|
+| H | Honeycomb | HP +$53 · HT +$231 · HR +$985 |
+| CH | Honeycomb | CHP +$53 · CHT +$231 · CHR +$985 |
+| LW | Steel-stiffened | PS +$53 · TS +$231 (between stiffeners) |
+| C | Steel-stiffened | PS +$75 · TS +$275 (between stiffeners) |
+| EH | Honeycomb | EP +$84 |
+
+Migration `cpq_v2_normalize_core_upgrade_codes` re-keyed the CH adders (descriptive phrases → `CHP`/`CHT`/`CHR`) and C adders (`…Between Stiffeners` → `PS`/`TS`) to the Pioneer per-series nomenclature, and rejected a stray ungated `EP` $105 adder that would double-count against the EH-gated `EP` $84. H and LW were already correctly keyed.
+
+Builder side (`builder-logic.ts` + `opening-spec.ts`): the **Core type** field (`DOR-003`) is an essential, selectable picker driven by `SERIES_CORE_UPGRADES`; `allowedEnumOptions` offers each series' base core + its priced upgrades, and `coreUpgradeOptionCode(series, core)` bridges the choice into `door.option_code` so the upgrade prices as **series base + adder**. Base cores (honeycomb / steel-stiffened) and series without published upgrades emit no `option_code`.
+
+#### Hardware category slug identity (2026-06-21, migration `cpq_v2_hardware_category_slugs`)
+The hardware category *identity* is the snake_case slug (`butt_hinges`, `cylindrical_mortise_locks_and_deadbolts`, …) used by the builder `HW` constants, the `hardware_set_item` templates, the engine selection key, and the MISSING_PRICE messages. A prior normalization had set `hardware_product.category` to readable title-case ("Butt hinges", …), which broke `loadVariantsForCategory()` (an exact match on the slug) — so the builder showed "No catalog variants — route to manual quote" for every auto-suggested category and every required hardware line blocked as MISSING_PRICE. This re-keys `hardware_product.category` and `linear_hardware_rule.hardware_category` to the slug (deterministic, collision-free across the 14 categories); the readable label is derived in the UI (`loadHardwareCategories` title-cases the slug). The granular `hardware_prep_crosswalk.hardware_category` vocabulary is left alone (engine fuzzy-matches it). The worker (`services/price-book-worker/src/hardware.js`) now slugs the category at the `hardware_product` / `linear_hardware_rule` write boundary (`slugifyCategory`) while keeping internal title-case logic, so re-ingests stay consistent.
+
+#### Seamless build-to-review flow (2026-06-21, migrations `cpq_v2_opening_spec_snapshot`, `cpq_v2_estimate_line_overrides_and_adjustment`)
+
+**Migration `cpq_v2_opening_spec_snapshot`** — added `estimate_openings.spec_snapshot JSONB NULL`. Written by `saveOpeningDraft` in `src/lib/cpq/opening-persist.ts` with the full `OpeningDraft` JSON on every spec builder save. Enables faithful round-trip editing (`loadOpeningDraft` → `SpecOpeningBuilder`) and re-pricing (`repriceSpecOpening`) without lossy reconstruction from item_fields.
+
+**Migration `cpq_v2_estimate_line_overrides_and_adjustment`** — added:
+- `estimate_line.manual_sell_price NUMERIC NULL` — user-entered sell price override for one engine line. When set, display and totals use this instead of `sell_price`.
+- `estimate_line.is_manual_override BOOLEAN DEFAULT false` — true when `manual_sell_price` has been set by a user on the Review step.
+- `estimates.sell_adjustment_pct NUMERIC NULL` — optional estimate-level markup/discount applied to the engine grand total on the Review step (positive = markup %, negative = discount %).
+- `estimates.estimate_notes TEXT NULL` — free-text notes entered on the Review step.
+
+---
+
+## Spec-driven Opening Builder (Release 1)
+
+Added by migration `cpq_v2_spec_resolver` + seed `product_family_capability.sql`. Manufacturer series (DOR-002 / FRM-002) are resolution outputs, not user inputs. See `RESOLVER_VERSION` in `src/types/cpq.ts` and the resolver in `src/lib/cpq/resolver.ts`.
+
+### public.product_family_capability
+
+Versioned predicates defining what each product family supports. The resolver eliminates families whose predicates fail any requirement.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `family_id` (UUID, NOT NULL) - FK to product_family.id, CASCADE on delete
+- `component_scope` (TEXT, NOT NULL) - CHECK IN ('opening','door','frame','panel')
+- `field` (TEXT, NOT NULL) - machine field_path the predicate tests (e.g. `opening.wall_construction`)
+- `operator` (TEXT, NOT NULL, DEFAULT 'EQ') - CHECK IN ('EQ','NE','IN','NOT_IN','GT','GTE','LT','LTE','BETWEEN','EXISTS','MISSING')
+- `value` (TEXT, NULLABLE) - operand (pipe-delimited for IN/NOT_IN)
+- `value2` (TEXT, NULLABLE) - upper bound for BETWEEN
+- `catalog_version` (TEXT, NOT NULL, DEFAULT 'R1')
+- `notes` (TEXT, NULLABLE)
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW())
+
+**Indexes:** `idx_pfc_family` on family_id; `idx_pfc_scope_ver` on (component_scope, catalog_version)
+
+**RLS:** ENABLED — `auth_read` (SELECT to all), `admin_write` (ALL via is_admin()).
+
+---
+
+### public.family_resolution_policy
+
+Ranking + display policy for compliant resolution candidates. Lower `rank` is preferred; `auto_accept` lets a sole survivor be accepted without estimator input.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `component_scope` (TEXT, NOT NULL) - CHECK IN ('opening','door','frame','panel')
+- `family_id` (UUID, NULLABLE) - FK to product_family.id, CASCADE on delete
+- `rank` (INTEGER, NOT NULL, DEFAULT 100)
+- `auto_accept` (BOOLEAN, NOT NULL, DEFAULT true)
+- `display_label` (TEXT, NULLABLE)
+- `catalog_version` (TEXT, NOT NULL, DEFAULT 'R1')
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW())
+
+**Indexes:** `idx_frp_scope_ver` on (component_scope, catalog_version)
+
+**RLS:** ENABLED — `auth_read` (SELECT to all), `admin_write` (ALL via is_admin()).
+
+---
+
+### public.opening_component_option
+
+Selected/derived options and preps per opening component. Replaces the single `door.option_code` field so a component can carry many priced options/preps.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `opening_id` (UUID, NOT NULL) - FK to estimate_openings.id, CASCADE on delete
+- `component_id` (UUID, NULLABLE) - FK to estimate_items.id, SET NULL on delete
+- `scope` (TEXT, NOT NULL) - CHECK IN ('opening','door','frame','panel')
+- `kind` (TEXT, NOT NULL) - CHECK IN ('option','prep')
+- `code` (TEXT, NOT NULL)
+- `source` (TEXT, NOT NULL, DEFAULT 'derived') - CHECK IN ('derived','estimator','capability')
+- `description` (TEXT, NULLABLE)
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW())
+
+**Indexes:** `idx_oco_opening` on opening_id; `idx_oco_component` on component_id
+
+**RLS:** ENABLED — `auth_all` (ALL for authenticated users).
+
+---
+
+### public.opening_resolution_revision
+
+Immutable snapshot per resolve: input `UserOpeningSpec`, candidate set, estimator selection, derived `ResolvedOpeningConfig`, and pinned resolver/catalog/price-book versions. Repricing appends a new row; prior revisions are retained for audit.
+
+**Columns:**
+- `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
+- `opening_id` (UUID, NOT NULL) - FK to estimate_openings.id, CASCADE on delete
+- `estimate_id` (UUID, NULLABLE) - FK to estimates.id, CASCADE on delete
+- `resolver_version` (INTEGER, NOT NULL)
+- `catalog_version` (TEXT, NULLABLE)
+- `price_book_id` (UUID, NULLABLE) - FK to price_book_document.id
+- `priced_as_of` (DATE, NULLABLE)
+- `input_spec` (JSONB, NOT NULL, DEFAULT '{}')
+- `candidates` (JSONB, NOT NULL, DEFAULT '[]')
+- `estimator_selection_id` (TEXT, NULLABLE)
+- `resolved_config` (JSONB, NOT NULL, DEFAULT '{}')
+- `created_by` (UUID, NULLABLE) - FK to users.id
+- `created_at` (TIMESTAMPTZ, DEFAULT NOW())
+
+**Indexes:** `idx_orr_opening` on (opening_id, created_at desc)
+
+**RLS:** ENABLED — `auth_all` (ALL for authenticated users).
+
+---
+
+### public.estimates (price-book pinning additions)
+
+`cpq_v2_spec_resolver` ensures these deterministic-reprice columns exist (idempotent `ADD COLUMN IF NOT EXISTS`):
+- `price_book_id` (UUID, NULLABLE) - FK to price_book_document.id — pinned Pioneer document the estimate was priced against.
+- `priced_as_of` (DATE, NULLABLE) - effective date the estimate was priced as of.
 
 ---
 

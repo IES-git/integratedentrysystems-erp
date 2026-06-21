@@ -208,7 +208,12 @@ export default function EstimateWizardPage() {
         // Load companies and field definitions in parallel
         try {
           const [companiesResult, fieldDefsResult] = await Promise.all([
-            supabase.from('companies').select('*').eq('active', true).order('name'),
+            supabase
+              .from('companies')
+              .select('*')
+              .eq('active', true)
+              .in('company_type', ['customer', 'both'])
+              .order('name'),
             getFieldDefinitions('approved'),
           ]);
 

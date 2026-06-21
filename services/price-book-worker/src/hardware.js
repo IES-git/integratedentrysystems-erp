@@ -70,6 +70,24 @@ const CATEGORY_KEYWORDS = [
   ['Access control', /access control|reader|maglock|mag lock|electric strike|\bestk\b|power supply|controller|rex\b|credential/i],
 ];
 
+// Exact raw-category (column A) abbreviations the source uses -> canonical
+// dictionary code. Matched on the raw category ONLY (not the description) so a
+// generic word like "trim" never greedily recategorizes a lock/closer row.
+const RAW_CATEGORY_ALIASES = {
+  'trim': 'Exit trim / pulls',
+  'int pull': 'Exit trim / pulls',
+  'hinges': 'Butt hinges',
+  'c_hinges': 'Continuous hinges',
+  'e_hinge': 'Electric hinges / EPT / loops',
+  'surf bolt': 'Inactive-leaf hardware',
+  'hdw mull': 'Exit devices',
+  'h/m acc.': 'Protection/accessories',
+  'acc control': 'Access control',
+  'drip': 'Weather seals',
+  'shoe': 'Weather seals',
+  'thold': 'Thresholds',
+};
+
 // Categories priced by length/area (CALC) -> linear_hardware_rule.
 const LINEAR_CATEGORIES = new Set(['Weather seals', 'Thresholds']);
 
@@ -109,7 +127,21 @@ function normFinish(raw) {
   const key = String(raw).toLowerCase().replace(/[^a-z0-9]/g, '');
   return FINISH_ALIASES[key] ?? String(raw).trim();
 }
+// Stored category identity is the snake_case slug (matches the builder `HW`
+// constants, `hardware_set_item` templates, and the engine selection key). The
+// internal `category` stays title-case for ATTR_MAPS / LINEAR_CATEGORIES logic.
+function slugifyCategory(category) {
+  return String(category ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 function normCategory(rawCat, description) {
+  // 1. Exact raw-category alias (abbreviations like "trim", "thold", "drip").
+  const rawKey = String(rawCat ?? '').trim().toLowerCase();
+  if (RAW_CATEGORY_ALIASES[rawKey]) return RAW_CATEGORY_ALIASES[rawKey];
+  // 2. Keyword match on the raw category + description.
   const hay = `${rawCat ?? ''} ${description ?? ''}`;
   for (const [canonical, re] of CATEGORY_KEYWORDS) {
     if (re.test(hay)) return canonical;
@@ -310,7 +342,7 @@ export async function runIngestHardware(sb, priceBookId) {
     let productId = productCache.get(key);
     if (!productId) {
       const { data: prod, error: prodErr } = await sb.from('hardware_product').insert({
-        category,
+        category: slugifyCategory(category),
         subcategory: rawCat ?? null,
         manufacturer_id: book.company_id ?? null,
         manufacturer_name: manufacturer,
@@ -374,7 +406,7 @@ export async function runIngestHardware(sb, priceBookId) {
     // CALC families -> linear rule (per-foot from net), keyed to this variant.
     if (isLinear && recomputedNet != null) {
       await sb.from('linear_hardware_rule').insert({
-        hardware_category: category,
+        hardware_category: slugifyCategory(category),
         length_basis: category === 'Thresholds' ? 'width' : 'perimeter',
         cut_increment: 1,
         waste_pct: 10,

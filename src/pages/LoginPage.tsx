@@ -4,7 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import iesLogo from '@/assets/ies-logo.png';
 
@@ -28,24 +28,22 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      const success = await login(email, password);
+      const result = await login(email, password);
 
-      if (success) {
+      if (result.success) {
         toast({
           title: 'Welcome back!',
           description: 'You have successfully logged in.',
         });
-        // Navigation is handled by the useEffect below once the user profile
-        // is committed to context — avoids the race condition where AppLayout
-        // would render before auth state was ready and get stuck on the spinner.
+        // Navigation handled by the useEffect once user profile commits to context
       } else {
         toast({
           title: 'Login failed',
-          description: 'Invalid email or password.',
+          description: result.error ?? 'Invalid email or password.',
           variant: 'destructive',
         });
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Login error:', error);
       toast({
         title: 'Login failed',
@@ -85,7 +83,15 @@ export default function LoginPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="password">Password</Label>
+                <Link
+                  to="/forgot-password"
+                  className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+                >
+                  Forgot password?
+                </Link>
+              </div>
               <Input
                 id="password"
                 type="password"
@@ -101,12 +107,9 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          <div className="mt-6 text-center text-sm text-muted-foreground">
-            Don't have an account?{' '}
-            <Link to="/signup" className="font-medium text-primary underline-offset-4 hover:underline">
-              Sign up
-            </Link>
-          </div>
+          <p className="mt-6 text-center text-xs text-muted-foreground">
+            Access is by invitation only. Contact an administrator to get access.
+          </p>
         </CardContent>
       </Card>
     </div>

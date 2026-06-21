@@ -111,6 +111,12 @@ export interface EngineOptions {
   persist?: boolean;
   /** Confidence below this routes a matched rule to manual quote. 0..1. */
   minConfidence?: number;
+  /**
+   * Maps a draft component id (spec.components[].id) → the real estimate_items.id
+   * it was saved as, so persisted estimate_line rows carry a valid component_id
+   * FK instead of null. Supplied by the deterministic save flow (Phase 5).
+   */
+  componentIdMap?: Map<string, string>;
 }
 
 /**

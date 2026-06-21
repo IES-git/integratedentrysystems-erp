@@ -6,9 +6,10 @@ import { initializeDemoData } from '@/lib/storage';
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<boolean>;
-  signup: (email: string, password: string, firstName: string, lastName: string, jobTitle: string, role: string) => Promise<{ success: boolean; error?: string }>;
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
+  forgotPassword: (email: string) => Promise<{ success: boolean; error?: string }>;
+  resetPassword: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -18,12 +19,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Initialize demo data for customers/manufacturers/templates
     initializeDemoData();
 
     // Fast, reliable initial session check (reads from localStorage synchronously).
-    // This ensures isLoading is resolved immediately on page load/refresh without
-    // waiting for the async onAuthStateChange INITIAL_SESSION event.
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
         fetchUserProfile(session.user.id);
@@ -32,7 +30,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    // Listen for auth changes (logout, session expiry, token refresh).
+    // Listen for auth state changes (logout, session expiry, token refresh).
     // SIGNED_IN is intentionally NOT handled here — fetchUserProfile() makes
     // a Supabase data request and calling it inside onAuthStateChange causes a
     // deadlock in the Supabase auth library (the auth lock is held during the
@@ -67,15 +65,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .select('*')
         .eq('id', userId)
         .single();
-      
+
       console.log('Profile query result:', { data: !!result.data, error: result.error });
 
       if (result.error) {
         console.error('Profile fetch error:', result.error);
-        // If profile not found and this is after signup, retry a few times
-        // (race condition with trigger creating profile)
         if (result.error.code === 'PGRST116' && retryCount < 5) {
-          console.log(`Profile not found yet, retrying in ${(retryCount + 1) * 300}ms... (attempt ${retryCount + 1})`);
+          console.log(`Profile not found yet, retrying in ${(retryCount + 1) * 300}ms...`);
           await new Promise(resolve => setTimeout(resolve, (retryCount + 1) * 300));
           return await fetchUserProfile(userId, retryCount + 1);
         }
@@ -83,8 +79,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (result.data) {
+        // Active-user gate: deactivated accounts cannot log in
+        if (!result.data.active) {
+          console.warn('Login blocked: account is deactivated');
+          await supabase.auth.signOut();
+          setUser(null);
+          return false;
+        }
+
         console.log('Profile loaded successfully:', result.data.email);
-        // Map database fields to User type
         const userProfile: User = {
           id: result.data.id,
           name: `${result.data.first_name} ${result.data.last_name}`,
@@ -96,10 +99,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           active: result.data.active,
           createdAt: result.data.created_at,
         };
-        
+
         console.log('Setting user profile');
         setUser(userProfile);
-        console.log('User profile set successfully');
         return true;
       } else {
         console.error('No data returned from profile query');
@@ -107,7 +109,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       console.error('Error in fetchUserProfile:', error);
-      // Sign out if we can't fetch profile after retries
       await supabase.auth.signOut();
       setUser(null);
       return false;
@@ -117,7 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const login = async (email: string, password: string): Promise<boolean> => {
+  const login = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
     try {
       console.log('Logging in...');
       const { data, error } = await supabase.auth.signInWithPassword({
@@ -127,83 +128,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (error) {
         console.error('Auth error:', error);
-        return false;
+        return { success: false, error: error.message };
       }
 
       if (data.user) {
         console.log('Auth successful, fetching profile...');
-        // Call fetchUserProfile directly here (after signInWithPassword fully
-        // completes) rather than from onAuthStateChange. Calling Supabase data
-        // methods inside the auth event callback deadlocks because the auth
-        // library holds a lock while dispatching events.
+        // Fetch profile directly here (after signInWithPassword fully completes)
+        // rather than from onAuthStateChange to avoid a deadlock in the Supabase
+        // auth library (the auth lock is held while dispatching events).
         const success = await fetchUserProfile(data.user.id);
         if (success) {
           console.log('Login successful, user profile loaded');
-          return true;
+          return { success: true };
         } else {
-          console.error('Failed to load user profile');
-          return false;
+          // fetchUserProfile already signed out if the account is inactive
+          return {
+            success: false,
+            error: 'Your account has been deactivated. Please contact an administrator.',
+          };
         }
       }
-      return false;
-    } catch (error) {
+      return { success: false, error: 'An unexpected error occurred.' };
+    } catch (error: unknown) {
       console.error('Login error:', error);
-      return false;
-    }
-  };
-
-  const signup = async (
-    email: string,
-    password: string,
-    firstName: string,
-    lastName: string,
-    jobTitle: string,
-    role: string
-  ): Promise<{ success: boolean; error?: string }> => {
-    try {
-      console.log('Starting signup process...');
-      
-      // Sign up the user with Supabase Auth and pass custom metadata
-      // The database trigger will automatically create the user profile
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            first_name: firstName,
-            last_name: lastName,
-            job_title: jobTitle,
-            role: role,
-          },
-        },
-      });
-
-      console.log('Signup response:', { user: authData.user?.id, session: !!authData.session, error: authError });
-
-      if (authError) {
-        return { success: false, error: authError.message };
-      }
-
-      if (!authData.user) {
-        return { success: false, error: 'No user returned from signup' };
-      }
-
-      // If user is auto-confirmed and logged in, fetch the profile
-      if (authData.session) {
-        console.log('User auto-logged in, fetching profile...');
-        const profileSuccess = await fetchUserProfile(authData.user.id);
-        
-        if (!profileSuccess) {
-          console.error('Profile creation failed or timed out');
-          return { success: false, error: 'Failed to create user profile. Please try again.' };
-        }
-      }
-
-      console.log('Signup completed successfully');
-      return { success: true };
-    } catch (error: any) {
-      console.error('Signup error:', error);
-      return { success: false, error: error.message || 'An error occurred during signup' };
+      const message = error instanceof Error ? error.message : 'An error occurred during login';
+      return { success: false, error: message };
     }
   };
 
@@ -212,8 +161,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
+  const forgotPassword = async (email: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/reset-password`,
+      });
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'An error occurred';
+      return { success: false, error: message };
+    }
+  };
+
+  const resetPassword = async (newPassword: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'An error occurred';
+      return { success: false, error: message };
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, signup, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, login, logout, forgotPassword, resetPassword }}>
       {children}
     </AuthContext.Provider>
   );

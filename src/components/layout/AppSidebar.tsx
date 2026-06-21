@@ -120,7 +120,14 @@ export function AppSidebar() {
     navigate('/login');
   };
 
-  const isAdmin = user?.role === 'admin' || user?.role === 'hr';
+  const isAdmin = user?.role === 'admin';
+  const isOps = user?.role === 'ops';
+
+  // Filter admin nav: ops sees everything except Users management
+  const visibleAdminNav = adminNavigation.filter((item) => {
+    if (item.href === '/app/admin/users') return isAdmin;
+    return isAdmin || isOps;
+  });
 
   return (
     <Sidebar collapsible="icon" className="border-r border-sidebar-border">
@@ -163,14 +170,14 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
 
-        {isAdmin && (
+        {visibleAdminNav.length > 0 && (
           <SidebarGroup>
             <SidebarGroupLabel className="text-sidebar-foreground/50">
               Admin
             </SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {adminNavigation.map(item => (
+                {visibleAdminNav.map(item => (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild tooltip={item.title} isActive={isActive(item.href)}>
                       <a href={item.href}>

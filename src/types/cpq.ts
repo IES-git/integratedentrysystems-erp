@@ -460,6 +460,10 @@ export interface EstimateLine {
   exceptionMessage: string | null;
   sortOrder: number;
   createdAt: string;
+  /** User-entered sell price override. When set, use this instead of sell_price for display/totals. */
+  manualSellPrice?: number | null;
+  /** True when manual_sell_price has been set by the user on the Review step. */
+  isManualOverride?: boolean | null;
 }
 
 export interface ManualQuoteQueueItem {
@@ -888,4 +892,180 @@ export interface NgpPriceTableMap {
   tapeModel: string | null;
   entityType: string | null;
   sourcePage: string | null;
+}
+
+// ===========================================================================
+// Spec-driven Opening Builder (Release 1)
+//
+// Manufacturer series (DOR-002 / FRM-002) are resolution OUTPUTS, never user
+// inputs. The user describes requirements (UserOpeningSpec); the resolver
+// derives the manufacturer-facing configuration (ResolvedOpeningConfig) and the
+// plain-language alternatives an estimator chooses between (ResolutionCandidate).
+// ===========================================================================
+
+/**
+ * Current resolver contract version. Bump whenever resolution semantics change
+ * so openings can be gated between the new engine and the legacy path, and so
+ * each `opening_resolution_revision` records the version it was resolved under.
+ */
+export const RESOLVER_VERSION = 1;
+
+/** Component scope a capability predicate / derived option applies to. */
+export type ResolverComponentScope = 'opening' | 'door' | 'frame' | 'panel';
+
+/**
+ * User-facing opening requirements ONLY. Manufacturer series, base-table
+ * identity, option codes and prep codes are deliberately absent — they are
+ * resolver outputs (see {@link ResolvedOpeningConfig}), never user inputs.
+ */
+export interface UserOpeningSpec {
+  openingId: string | null;
+  estimateId: string | null;
+  name: string;
+  quantity: number;
+  configurationType: OpeningConfigurationType;
+  leafCount: number;
+  openingWidth: string;
+  openingHeight: string;
+  fireLabelRequired: boolean;
+  /** Requirement fields keyed by machine field_path (no series/option/prep keys). */
+  requirements: Record<string, string>;
+}
+
+/** A single derived option/prep on a resolved component. */
+export interface ResolvedComponentOption {
+  scope: ResolverComponentScope;
+  componentId: string | null;
+  kind: 'option' | 'prep';
+  code: string;
+  source: 'derived' | 'estimator' | 'capability';
+  description: string | null;
+}
+
+/** Internal, manufacturer-facing resolution output. Hidden behind audit detail. */
+export interface ResolvedOpeningConfig {
+  /** Pioneer family/series per component scope (door/frame/panel). */
+  series: Partial<Record<ResolverComponentScope, string>>;
+  /** Base price-table identity per scope (resolved base-signature key). */
+  baseTableId: Partial<Record<ResolverComponentScope, string | null>>;
+  /** Required construction options + preparation codes. */
+  options: ResolvedComponentOption[];
+  /** NGP product selections, when applicable. */
+  ngpProductIds: string[];
+  /** Selected hardware variant ids. */
+  hardwareVariantIds: string[];
+  resolverVersion: number;
+  catalogVersion: string | null;
+  priceBookId: string | null;
+}
+
+/** Plain-language alternative construction the estimator can choose between. */
+export interface ResolutionCandidate {
+  id: string;
+  /** Estimator-facing one-line summary. */
+  title: string;
+  description: string;
+  construction: string | null;
+  gauge: string | null;
+  core: string | null;
+  edge: string | null;
+  compliance: string[];
+  /** Relative price impact label (e.g. "+$120", "base"). */
+  priceImpact: string | null;
+  /** Internal series codes — shown ONLY in expandable technical/audit detail. */
+  technical: {
+    doorSeries: string | null;
+    frameSeries: string | null;
+    panelSeries: string | null;
+    optionCodes: string[];
+  };
+  /** The resolved config this candidate would produce if chosen. */
+  resolved: ResolvedOpeningConfig;
+}
+
+export type ResolutionStatus = 'auto' | 'choice_required' | 'manual_quote' | 'invalid';
+
+/** Result of `resolveOpeningSpec`. */
+export interface ResolutionResult {
+  status: ResolutionStatus;
+  candidates: ResolutionCandidate[];
+  /** Set when status === 'auto' (single compliant candidate accepted). */
+  selected: ResolutionCandidate | null;
+  /** Human-readable reasons families were eliminated / routed to manual quote. */
+  diagnostics: string[];
+  resolverVersion: number;
+  catalogVersion: string | null;
+}
+
+/**
+ * The single quantity contract every priced action returns. Each line extends
+ * EXACTLY once: `extendedAmount` is the price for one component instance
+ * (unitRate × billableQuantity); the component count and opening quantity are
+ * applied later, once each, at component extension and rollup respectively.
+ */
+export interface QuantityContract {
+  /** Price for ONE unit (per single component instance). */
+  unitRate: number | null;
+  /** Within-component billable quantity from a basis field (default 1). */
+  billableQuantity: number;
+  /** unitRate × billableQuantity for one component instance. */
+  extendedAmount: number | null;
+}
+
+// ===== Versioned capability + resolution catalog =====
+
+export type CapabilityOperator = ConditionOperator;
+
+export interface ProductFamilyCapability {
+  id: string;
+  familyId: string;
+  componentScope: ResolverComponentScope;
+  field: string;
+  operator: CapabilityOperator;
+  value: string | null;
+  value2: string | null;
+  catalogVersion: string;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface FamilyResolutionPolicy {
+  id: string;
+  componentScope: ResolverComponentScope;
+  familyId: string | null;
+  /** Lower ranks are preferred when multiple candidates comply. */
+  rank: number;
+  /** Whether to auto-accept when this is the sole survivor. */
+  autoAccept: boolean;
+  displayLabel: string | null;
+  catalogVersion: string;
+  createdAt: string;
+}
+
+export interface OpeningComponentOption {
+  id: string;
+  openingId: string;
+  componentId: string | null;
+  scope: ResolverComponentScope;
+  kind: 'option' | 'prep';
+  code: string;
+  source: 'derived' | 'estimator' | 'capability';
+  description: string | null;
+  createdAt: string;
+}
+
+export interface OpeningResolutionRevision {
+  id: string;
+  openingId: string;
+  estimateId: string | null;
+  resolverVersion: number;
+  catalogVersion: string | null;
+  priceBookId: string | null;
+  pricedAsOf: string | null;
+  inputSpec: Record<string, unknown>;
+  candidates: Record<string, unknown>;
+  estimatorSelectionId: string | null;
+  resolvedConfig: Record<string, unknown>;
+  createdBy: string | null;
+  createdAt: string;
 }

@@ -13,13 +13,27 @@ export interface CompanyWithContactCount extends Company {
   contactCount: number;
 }
 
-/** List all companies (active first, then by name), with a contact count. */
-export async function listCompanies(): Promise<CompanyWithContactCount[]> {
-  const { data, error } = await supabase
+/**
+ * List companies with an optional type filter, active first then by name.
+ * Pass `companyType` to restrict to a specific type (e.g. 'customer' or 'manufacturer').
+ * Companies with type 'both' are included whenever either matching type is requested.
+ */
+export async function listCompanies(
+  companyType?: CompanyType
+): Promise<CompanyWithContactCount[]> {
+  let query = supabase
     .from('companies')
     .select('*, contacts(count)')
     .order('active', { ascending: false })
     .order('name', { ascending: true });
+
+  if (companyType === 'customer') {
+    query = query.in('company_type', ['customer', 'both']);
+  } else if (companyType === 'manufacturer') {
+    query = query.in('company_type', ['manufacturer', 'both']);
+  }
+
+  const { data, error } = await query;
 
   if (error) throw new Error(`Failed to list companies: ${error.message}`);
 
@@ -28,6 +42,11 @@ export async function listCompanies(): Promise<CompanyWithContactCount[]> {
     ...mapCompanyRow(row),
     contactCount: row.contacts?.[0]?.count ?? 0,
   }));
+}
+
+/** Convenience wrapper — returns only manufacturer companies (type = 'manufacturer' or 'both'). */
+export async function listManufacturers(): Promise<CompanyWithContactCount[]> {
+  return listCompanies('manufacturer');
 }
 
 /** Fetch a single company by ID. Returns null if not found. */

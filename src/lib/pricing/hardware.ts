@@ -76,7 +76,17 @@ export interface HardwarePricingResult {
  * driven (not a hardcoded list) so it works for any vendor's linear categories.
  */
 function isLinearCategory(category: string, catalog: HardwareCatalog): boolean {
-  return catalog.linearRules.some((l) => similarity(category, l.hardwareCategory) >= 0.34);
+  return catalog.linearRules.some((l) => slug(l.hardwareCategory) === slug(category));
+}
+
+/**
+ * Stable canonical-slug for a hardware category: lower-case, non-alphanumeric
+ * runs collapsed to underscores. Hardware categories are governed slugs
+ * (hardware_category_dict), so deterministic slug equality REPLACES the old
+ * token-similarity matching for crosswalk/linear/surface-mount classification.
+ */
+function slug(label: string): string {
+  return String(label ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 }
 
 /** Normalizes a category label to comparable tokens (drops separators/case). */
@@ -192,20 +202,42 @@ export const SURFACE_MOUNTED_CATEGORIES = [
 
 /** True when a hardware category needs a machined door/frame prep (vs surface-mount). */
 export function requiresDoorFramePrep(category: string): boolean {
-  return !SURFACE_MOUNTED_CATEGORIES.some((c) => similarity(category, c) >= 0.34);
+  return !SURFACE_MOUNTED_CATEGORIES.some((c) => slug(c) === slug(category));
 }
 
-/** Finds the best crosswalk row for a (canonical or descriptive) category. */
+/**
+ * Resolves the prep crosswalk row for a hardware selection using STABLE
+ * identifiers (no fuzzy text matching):
+ *   1. exact hardware_variant_id (most specific: a particular SKU/template),
+ *   2. exact hardware_product_id,
+ *   3. exact canonical category slug.
+ * A guarded token-similarity match (>=0.6) remains only as a last-resort bridge
+ * for pre-slug legacy crosswalk rows, and is reported by the caller. Returns
+ * null when nothing matches — the caller then warns / routes to manual review.
+ */
 export function matchCrosswalk(
   category: string,
   prepCrosswalk: HardwarePrepCrosswalk[],
+  ids: { variantId?: string | null; productId?: string | null } = {},
 ): HardwarePrepCrosswalk | null {
+  if (ids.variantId) {
+    const byVariant = prepCrosswalk.find((r) => r.hardwareVariantId === ids.variantId);
+    if (byVariant) return byVariant;
+  }
+  if (ids.productId) {
+    const byProduct = prepCrosswalk.find((r) => r.hardwareProductId === ids.productId);
+    if (byProduct) return byProduct;
+  }
+  const want = slug(category);
+  const exact = prepCrosswalk.find((r) => slug(r.hardwareCategory) === want);
+  if (exact) return exact;
+  // Guarded legacy fallback (kept narrow so it cannot silently mis-route).
   let best: { row: HardwarePrepCrosswalk; score: number } | null = null;
   for (const row of prepCrosswalk) {
     const score = similarity(category, row.hardwareCategory);
-    if (score > 0 && (!best || score > best.score)) best = { row, score };
+    if (score >= 0.6 && (!best || score > best.score)) best = { row, score };
   }
-  return best && best.score >= 0.34 ? best.row : null;
+  return best?.row ?? null;
 }
 
 /** Splits a crosswalk prep code field ("CYL / L / T") into individual codes. */
@@ -234,7 +266,7 @@ export function derivePrepRequirements(
     // Surface-mounted hardware (closers / plates / applied seals) needs no
     // machined door/frame prep — skip silently instead of warning.
     if (!requiresDoorFramePrep(req.category)) continue;
-    const cw = matchCrosswalk(req.category, catalog.prepCrosswalk);
+    const cw = matchCrosswalk(req.category, catalog.prepCrosswalk, { variantId: req.variantId });
     if (!cw) {
       warnings.push(`No prep crosswalk found for hardware category "${req.category}".`);
       continue;
@@ -477,7 +509,7 @@ export function priceHardware(
     if (!req.variantId) continue; // optional accessory; nothing selected → no line
     const lin = linByVariant.get(req.variantId)
       ?? catalog.linearRules.find((l) => l.hardwareVariantId === req.variantId)
-      ?? catalog.linearRules.find((l) => similarity(l.hardwareCategory, req.category) >= 0.34);
+      ?? catalog.linearRules.find((l) => slug(l.hardwareCategory) === slug(req.category));
     const basis = lin ?? {
       lengthBasis: req.category === 'thresholds' ? 'width' : 'perimeter',
       cutIncrement: 1, wastePct: 10, minimumLength: null, perFootPrice: null,

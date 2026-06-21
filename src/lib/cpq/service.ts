@@ -1,11 +1,17 @@
 /**
- * CPQ orchestration service (Phase 4).
+ * CPQ orchestration service (Phase 4 / Phase 6 update).
  *
  * A single entry point that chains the three engines into a structured,
  * quote-ready result:
  *   1. compatibility / configuration rules  (is it buildable?)
  *   2. versioned pricing lookup             (what does it cost?)
  *   3. pricing-exception enqueue            (handle failures)
+ *
+ * Refresh flow (persist=true):
+ *   - Openings that have a spec_snapshot (custom builder) → re-run the rule
+ *     engine via repriceSpecOpening so their estimate_line rows stay in sync.
+ *   - Openings without a snapshot (legacy OCR path) → legacy grid lookup via
+ *     refreshEstimatePricing.
  *
  * Quote creation and the wizard Refresh flow go through here instead of
  * calling the individual engines directly.
@@ -14,6 +20,8 @@
 import { getEstimateOpenings } from '@/lib/estimates-api';
 import { refreshEstimatePricing, resolveOpeningPricing, normalizeCategoryKey } from '@/lib/pricing-lookup';
 import { evaluateOpeningsCompatibility } from '@/lib/compatibility-rules-api';
+import { loadSpecFieldDictionary } from '@/lib/cpq-catalog-api';
+import { repriceSpecOpening } from '@/lib/cpq/opening-persist';
 import { supabase } from '@/lib/supabase';
 import type {
   CompatibilityViolation,
@@ -75,8 +83,54 @@ export async function priceEstimate(
   opts: PriceEstimateOptions = {},
 ): Promise<CpqPricedEstimate> {
   let refreshSummary: CpqPricedEstimate['refreshSummary'] | undefined;
+
   if (opts.persist) {
-    refreshSummary = await refreshEstimatePricing(estimateId);
+    // Split openings into spec-built (have a spec_snapshot) vs legacy.
+    const { data: openingRows } = await supabase
+      .from('estimate_openings')
+      .select('id, spec_snapshot')
+      .eq('estimate_id', estimateId);
+
+    const specOpeningIds = (openingRows ?? [])
+      .filter((r) => r.spec_snapshot != null)
+      .map((r) => r.id as string);
+
+    const hasLegacyOpenings = (openingRows ?? []).some((r) => r.spec_snapshot == null);
+
+    // Re-price spec openings through the rule engine.
+    if (specOpeningIds.length > 0) {
+      const dict = await loadSpecFieldDictionary();
+      let engineUpdated = 0;
+      for (const openingId of specOpeningIds) {
+        try {
+          const repriced = await repriceSpecOpening(
+            estimateId,
+            openingId,
+            dict.mappings,
+            { priceBookDocumentId: null },
+          );
+          if (repriced) engineUpdated++;
+        } catch {
+          // Non-fatal: individual re-price failures don't abort the whole refresh.
+        }
+      }
+      if (!refreshSummary) refreshSummary = { updated: engineUpdated, skipped: 0, warnings: [] };
+      else refreshSummary.updated += engineUpdated;
+    }
+
+    // Re-price legacy openings through the grid lookup.
+    if (hasLegacyOpenings) {
+      const legacySummary = await refreshEstimatePricing(estimateId);
+      if (legacySummary) {
+        if (!refreshSummary) {
+          refreshSummary = legacySummary;
+        } else {
+          refreshSummary.updated += legacySummary.updated;
+          refreshSummary.skipped += legacySummary.skipped;
+          refreshSummary.warnings.push(...legacySummary.warnings);
+        }
+      }
+    }
   }
 
   const openings = await getEstimateOpenings(estimateId);
@@ -232,8 +286,8 @@ export async function applyVendorScenario(
 
 /**
  * Throws if the estimate has blocking (error-severity) compatibility
- * violations. Call before generating a quote so non-buildable configurations
- * cannot be quoted.
+ * violations OR unresolved engine-line exceptions (INVALID/CF/EXTERNAL_PENDING)
+ * that would prevent an accurate quote. Call before generating a quote.
  */
 export async function assertEstimateBuildable(estimateId: string): Promise<void> {
   const openings = await getEstimateOpenings(estimateId);
@@ -243,6 +297,28 @@ export async function assertEstimateBuildable(estimateId: string): Promise<void>
     const detail = errors.slice(0, 3).map((e) => `${e.itemLabel}: ${e.message}`).join('; ');
     throw new Error(
       `This estimate has ${errors.length} unresolved configuration error${errors.length !== 1 ? 's' : ''}: ${detail}${errors.length > 3 ? '…' : ''}`,
+    );
+  }
+
+  // Also block on INVALID/CF/EXTERNAL_PENDING engine lines — these represent
+  // items that have no resolved price and would produce a $0 quote line.
+  const { data: blockingLines, error: lineErr } = await supabase
+    .from('estimate_line')
+    .select('description, price_status')
+    .eq('estimate_id', estimateId)
+    .in('price_status', ['INVALID', 'CONTACT_FACTORY', 'EXTERNAL_PENDING'])
+    .is('included_or_suppressed_by', null)
+    .neq('line_type', 'INCLUDED')
+    .limit(5);
+
+  if (!lineErr && (blockingLines?.length ?? 0) > 0) {
+    const detail = (blockingLines ?? [])
+      .slice(0, 3)
+      .map((l) => `${l.description ?? 'item'} (${l.price_status})`)
+      .join('; ');
+    const total = blockingLines!.length;
+    throw new Error(
+      `This estimate has ${total} unresolved pricing exception${total !== 1 ? 's' : ''} that must be resolved before quoting: ${detail}${total > 3 ? '…' : ''}`,
     );
   }
 }

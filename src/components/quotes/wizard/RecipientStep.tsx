@@ -53,17 +53,27 @@ export function RecipientStep({
 
   const allCompanies = useMemo(() => [...companies, ...localCompanies], [companies, localCompanies]);
 
+  // Customers are companies we sell to; manufacturers are companies we source product from.
+  const allCustomers = useMemo(
+    () => allCompanies.filter((c) => c.companyType === 'customer' || c.companyType === 'both'),
+    [allCompanies]
+  );
+  const allManufacturers = useMemo(
+    () => allCompanies.filter((c) => c.companyType === 'manufacturer' || c.companyType === 'both'),
+    [allCompanies]
+  );
+
   const filteredCustomers = useMemo(() => {
-    if (!customerSearch.trim()) return allCompanies;
+    if (!customerSearch.trim()) return allCustomers;
     const query = customerSearch.toLowerCase();
-    return allCompanies.filter((c) => c.name.toLowerCase().includes(query));
-  }, [allCompanies, customerSearch]);
+    return allCustomers.filter((c) => c.name.toLowerCase().includes(query));
+  }, [allCustomers, customerSearch]);
 
   const filteredManufacturers = useMemo(() => {
-    if (!manufacturerSearch.trim()) return allCompanies;
+    if (!manufacturerSearch.trim()) return allManufacturers;
     const query = manufacturerSearch.toLowerCase();
-    return allCompanies.filter((m) => m.name.toLowerCase().includes(query));
-  }, [allCompanies, manufacturerSearch]);
+    return allManufacturers.filter((m) => m.name.toLowerCase().includes(query));
+  }, [allManufacturers, manufacturerSearch]);
 
   const selectedCustomer = allCompanies.find((c) => c.id === selectedCustomerId);
   const selectedManufacturer = allCompanies.find((m) => m.id === selectedManufacturerId);

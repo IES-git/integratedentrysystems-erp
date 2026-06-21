@@ -355,7 +355,9 @@ export async function runQaChecks(documentId: string): Promise<QaResult> {
     { data: priceRows, error: pErr },
     { data: variantRows, error: vErr },
   ] = await Promise.all([
-    supabase.from('price_rule').select('*, rule_condition(field_path, field_id, operator, value_1, value_2)').eq('price_book_id', documentId),
+    // REJECTED rules are excluded from pricing by the engine, so they should not
+    // gate publication either — only APPROVED/UNREVIEWED rules are QA-checked.
+    supabase.from('price_rule').select('*, rule_condition(field_path, field_id, operator, value_1, value_2)').eq('price_book_id', documentId).neq('review_status', 'REJECTED'),
     supabase.from('dependency_rule').select('id', { count: 'exact' }).eq('price_book_id', documentId),
     supabase.from('hardware_price').select('id, list_price, discount_multiplier, net_cost').neq('review_status', 'REJECTED'),
     supabase.from('hardware_variant').select('id, sku, hardware_product(category, model, description)'),
@@ -441,15 +443,25 @@ export async function runQaChecks(documentId: string): Promise<QaResult> {
   });
 }
 
+/**
+ * Checks whose scope is the whole catalog (not one price book). These are
+ * persisted once with `price_book_id = null` and deduped globally so they are
+ * NOT multiplied by the number of published documents (e.g. hardware coverage
+ * is a property of the shared hardware catalog, not of any single book).
+ */
+const GLOBAL_CHECKS: ReadonlySet<string> = new Set(['hardware_missing_price']);
+
 /** Runs QA, replaces the document's open qa_issue rows, and returns the result. */
 export async function runAndPersistQaChecks(documentId: string): Promise<QaResult> {
   const result = await runQaChecks(documentId);
 
-  // Clear prior open issues for this document, then persist the fresh findings.
-  await supabase.from('qa_issue').delete().eq('price_book_id', documentId).eq('status', 'open');
+  const docFindings = result.findings.filter((f) => !GLOBAL_CHECKS.has(f.checkName));
+  const globalFindings = result.findings.filter((f) => GLOBAL_CHECKS.has(f.checkName));
 
-  if (result.findings.length > 0) {
-    const rows = result.findings.map((f) => ({
+  // Per-document findings: clear+replace this document's open rows.
+  await supabase.from('qa_issue').delete().eq('price_book_id', documentId).eq('status', 'open');
+  if (docFindings.length > 0) {
+    const rows = docFindings.map((f) => ({
       price_book_id: documentId,
       price_rule_id: f.priceRuleId ?? null,
       source_region_id: f.sourceRegionId ?? null,
@@ -460,6 +472,25 @@ export async function runAndPersistQaChecks(documentId: string): Promise<QaResul
     }));
     const { error } = await supabase.from('qa_issue').insert(rows);
     if (error) throw new Error(`QA: failed to persist issues: ${error.message}`);
+  }
+
+  // Catalog-wide findings: clear ALL open rows for these checks (any document /
+  // null) and re-insert once with no document scope, so they are counted once.
+  for (const check of GLOBAL_CHECKS) {
+    await supabase.from('qa_issue').delete().eq('check_name', check).eq('status', 'open');
+  }
+  if (globalFindings.length > 0) {
+    const rows = globalFindings.map((f) => ({
+      price_book_id: null,
+      price_rule_id: f.priceRuleId ?? null,
+      source_region_id: f.sourceRegionId ?? null,
+      check_name: f.checkName,
+      severity: f.severity,
+      detail: f.detail,
+      status: 'open',
+    }));
+    const { error } = await supabase.from('qa_issue').insert(rows);
+    if (error) throw new Error(`QA: failed to persist global issues: ${error.message}`);
   }
 
   return result;

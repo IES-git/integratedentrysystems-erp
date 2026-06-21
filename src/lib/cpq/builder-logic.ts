@@ -118,6 +118,57 @@ const SERIES_DERIVATION: Record<string, SeriesAttrs> = {
 
 const SPECIALTY_SERIES = new Set(['W50', 'W70', 'FEMA', 'STC', 'SBR', 'BR752']);
 
+// ---------------------------------------------------------------------------
+// Core upgrades. Each base series carries published FIXED_ADD core-upgrade
+// adders keyed on `door.option_code` (gated on that series). Selecting a non-
+// base core applies the matching adder over the series base price. The base
+// core (honeycomb for glued-core series, steel-stiffened for stiffened series)
+// is included (no adder). Codes mirror the Pioneer per-series nomenclature:
+//   H : HP / HT / HR              CH: CHP / CHT / CHR
+//   LW: PS / TS (between stiffeners)   C: PS / TS (between stiffeners)
+//   EH: EP
+// Series not listed here have a single (locked) core derived from the series.
+// ---------------------------------------------------------------------------
+
+/** series → { DOR-003 core_type value → door.option_code the adder matches }. */
+const SERIES_CORE_UPGRADES: Record<string, Record<string, string>> = {
+  H: { polystyrene: 'HP', polyurethane: 'HT', 'temperature rise': 'HR' },
+  CH: { polystyrene: 'CHP', polyurethane: 'CHT', 'temperature rise': 'CHR' },
+  LW: { polystyrene: 'PS', polyurethane: 'TS' },
+  C: { polystyrene: 'PS', polyurethane: 'TS' },
+  EH: { polystyrene: 'EP' },
+};
+
+/**
+ * Core-type choices offered for a series: the series-derived base core plus any
+ * priced upgrades, or null when the series has no published upgrades (caller
+ * falls back to the single derived core).
+ */
+function coreChoicesForSeries(series: string): string[] | null {
+  const upgrades = SERIES_CORE_UPGRADES[series];
+  if (!upgrades) return null;
+  const base = SERIES_DERIVATION[series]?.core;
+  const choices = base ? [base] : [];
+  for (const core of Object.keys(upgrades)) {
+    if (!choices.includes(core)) choices.push(core);
+  }
+  return choices;
+}
+
+/**
+ * Resolves the `door.option_code` that triggers the core-upgrade adder for a
+ * door's effective series + core selection, or null when no upgrade applies
+ * (base core, or a series without published core upgrades). Used by the spec
+ * builder to bridge the Core-type picker into the priced adder.
+ */
+export function coreUpgradeOptionCode(seriesRaw: string, coreRaw: string): string | null {
+  const series = trimmed(seriesRaw).toUpperCase();
+  const upgrades = SERIES_CORE_UPGRADES[series];
+  if (!upgrades) return null;
+  const core = trimmed(coreRaw).toLowerCase();
+  return upgrades[core] ?? null;
+}
+
 /** A specialty door series forces a matching specialty frame series. */
 const SPECIALTY_DOOR_TO_FRAME: Record<string, string[]> = {
   W50: ['F50'], W70: ['F70'], FEMA: ['FEMA'], STC: ['FST'], SBR: ['SBR'], BR752: ['BR752'],
@@ -372,10 +423,13 @@ export function mergeDerived(own: Record<string, string>, derived: DerivedMap | 
 
 /** The few fields a non-expert must actively consider, per entity. */
 const ESSENTIAL_FIELDS: Partial<Record<SpecFieldEntity, Set<string>>> = {
-  // Base product/size/activity + the primary hardware preps (hinge, lock/exit,
-  // closer) that drive the matching frame preps — kept front-and-center.
-  door: new Set(['DOR-002', 'DOR-005', 'DOR-006', 'DOR-008', 'DOR-009', 'DOR-012', 'DOR-015', 'DOR-026', 'DOR-035', 'DOR-041']),
-  frame: new Set(['FRM-002', 'FRM-005', 'FRM-003', 'FRM-004', 'FRM-007', 'FRM-008', 'FRM-009', 'FRM-010', 'FRM-014']),
+  // Construction REQUIREMENTS the estimator enters (core/edge/material/gauge,
+  // size, activity) + the primary hardware preps. The manufacturer SERIES
+  // (DOR-002 / FRM-002) is intentionally NOT here — it is a resolver OUTPUT,
+  // surfaced only in the "Compliant construction selection" step + advanced/
+  // audit detail, so the user never picks a Pioneer series directly.
+  door: new Set(['DOR-003', 'DOR-004', 'DOR-005', 'DOR-006', 'DOR-007', 'DOR-008', 'DOR-009', 'DOR-012', 'DOR-015', 'DOR-026', 'DOR-035', 'DOR-041']),
+  frame: new Set(['FRM-005', 'FRM-003', 'FRM-004', 'FRM-007', 'FRM-008', 'FRM-009', 'FRM-010', 'FRM-014']),
   opening: new Set(['OPN-010']),
 };
 
@@ -450,6 +504,17 @@ export function fieldTier(
  * then by code. These take precedence over the DB descriptors.
  */
 const CURATED_OPTION_LABELS: Record<string, Record<string, string>> = {
+  // Door core type (DOR-003) — honeycomb is the included base core; the others
+  // are priced upgrades over the H base (see core-upgrade adders).
+  'DOR-003': {
+    Honeycomb: 'Honeycomb (standard, included)',
+    polystyrene: 'Polystyrene (insulated core upgrade)',
+    polyurethane: 'Polyurethane (insulated core upgrade)',
+    'temperature rise': 'Temperature-rise core (stairwell)',
+    'steel stiffened': 'Steel-stiffened core',
+    fiberglass: 'Fiberglass core',
+    specialty: 'Specialty core',
+  },
   // Door hand (DOR-012) / Frame hand (FRM-014)
   'DOR-012': {
     RH: 'Right hand', LH: 'Left hand', RHR: 'Right hand reverse', LHR: 'Left hand reverse', NH: 'Non-handed',
@@ -540,8 +605,14 @@ export function allowedEnumOptions(
       if (openingVal(draft, PATH.opening.blast) || openingVal(draft, PATH.opening.bullet)) return keep(['SBR', 'BR752']);
       return opts.filter((o) => !SPECIALTY_SERIES.has(o.toUpperCase()));
     }
-    case 'DOR-003': { // core type constrained by the chosen series
+    case 'DOR-003': { // core type: per-series priced upgrades, else locked to the series
       const series = trimmed(component?.fields[PATH.door.series] || component?.familyCode || '').toUpperCase();
+      // Series with published core upgrades offer the base core + each upgrade
+      // (e.g. H/CH: honeycomb + polystyrene/polyurethane/temp-rise; LW/C: steel-
+      // stiffened + polystyrene/polyurethane). Every other series stays locked
+      // to its single derived core.
+      const choices = coreChoicesForSeries(series);
+      if (choices) return keep(choices);
       const core = SERIES_DERIVATION[series]?.core;
       return core ? keep([core]) : null;
     }

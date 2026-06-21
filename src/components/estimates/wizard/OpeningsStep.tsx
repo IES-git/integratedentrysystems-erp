@@ -18,12 +18,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import {
   getEstimateOpenings,
@@ -32,9 +26,16 @@ import {
 } from '@/lib/estimates-api';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import { loadEstimateLinesByOpening } from '@/lib/cpq/estimate-lines-api';
+import {
+  estimateGrandTotal,
+  estimateHasAnyPrice,
+  countEstimateMissingPrices,
+  openingTotalWithLines,
+  engineSellSubtotal,
+} from '@/lib/cpq/opening-totals';
 import { SpecOpeningBuilder } from './SpecOpeningBuilder';
 import { ChooseExistingOpeningDialog } from './ChooseExistingOpeningDialog';
-import type { EstimateOpeningWithItems, OpeningTemplateType, EstimateLine } from '@/types';
+import type { EstimateOpeningWithItems, EstimateLine } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Pricing total helpers
@@ -42,52 +43,6 @@ import type { EstimateOpeningWithItems, OpeningTemplateType, EstimateLine } from
 
 function formatCurrency(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
-}
-
-/** Sum of (unitPrice * quantity) for all items in an opening (top-level + hardware). */
-function openingItemsTotal(opening: EstimateOpeningWithItems): number {
-  const itemsTotal = opening.items.reduce((sum, item) => sum + (item.unitPrice ?? 0) * item.quantity, 0);
-  const hardwareTotal = (opening.hardware ?? []).reduce((sum, hw) => sum + (hw.unitPrice ?? 0) * hw.quantity, 0);
-  return itemsTotal + hardwareTotal;
-}
-
-/**
- * Per-opening sell subtotal from the rule engine's `estimate_line` rows (the
- * authoritative auditable price). Sums sell of priced, non-suppressed lines.
- * Returns null when the opening has no engine lines (legacy-only openings).
- */
-function engineSellSubtotal(lines: EstimateLine[] | undefined): number | null {
-  if (!lines || lines.length === 0) return null;
-  let sum = 0;
-  for (const line of lines) {
-    if (line.lineType === 'INCLUDED') continue;
-    sum += line.sellPrice ?? 0;
-  }
-  return sum;
-}
-
-/**
- * Per-opening unit subtotal: prefer the engine's auditable sell total, fall back
- * to the legacy `estimate_items.unitPrice` rollup for openings priced before the
- * rule engine.
- */
-function openingUnitSubtotal(opening: EstimateOpeningWithItems, engineSubtotal: number | null): number {
-  return engineSubtotal ?? openingItemsTotal(opening);
-}
-
-/** Total for an opening including the quantity multiplier. */
-function openingTotal(opening: EstimateOpeningWithItems, engineSubtotal: number | null): number {
-  return openingUnitSubtotal(opening, engineSubtotal) * opening.quantity;
-}
-
-/** All priced line items across an opening (top-level + hardware). */
-function allOpeningItems(opening: EstimateOpeningWithItems): import('@/types').EstimateItem[] {
-  return [...opening.items, ...(opening.hardware ?? [])];
-}
-
-/** Count of items with no price set across all openings. */
-function countMissingPrices(openings: EstimateOpeningWithItems[]): number {
-  return openings.flatMap(allOpeningItems).filter((i) => i.unitPrice === null || i.unitPrice === undefined).length;
 }
 
 interface OpeningsStepProps {
@@ -100,6 +55,12 @@ interface OpeningsStepProps {
   finishLabel?: string;
   finishLoading?: boolean;
   backLabel?: string;
+  /**
+   * When the user navigates back from the Review step via "Edit configuration",
+   * this is set to the opening to edit. OpeningsStep auto-opens the builder for it.
+   */
+  autoEditOpening?: import('@/types').EstimateOpeningWithItems | null;
+  onAutoEditDone?: () => void;
 }
 
 interface OpeningCardProps {
@@ -143,7 +104,8 @@ function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting, ha
   const [updatingQty, setUpdatingQty] = useState(false);
 
   const { topLevel, hardware } = countItems(opening);
-  const total = openingTotal(opening, engineSubtotal);
+  const unitSubtotal = engineSubtotal ?? opening.items.reduce((s, i) => s + (i.unitPrice ?? 0) * i.quantity, 0) + (opening.hardware ?? []).reduce((s, h) => s + (h.unitPrice ?? 0) * h.quantity, 0);
+  const total = unitSubtotal * opening.quantity;
 
   const handleQtyStep = async (e: React.MouseEvent, delta: number) => {
     e.stopPropagation();
@@ -389,13 +351,12 @@ export function OpeningsStep({
   finishLabel = 'Save & Finish',
   finishLoading = false,
   backLabel = 'Back to Customer',
+  autoEditOpening = null,
+  onAutoEditDone,
 }: OpeningsStepProps) {
   const navigate = useNavigate();
 
   const [openings, setOpenings] = useState<EstimateOpeningWithItems[]>([]);
-  // resolvedId tracks the actual DB estimate ID once it exists. It starts from
-  // the prop (real for existing estimates, null for new ones) and is updated
-  // when createEstimate() resolves the first time.
   const [resolvedId, setResolvedId] = useState<string | null>(estimateId);
   const [engineLinesByOpening, setEngineLinesByOpening] = useState<Map<string, EstimateLine[]>>(new Map());
   const [loadingOpenings, setLoadingOpenings] = useState(!!estimateId);
@@ -405,6 +366,16 @@ export function OpeningsStep({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editingOpening, setEditingOpening] = useState<EstimateOpeningWithItems | null>(null);
   const [creatingEstimate, setCreatingEstimate] = useState(false);
+
+  // When the parent passes autoEditOpening (from "Edit configuration" on Review),
+  // auto-open the builder for that opening.
+  useEffect(() => {
+    if (!autoEditOpening) return;
+    setEditingOpening(autoEditOpening);
+    setBuildDialogOpen(true);
+    onAutoEditDone?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoEditOpening]);
 
   // Sync resolvedId if the parent provides a real ID after mount (editing flow).
   useEffect(() => {
@@ -445,27 +416,17 @@ export function OpeningsStep({
     }
   };
 
-  // Open the appropriate opening editor. Template types navigate to the full-page
-  // NewOpeningPage (no estimate ID needed — it creates it lazily inside handleSave).
-  // Build/choose open dialogs with deferred estimate creation.
+  // "Build Opening" opens the spec builder as a full page (estimate created
+  // lazily on save). "Choose existing" still opens its dialog.
   const openDialog = (
-    type: 'template' | 'build' | 'choose',
-    templateType?: OpeningTemplateType
+    type: 'build' | 'choose',
   ) => {
-    if (type === 'template') {
-      if (resolvedId) {
-        // Estimate already exists — navigate to the page with the ID in the URL.
-        navigate(
-          `/app/estimates/${resolvedId}/openings/new?type=${templateType ?? 'single'}&count=${openings.length}`
-        );
-      } else {
-        // No estimate yet — navigate to the no-ID route; the page creates it on save.
-        navigate(
-          `/app/estimates/openings/new?type=${templateType ?? 'single'}&count=${openings.length}`
-        );
-      }
-    } else if (type === 'build') {
-      setBuildDialogOpen(true);
+    if (type === 'build') {
+      navigate(
+        resolvedId
+          ? `/app/estimates/${resolvedId}/openings/build?count=${openings.length}`
+          : `/app/estimates/openings/build?count=${openings.length}`
+      );
     } else {
       setChooseDialogOpen(true);
     }
@@ -625,43 +586,31 @@ export function OpeningsStep({
                     Build a new opening or copy one from a past estimate.
                   </p>
                 </div>
+                <Button
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={creatingEstimate}
+                  onClick={() => openDialog('build')}
+                >
+                  <Plus className="h-4 w-4" />
+                  Build Opening
+                </Button>
               </div>
             </div>
 
             {/* Add / Choose buttons */}
             <div className="flex gap-3">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="outline"
-                    className="flex-1 justify-between"
-                    disabled={creatingEstimate}
-                  >
-                    {creatingEstimate ? (
-                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Creating…</>
-                    ) : (
-                      <>Select Opening Type<ChevronDown className="h-4 w-4 ml-2" /></>
-                    )}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-[--radix-dropdown-menu-trigger-width]">
-                  <DropdownMenuItem onSelect={() => { openDialog('template', 'single'); }}>
-                    Single
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => { openDialog('template', 'pair'); }}>
-                    Pair
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => { openDialog('template', 'single_with_panel'); }}>
-                    Single w/ Panel
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => { openDialog('template', 'pair_with_panel'); }}>
-                    Pair w/ Panel
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => { openDialog('build'); }}>
-                    Custom
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <Button
+                className="flex-1 gap-2"
+                disabled={creatingEstimate}
+                onClick={() => openDialog('build')}
+              >
+                {creatingEstimate ? (
+                  <><Loader2 className="h-4 w-4 animate-spin" />Creating…</>
+                ) : (
+                  <><Plus className="h-4 w-4" />Build Opening</>
+                )}
+              </Button>
               <Button
                 variant="outline"
                 className="flex-1"
@@ -677,9 +626,9 @@ export function OpeningsStep({
 
         {/* Grand total summary card */}
         {openings.length > 0 && (() => {
-          const grandTotal = openings.reduce((sum, o) => sum + openingTotal(o), 0);
-          const missingCount = countMissingPrices(openings);
-          const hasAnyGrandPrice = openings.some((o) => allOpeningItems(o).some((i) => i.unitPrice !== null && i.unitPrice !== undefined));
+          const grandTotal = estimateGrandTotal(openings, engineLinesByOpening);
+          const missingCount = countEstimateMissingPrices(openings, engineLinesByOpening);
+          const hasAnyGrandPrice = estimateHasAnyPrice(openings, engineLinesByOpening);
           if (!hasAnyGrandPrice) return null;
           return (
             <Card className="bg-primary/5 border-primary/20">
@@ -691,7 +640,7 @@ export function OpeningsStep({
                     </p>
                     {missingCount > 0 && (
                       <p className="text-[11px] text-amber-600 mt-0.5">
-                        {missingCount} item{missingCount !== 1 ? 's' : ''} missing price — see Review step
+                        {missingCount} exception{missingCount !== 1 ? 's' : ''} — see Review step
                       </p>
                     )}
                   </div>

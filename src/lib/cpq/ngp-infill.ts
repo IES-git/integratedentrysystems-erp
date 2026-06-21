@@ -302,6 +302,9 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
       return base;
     }
     if (!input.louverModel && louver.model) auto['louverModel'] = { value: louver.model, reason: 'Only compatible louver for this door/rating' };
+    if (!input.louverModel && candidates.length > 1) {
+      issues.push({ code: 'NGP_LOUVER_CHOICE', severity: 'warn', message: `${candidates.length} compatible louvers — confirm the louver model.` });
+    }
     const cores = orderW != null && orderH != null ? louverCores(catalog, louver.material, orderW, orderH) : 1;
     base.louverCores = cores;
     if (cores > 1) auto['louverCores'] = { value: String(cores), reason: 'Catalog forces split cores above the size threshold' };
@@ -329,6 +332,9 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
     return base;
   }
   if (!input.kitModel && kit.model) auto['kitModel'] = { value: kit.model, reason: 'Only / best compatible lite kit for this door' };
+  if (!input.kitModel && kits.length > 1) {
+    issues.push({ code: 'NGP_KIT_CHOICE', severity: 'warn', message: `${kits.length} compatible lite kits — confirm the kit model.` });
+  }
 
   const kitModel = kit.model ?? '';
   const glassScopeBundled = bundled(kit.glassScope);
@@ -342,6 +348,9 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
     glass = glassList.find((p) => p.model === input.glassModel) ?? glassList[0] ?? null;
     base.glass = glass;
     if (glass && !input.glassModel && glass.model) auto['glassModel'] = { value: glass.model, reason: 'Compatible glass for this fire rating' };
+    if (!input.glassModel && glassList.length > 1) {
+      issues.push({ code: 'NGP_GLASS_CHOICE', severity: 'warn', message: `${glassList.length} compatible glass products — confirm the glass model.` });
+    }
   }
 
   const glassThickness = input.glassThicknessIn ?? glass?.glassThicknessMinIn ?? null;
@@ -390,10 +399,19 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
     const tape = input.tapeModel
       ? { tapeModel: input.tapeModel, matched: true }
       : resolveTape(catalog, kitModel, input.doorThicknessIn, glassThickness);
+    // No capacity row = no validated glass/tape combination for this kit at this
+    // door/glass thickness. Block finalization rather than silently defaulting to
+    // a generic tape (the user must pick a tape or route to manual quote).
+    if (!input.tapeModel && !tape.matched) {
+      issues.push({
+        code: 'NGP_NO_CAPACITY', severity: 'block',
+        message: `No glazing-tape capacity row for kit "${kitModel}" at this door/glass thickness — select a tape or route to manual quote.`,
+      });
+    }
     const tapeModel = tape.tapeModel ?? STANDARD_TAPE;
     base.tapeModel = tapeModel;
     if (!input.tapeModel) {
-      auto['tapeModel'] = { value: tapeModel, reason: tape.matched ? 'Required tape from the kit/glass capacity table' : 'Standard glazing tape default' };
+      auto['tapeModel'] = { value: tapeModel, reason: tape.matched ? 'Required tape from the kit/glass capacity table' : 'Standard glazing tape default (UNVALIDATED — see capacity block)' };
     }
     components.push({
       entityType: 'glazing_tape', code: tapeModel, quantity: 1,

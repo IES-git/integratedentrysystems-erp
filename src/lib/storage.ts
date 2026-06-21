@@ -374,9 +374,9 @@ export function initializeDemoData(): void {
       name: 'Mike Chen',
       firstName: 'Mike',
       lastName: 'Chen',
-      jobTitle: 'Finance Analyst',
+      jobTitle: 'Operations Analyst',
       email: 'mike@integratedentrysystems.com',
-      role: 'finance',
+      role: 'ops',
       active: true,
     });
     

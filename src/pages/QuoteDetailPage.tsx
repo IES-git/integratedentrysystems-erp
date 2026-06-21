@@ -9,6 +9,7 @@ import {
   Download,
   FileText,
   Loader2,
+  Mail,
   MoreHorizontal,
   PanelRight,
   Send,
@@ -38,14 +39,15 @@ import {
 import { FilePreview } from '@/components/estimates/wizard/PdfPreview';
 import { CustomerQuotePdf } from '@/components/quotes/CustomerQuotePdf';
 import { ManufacturerQuotePdf } from '@/components/quotes/ManufacturerQuotePdf';
+import { SendQuoteDialog } from '@/components/quotes/SendQuoteDialog';
 import type { ManufacturerQuoteItem } from '@/components/quotes/ManufacturerQuotePdf';
 import { useToast } from '@/hooks/use-toast';
-import { getQuoteWithItems, updateQuoteStatus } from '@/lib/quotes-api';
-import { getCompany } from '@/lib/companies-api';
+import { getQuoteWithItems, updateQuoteStatus, sendQuoteEmail } from '@/lib/quotes-api';
+import { getCompany, listContacts } from '@/lib/companies-api';
 import { getEstimateWithItems, getEstimateFileUrl } from '@/lib/estimates-api';
 import { generateQuoteSummary } from '@/lib/gemini-api';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
-import type { Company, Estimate, HardwareSubcategory, ItemField, Quote, QuoteItem, QuoteStatus, QuoteType } from '@/types';
+import type { Company, Contact, Estimate, HardwareSubcategory, ItemField, Quote, QuoteItem, QuoteStatus, QuoteType } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -185,12 +187,17 @@ export default function QuoteDetailPage() {
   const [quote, setQuote] = useState<Quote | null>(null);
   const [items, setItems] = useState<QuoteItemWithFields[]>([]);
   const [company, setCompany] = useState<Company | null>(null);
+  const [contacts, setContacts] = useState<Contact[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
 
   // PDF download states
   const [isDownloadingCustomer, setIsDownloadingCustomer] = useState(false);
   const [isDownloadingManufacturer, setIsDownloadingManufacturer] = useState(false);
+
+  // Email send state
+  const [showSendDialog, setShowSendDialog] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
 
   // Estimate panel state
   const [showEstimatePanel, setShowEstimatePanel] = useState(false);
@@ -212,8 +219,12 @@ export default function QuoteDetailPage() {
         setItems(result.items);
 
         if (result.quote.companyId) {
-          const co = await getCompany(result.quote.companyId).catch(() => null);
+          const [co, cts] = await Promise.all([
+            getCompany(result.quote.companyId).catch(() => null),
+            listContacts(result.quote.companyId).catch(() => [] as Contact[]),
+          ]);
           setCompany(co);
+          setContacts(cts);
         }
       })
       .catch((err) => {
@@ -242,36 +253,66 @@ export default function QuoteDetailPage() {
     }
   };
 
+  // ── PDF blob helpers ───────────────────────────────────────────────────────
+
+  const buildCustomerPdfBlob = useCallback(async (): Promise<{ blob: Blob; fileName: string }> => {
+    if (!quote) throw new Error('Quote not loaded');
+
+    const primaryContact = contacts.find((c) => c.isPrimary) ?? contacts[0] ?? null;
+
+    let aiSummary: string | null = null;
+    try {
+      aiSummary = await generateQuoteSummary({
+        companyName: company?.name ?? null,
+        items: items.map((i) => ({
+          label: i.itemLabel,
+          quantity: i.quantity,
+          lineTotal: i.lineTotal,
+        })),
+        total: quote.total,
+        currency: quote.currency,
+        notes: quote.notes,
+      });
+    } catch {
+      // AI summary is optional — skip silently
+    }
+
+    const blob = await pdf(
+      <CustomerQuotePdf
+        quote={quote}
+        items={items}
+        company={company}
+        primaryContact={primaryContact}
+        aiSummary={aiSummary}
+      />
+    ).toBlob();
+
+    const name = company?.name ?? 'Customer';
+    const date = new Date().toISOString().slice(0, 10);
+    return { blob, fileName: `Quote-${name.replace(/\s+/g, '-')}-${date}.pdf` };
+  }, [quote, items, company, contacts]);
+
+  const buildManufacturerPdfBlob = useCallback(async (): Promise<{ blob: Blob; fileName: string }> => {
+    if (!quote) throw new Error('Quote not loaded');
+
+    const mfrItems: ManufacturerQuoteItem[] = items.map((i) => ({ ...i, fields: i.fields }));
+    const blob = await pdf(
+      <ManufacturerQuotePdf quote={quote} items={mfrItems} company={company} />
+    ).toBlob();
+
+    const name = company?.name ?? 'Manufacturer';
+    const date = new Date().toISOString().slice(0, 10);
+    return { blob, fileName: `RFQ-${name.replace(/\s+/g, '-')}-${date}.pdf` };
+  }, [quote, items, company]);
+
   // ── PDF downloads ──────────────────────────────────────────────────────────
 
   const handleDownloadCustomer = useCallback(async () => {
     if (!quote) return;
     setIsDownloadingCustomer(true);
     try {
-      let aiSummary: string | null = null;
-      try {
-        aiSummary = await generateQuoteSummary({
-          companyName: company?.name ?? null,
-          items: items.map((i) => ({
-            label: i.itemLabel,
-            quantity: i.quantity,
-            lineTotal: i.lineTotal,
-          })),
-          total: quote.total,
-          currency: quote.currency,
-          notes: quote.notes,
-        });
-      } catch {
-        // AI summary is optional — skip silently
-      }
-
-      const blob = await pdf(
-        <CustomerQuotePdf quote={quote} items={items} company={company} aiSummary={aiSummary} />
-      ).toBlob();
-
-      const name = company?.name ?? 'Customer';
-      const date = new Date().toISOString().slice(0, 10);
-      triggerDownload(blob, `Quote-${name.replace(/\s+/g, '-')}-${date}.pdf`);
+      const { blob, fileName } = await buildCustomerPdfBlob();
+      triggerDownload(blob, fileName);
     } catch (err) {
       toast({
         title: 'PDF generation failed',
@@ -281,24 +322,14 @@ export default function QuoteDetailPage() {
     } finally {
       setIsDownloadingCustomer(false);
     }
-  }, [quote, items, company, toast]);
+  }, [quote, buildCustomerPdfBlob, toast]);
 
   const handleDownloadManufacturer = useCallback(async () => {
     if (!quote) return;
     setIsDownloadingManufacturer(true);
     try {
-      const mfrItems: ManufacturerQuoteItem[] = items.map((i) => ({
-        ...i,
-        fields: i.fields,
-      }));
-
-      const blob = await pdf(
-        <ManufacturerQuotePdf quote={quote} items={mfrItems} company={company} />
-      ).toBlob();
-
-      const name = company?.name ?? 'Manufacturer';
-      const date = new Date().toISOString().slice(0, 10);
-      triggerDownload(blob, `RFQ-${name.replace(/\s+/g, '-')}-${date}.pdf`);
+      const { blob, fileName } = await buildManufacturerPdfBlob();
+      triggerDownload(blob, fileName);
     } catch (err) {
       toast({
         title: 'PDF generation failed',
@@ -308,11 +339,81 @@ export default function QuoteDetailPage() {
     } finally {
       setIsDownloadingManufacturer(false);
     }
-  }, [quote, items, company, toast]);
+  }, [quote, buildManufacturerPdfBlob, toast]);
 
   const handleDownloadBoth = useCallback(async () => {
     await Promise.all([handleDownloadCustomer(), handleDownloadManufacturer()]);
   }, [handleDownloadCustomer, handleDownloadManufacturer]);
+
+  // ── Email send ─────────────────────────────────────────────────────────────
+
+  const handleSendEmail = useCallback(async ({
+    recipientEmail,
+    ccEmails,
+    subject,
+    message,
+  }: {
+    recipientEmail: string;
+    ccEmails: string[];
+    subject: string;
+    message: string;
+  }) => {
+    if (!quote) return;
+    setIsSendingEmail(true);
+    try {
+      const { blob: customerBlob, fileName: customerFileName } = await buildCustomerPdfBlob();
+      const customerBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          // Strip the data URL prefix (e.g. "data:application/pdf;base64,")
+          resolve(result.split(',')[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(customerBlob);
+      });
+
+      let mfrBase64: string | undefined;
+      let mfrFileName: string | undefined;
+      if (quote.quoteType === 'both') {
+        const { blob: mfrBlob, fileName: mfr } = await buildManufacturerPdfBlob();
+        mfrFileName = mfr;
+        mfrBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve((reader.result as string).split(',')[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(mfrBlob);
+        });
+      }
+
+      const { quote: updatedQuote } = await sendQuoteEmail({
+        quoteId: quote.id,
+        recipientEmail,
+        ccEmails,
+        subject,
+        message,
+        pdfBase64: customerBase64,
+        pdfFileName: customerFileName,
+        manufacturerPdfBase64: mfrBase64,
+        manufacturerPdfFileName: mfrFileName,
+      });
+
+      setQuote(updatedQuote);
+      toast({
+        title: 'Quote sent',
+        description: `Successfully sent to ${recipientEmail}`,
+      });
+    } catch (err) {
+      toast({
+        title: 'Failed to send quote',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      });
+      throw err; // re-throw so SendQuoteDialog keeps its loading state correct
+    } finally {
+      setIsSendingEmail(false);
+    }
+  }, [quote, buildCustomerPdfBlob, buildManufacturerPdfBlob, toast]);
 
   // ── Estimate panel ─────────────────────────────────────────────────────────
 
@@ -365,7 +466,9 @@ export default function QuoteDetailPage() {
   const subtotal = items.reduce((sum, i) => sum + i.lineTotal, 0);
   const showCustomerPdf = quote.quoteType === 'customer' || quote.quoteType === 'both';
   const showManufacturerPdf = quote.quoteType === 'manufacturer' || quote.quoteType === 'both';
-  const isBusy = isDownloadingCustomer || isDownloadingManufacturer;
+  const isBusy = isDownloadingCustomer || isDownloadingManufacturer || isSendingEmail;
+  // "Send to Customer" is relevant on any quote with a customer PDF, regardless of status
+  const canSendToCustomer = showCustomerPdf;
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -397,6 +500,22 @@ export default function QuoteDetailPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Send to Customer */}
+          {canSendToCustomer && (
+            <Button
+              onClick={() => setShowSendDialog(true)}
+              disabled={isBusy}
+              className="gap-2"
+            >
+              {isSendingEmail ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Mail className="h-4 w-4" />
+              )}
+              Send to Customer
+            </Button>
+          )}
+
           {nextStatuses.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -703,6 +822,28 @@ export default function QuoteDetailPage() {
                       day: 'numeric',
                     })}
                   />
+                  {quote.sentAt && (
+                    <InfoCard
+                      icon={<Send className="h-4 w-4" />}
+                      label="Last Sent"
+                      value={
+                        <div>
+                          <span>
+                            {new Date(quote.sentAt).toLocaleDateString('en-US', {
+                              year: 'numeric',
+                              month: 'short',
+                              day: 'numeric',
+                            })}
+                          </span>
+                          {quote.sentToEmail && (
+                            <p className="text-xs text-muted-foreground font-normal mt-0.5">
+                              {quote.sentToEmail}
+                            </p>
+                          )}
+                        </div>
+                      }
+                    />
+                  )}
                 </CardContent>
               </Card>
 
@@ -744,6 +885,19 @@ export default function QuoteDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Send Quote Dialog */}
+      {canSendToCustomer && (
+        <SendQuoteDialog
+          open={showSendDialog}
+          onOpenChange={setShowSendDialog}
+          quote={quote}
+          company={company}
+          contacts={contacts}
+          includesManufacturerPdf={quote.quoteType === 'both'}
+          onSend={handleSendEmail}
+        />
+      )}
     </div>
   );
 }

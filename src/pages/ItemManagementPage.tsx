@@ -97,7 +97,7 @@ import {
   updateHardwareCatalogItem,
   deleteHardwareCatalogItem,
 } from '@/lib/estimates-api';
-import { listCompanies, createCompany } from '@/lib/companies-api';
+import { listManufacturers, createCompany } from '@/lib/companies-api';
 import { getItemTypeRegistry } from '@/lib/item-fields-api';
 import { useAuth } from '@/contexts/AuthContext';
 import { ItemFieldsPanel } from '@/components/items/ItemFieldsPanel';
@@ -392,13 +392,9 @@ export default function ItemManagementPage() {
     getFieldDefinitions()
       .then(setAllFieldDefs)
       .catch(() => {/* best-effort */});
-    listCompanies()
+    listManufacturers()
       .then((companies) =>
-        setManufacturers(
-          companies
-            .filter((c) => c.companyType === 'manufacturer' || c.companyType === 'both')
-            .map((c) => ({ id: c.id, name: c.name }))
-        )
+        setManufacturers(companies.map((c) => ({ id: c.id, name: c.name })))
       )
       .catch(() => {/* best-effort */});
   }, [fetchItemTypeRegistry, fetchItemTypes, fetchBlockedLabels, fetchCatalog]);

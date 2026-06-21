@@ -3,7 +3,7 @@ export * from './cpq';
 import type { PriceTableArchetype } from './cpq';
 
 // User & Auth Types
-export type UserRole = 'admin' | 'sales' | 'ops' | 'finance' | 'hr';
+export type UserRole = 'admin' | 'sales' | 'ops';
 
 export interface User {
   id: string;
@@ -95,6 +95,10 @@ export interface Estimate {
   extractedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Optional sell adjustment applied to the engine grand total on the Review step. Positive = markup, negative = discount (percentage). */
+  sellAdjustmentPct?: number | null;
+  /** Free-text notes entered on the Review step. */
+  estimateNotes?: string | null;
 }
 
 /** How a unit_price was set on an estimate item. */
@@ -408,8 +412,28 @@ export interface Quote {
   notes: string | null;
   /** Catalog snapshot timestamp this quote was priced against (CPQ Phase 0). */
   pricedAsOf: string | null;
+  /** Timestamp of the first successful email delivery. Null means never sent. */
+  sentAt: string | null;
+  /** Primary recipient email address the quote was last sent to. */
+  sentToEmail: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type QuoteEmailStatus = 'sent' | 'failed';
+
+export interface QuoteEmail {
+  id: string;
+  quoteId: string;
+  recipientEmail: string;
+  ccEmails: string[];
+  subject: string;
+  body: string;
+  sentByUserId: string;
+  providerMessageId: string | null;
+  status: QuoteEmailStatus;
+  error: string | null;
+  createdAt: string;
 }
 
 export interface QuoteItem {

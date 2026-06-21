@@ -95,7 +95,7 @@ export default function CustomersPage() {
     try {
       setIsLoading(true);
       setError(null);
-      const data = await listCompanies();
+      const data = await listCompanies('customer');
       setCompanies(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load companies');
@@ -119,6 +119,7 @@ export default function CustomersPage() {
     try {
       const companyInput = {
         name: fd.get('companyName') as string,
+        companyType: 'customer' as const,
         billingAddress: (fd.get('billingStreet') as string) || null,
         billingCity: (fd.get('billingCity') as string) || null,
         billingState: (fd.get('billingState') as string) || null,
@@ -234,7 +235,7 @@ export default function CustomersPage() {
       <div className="flex min-h-[400px] items-center justify-center">
         <div className="flex flex-col items-center gap-4">
           <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-          <p className="text-sm text-muted-foreground">Loading companies...</p>
+          <p className="text-sm text-muted-foreground">Loading customers...</p>
         </div>
       </div>
     );
@@ -246,7 +247,7 @@ export default function CustomersPage() {
         <div className="max-w-md rounded-lg border bg-card p-6 shadow-lg">
           <div className="mb-4 flex items-center gap-2 text-destructive">
             <AlertCircle className="h-5 w-5" />
-            <h2 className="text-lg font-semibold">Error Loading Companies</h2>
+            <h2 className="text-lg font-semibold">Error Loading Customers</h2>
           </div>
           <p className="mb-4 text-sm text-muted-foreground">{error}</p>
           <Button onClick={load}>Retry</Button>
@@ -260,7 +261,7 @@ export default function CustomersPage() {
       <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="font-display text-2xl sm:text-3xl lg:text-4xl tracking-wide">Customers</h1>
-          <p className="mt-1 text-muted-foreground">Manage your customer companies and contacts</p>
+          <p className="mt-1 text-muted-foreground">Manage the companies and contacts you build estimates and sell doors to</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => setIsBulkMarkupOpen(true)}>
@@ -298,13 +299,13 @@ export default function CustomersPage() {
         <CardHeader>
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <CardTitle>All Companies</CardTitle>
-              <CardDescription>{companies.length} total companies</CardDescription>
+              <CardTitle>All Customers</CardTitle>
+              <CardDescription>{companies.length} total customers</CardDescription>
             </div>
             <div className="relative w-full sm:w-64">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Search companies..."
+                placeholder="Search customers..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-9"
@@ -317,12 +318,12 @@ export default function CustomersPage() {
             <div className="py-12 text-center">
               <Building2 className="mx-auto mb-4 h-12 w-12 text-muted-foreground/40" />
               <p className="text-muted-foreground">
-                {searchQuery ? 'No companies match your search' : 'No companies yet'}
+                {searchQuery ? 'No customers match your search' : 'No customers yet'}
               </p>
               {!searchQuery && (
                 <Button onClick={openNewDialog} variant="outline" className="mt-4">
                   <Plus className="mr-2 h-4 w-4" />
-                  Add your first company
+                  Add your first customer
                 </Button>
               )}
             </div>

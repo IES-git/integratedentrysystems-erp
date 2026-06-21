@@ -98,7 +98,15 @@ export function resolveAction(rule: LoadedPriceRule, ctx: ActionContext): Action
     }
     case 'FIXED_ADD_X_QTY':
     case 'RATE_X_QUANTITY': {
-      const billable = Math.max(0, qty - (rule.baseQuantityIncluded ?? 0));
+      // Quantity contract (single extension): the billable quantity comes ONLY
+      // from the rule's basis field (e.g. width in inches, length in feet). It
+      // does NOT fall back to the component count — the engine multiplies the
+      // returned per-instance amount by the component quantity exactly once.
+      // Without a basis field the rule is a flat per-component charge (billable
+      // = 1), so component multiplication still happens exactly once downstream.
+      const billable = ctx.quantityBasisValue != null
+        ? Math.max(0, ctx.quantityBasisValue - (rule.baseQuantityIncluded ?? 0))
+        : 1;
       const raw = amount * billable;
       const v = clamp(round(raw, rule.roundingMethod, rule.roundingIncrement), rule.minimumCharge, rule.maximumCharge);
       return {
@@ -166,7 +174,15 @@ export function resolveAction(rule: LoadedPriceRule, ctx: ActionContext): Action
     case 'INCLUDED':
       return { amount: 0, status: 'INCLUDED', lineType: 'INCLUDED', expression: 'Included in base', manualReason: null, exceptionMessage: null };
     case 'NOT_APPLICABLE':
-      return { amount: 0, status: 'INCLUDED', lineType: 'INCLUDED', expression: 'Not applicable (N/A)', manualReason: null, exceptionMessage: null };
+      // N/A means this configuration is NOT a valid combination — it must block,
+      // not silently produce a $0 "included" line. Route to manual review so the
+      // incompatible configuration is surfaced and cannot be finalized as-is.
+      return {
+        amount: null, status: 'INVALID', lineType: 'WARNING',
+        expression: 'Not applicable (N/A) — incompatible configuration',
+        manualReason: 'INVALID_COMBINATION',
+        exceptionMessage: 'This option is not applicable to the selected configuration (N/A) and cannot be priced.',
+      };
     case 'CONTACT_FACTORY':
       return {
         amount: null, status: 'CONTACT_FACTORY', lineType: 'MANUAL_QUOTE',

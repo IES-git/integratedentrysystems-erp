@@ -303,20 +303,24 @@ function pricePreps(
     );
     const priced = priceComponent(spec, comp, prepRules, options, sort);
     if (priced.lines.length === 0) {
-      // No separate prep charge published → standard hardware prep (hinge/lock/
-      // strike machining) is INCLUDED in the door/frame base price. Non-blocking
-      // (an INCLUDED line, not an exception) so a complete opening can finalize.
+      // No prep rule matched. A failed lookup must NEVER be assumed "included in
+      // base" — that hides un-priced machining. Route to manual review so the
+      // prep is explicitly priced, confirmed included by a source rule, or
+      // quoted by hand. (An explicit INCLUDED/NO_CHARGE prep rule still produces
+      // a $0 line via the normal rule path above; only the absence of any rule
+      // lands here.)
       lines.push({
-        lineType: 'INCLUDED', priceRuleId: null, entityType: 'prep', chargeCategory: 'prep',
-        description: `${comp.label} — included in base`, selectedOptionCode: comp.code, quantity: comp.quantity, unitOfMeasure: null,
-        unitListPrice: 0, extendedListPrice: 0, discountMultiplier: null, extendedNetPrice: 0,
-        sellPrice: 0, grossMargin: null, grossMarginPct: null, priceStatus: 'INCLUDED',
-        calculationExpression: 'Prep included in door/frame base price (no separate charge published)',
+        lineType: 'WARNING', priceRuleId: null, entityType: 'prep', chargeCategory: 'prep',
+        description: `${comp.label} — no prep price published`, selectedOptionCode: comp.code, quantity: comp.quantity, unitOfMeasure: null,
+        unitListPrice: null, extendedListPrice: null, discountMultiplier: null, extendedNetPrice: null,
+        sellPrice: null, grossMargin: null, grossMarginPct: null, priceStatus: 'INVALID',
+        calculationExpression: 'No prep price rule matched — manual review required (not assumed included)',
         matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
         priceBookId: options.priceBookId, confidence: null,
-        exceptionMessage: null,
+        exceptionMessage: `Preparation ${comp.code ?? ''} for ${comp.label} has no published price rule; confirm it is included by a source rule or price it manually.`,
         componentId: null, sortOrder: sort++,
       });
+      manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Prep price for ${comp.label} (${comp.code ?? ''})` });
       continue;
     }
     lines.push(...priced.lines);
@@ -378,14 +382,17 @@ function priceServices(spec: NormalizedOpeningSpec, catalog: HardwareCatalog, su
     let qty = 1;
     let expr = '';
     switch (svc.basis) {
+      // Engine lines describe ONE opening instance. The opening quantity is
+      // applied exactly once at estimate/quote rollup, so service lines must NOT
+      // multiply by spec.quantity here (that was the service double-extension).
       case 'per_opening':
-        amount = svc.rate; qty = spec.quantity; expr = `${svc.rate ?? 0} per opening × ${spec.quantity}`;
+        amount = svc.rate; qty = 1; expr = `${svc.rate ?? 0} per opening`;
         break;
       case 'per_leaf':
-        amount = svc.rate; qty = spec.leafCount * spec.quantity; expr = `${svc.rate ?? 0} per leaf × ${qty}`;
+        amount = svc.rate; qty = spec.leafCount; expr = `${svc.rate ?? 0} per leaf × ${qty}`;
         break;
       case 'per_unit':
-        amount = svc.rate; qty = spec.quantity; expr = `${svc.rate ?? 0} per unit × ${qty}`;
+        amount = svc.rate; qty = 1; expr = `${svc.rate ?? 0} per unit`;
         break;
       case 'flat':
         amount = svc.rate; qty = 1; expr = `flat ${svc.rate ?? 0}`;
@@ -420,19 +427,74 @@ function priceServices(spec: NormalizedOpeningSpec, catalog: HardwareCatalog, su
   return lines;
 }
 
-/** Evaluates dependency rules against the spec (warn vs block). */
+/** Reserved keys in trigger_conditions that are metadata, not field predicates. */
+const TRIGGER_META_KEYS = new Set(['source', 'note', 'predicates', 'mode', 'scope']);
+
+interface TriggerPredicate {
+  field: string;
+  operator?: string;
+  value?: unknown;
+  value2?: unknown;
+}
+
+/** Evaluates one structured trigger predicate (executable narrative) vs the spec. */
+function matchTriggerPredicate(spec: NormalizedOpeningSpec, pred: TriggerPredicate): boolean {
+  const actual = readField(spec, null, pred.field);
+  const op = (pred.operator ?? 'EQ').toUpperCase();
+  const asNum = (v: unknown): number | null => {
+    if (v == null) return null;
+    const n = typeof v === 'number' ? v : Number(String(v).replace(/[^0-9.-]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+  const eqi = (a: unknown, b: unknown) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+  const list = (v: unknown) => String(v ?? '').split('|').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  switch (op) {
+    case 'EXISTS': return actual != null && String(actual).trim() !== '';
+    case 'MISSING': return actual == null || String(actual).trim() === '';
+    case 'EQ': return eqi(actual, pred.value);
+    case 'NE': return !eqi(actual, pred.value);
+    case 'IN': return actual != null && list(pred.value).includes(String(actual).trim().toLowerCase());
+    case 'NOT_IN': return actual == null || !list(pred.value).includes(String(actual).trim().toLowerCase());
+    case 'GT': { const a = asNum(actual), b = asNum(pred.value); return a != null && b != null && a > b; }
+    case 'GTE': { const a = asNum(actual), b = asNum(pred.value); return a != null && b != null && a >= b; }
+    case 'LT': { const a = asNum(actual), b = asNum(pred.value); return a != null && b != null && a < b; }
+    case 'LTE': { const a = asNum(actual), b = asNum(pred.value); return a != null && b != null && a <= b; }
+    case 'BETWEEN': { const a = asNum(actual), lo = asNum(pred.value), hi = asNum(pred.value2); return a != null && lo != null && hi != null && a >= lo && a <= hi; }
+    default: return eqi(actual, pred.value);
+  }
+}
+
+/**
+ * Evaluates dependency rules against the spec (warn vs block). Supports two
+ * forms of `trigger_conditions`:
+ *   - structured (compiled narrative): `{ predicates: [{field,operator,value}], mode }`
+ *   - legacy simple equality: `{ "field.path": "expected", ... }` (null = EXISTS)
+ * Metadata keys (source/note/scope) are ignored as predicates.
+ */
 function evaluateDependencies(spec: NormalizedOpeningSpec, deps: DependencyRule[]): DependencyOutcome[] {
   const outcomes: DependencyOutcome[] = [];
   for (const dep of deps) {
-    const trigger = dep.triggerConditions ?? {};
-    const entries = Object.entries(trigger);
-    if (entries.length === 0) continue;
-    const allMatch = entries.every(([key, expected]) => {
-      const actual = readField(spec, null, key);
-      if (expected == null) return actual != null;
-      return String(actual ?? '').trim().toLowerCase() === String(expected).trim().toLowerCase();
-    });
-    if (!allMatch) continue;
+    const trigger = (dep.triggerConditions ?? {}) as Record<string, unknown>;
+
+    let matched: boolean;
+    const predicates = Array.isArray(trigger.predicates) ? (trigger.predicates as TriggerPredicate[]) : null;
+    if (predicates) {
+      if (predicates.length === 0) continue;
+      const mode = String(trigger.mode ?? 'all').toLowerCase();
+      matched = mode === 'any'
+        ? predicates.some((p) => matchTriggerPredicate(spec, p))
+        : predicates.every((p) => matchTriggerPredicate(spec, p));
+    } else {
+      const entries = Object.entries(trigger).filter(([k]) => !TRIGGER_META_KEYS.has(k));
+      if (entries.length === 0) continue;
+      matched = entries.every(([key, expected]) => {
+        const actual = readField(spec, null, key);
+        if (expected == null) return actual != null;
+        return String(actual ?? '').trim().toLowerCase() === String(expected).trim().toLowerCase();
+      });
+    }
+    if (!matched) continue;
+
     const blocking = dep.severity === 'BLOCK_PRICING' || dep.severity === 'BLOCK_ORDER' || dep.severity === 'ERROR';
     outcomes.push({
       rule: dep,
@@ -755,10 +817,22 @@ export async function priceOpening(
   }
 
   if (options.persist && spec.estimateId) {
-    await persistEngineResult(spec, result, documentId);
+    await persistEngineResult(spec, result, documentId, options.componentIdMap);
   }
 
   return result;
+}
+
+/** Resolves source_region.id → page_number (as text) for the given region ids. */
+async function loadSourcePages(regionIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const ids = [...new Set(regionIds.filter(Boolean))];
+  if (ids.length === 0) return out;
+  const { data } = await supabase.from('source_region').select('id, page_number').in('id', ids);
+  for (const r of data ?? []) {
+    if (r.page_number != null) out.set(r.id as string, String(r.page_number));
+  }
+  return out;
 }
 
 /**
@@ -769,15 +843,24 @@ export async function persistEngineResult(
   spec: NormalizedOpeningSpec,
   result: EngineResult,
   documentId: string | null,
+  componentIdMap?: Map<string, string>,
 ): Promise<void> {
   if (spec.openingId) {
     await supabase.from('estimate_line').delete().eq('opening_id', spec.openingId);
   }
 
+  // Resolve source pages so every persisted line records its workbook page, and
+  // translate draft component ids to real estimate_items ids for the FK.
+  const sourcePages = await loadSourcePages(result.lines.map((l) => l.sourceRegionId).filter((x): x is string => !!x));
+  const realComponentId = (draftId: string | null): string | null => {
+    if (!draftId) return null;
+    return componentIdMap?.get(draftId) ?? null;
+  };
+
   const rows = result.lines.map((l) => ({
     estimate_id: spec.estimateId,
     opening_id: spec.openingId,
-    component_id: null,
+    component_id: realComponentId(l.componentId),
     entity_type: l.entityType,
     line_type: l.lineType,
     price_rule_id: l.priceRuleId,
@@ -797,7 +880,7 @@ export async function persistEngineResult(
     calculation_expression: l.calculationExpression,
     matched_conditions: l.matchedConditions,
     included_or_suppressed_by: l.includedOrSuppressedBy,
-    source_page: l.sourcePage,
+    source_page: l.sourcePage ?? sourcePages.get(l.sourceRegionId ?? '') ?? null,
     source_region_id: l.sourceRegionId,
     price_book_id: documentId,
     confidence: l.confidence,
@@ -814,7 +897,7 @@ export async function persistEngineResult(
     const mqRows = result.manualQuotes.map((m) => ({
       estimate_id: spec.estimateId,
       opening_id: spec.openingId,
-      component_id: null,
+      component_id: realComponentId(m.componentId),
       price_rule_id: m.priceRuleId,
       reason: m.reason,
       requested_inputs: m.requestedInputs,

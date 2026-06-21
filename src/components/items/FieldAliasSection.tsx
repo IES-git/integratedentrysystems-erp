@@ -49,7 +49,7 @@ import {
   updateItemFieldAliasStatus,
   deleteItemFieldAlias,
 } from '@/lib/item-fields-api';
-import { listCompanies, createCompany } from '@/lib/companies-api';
+import { listManufacturers, createCompany } from '@/lib/companies-api';
 
 type AliasRow = ManufacturerFieldLabel | ItemTypeManufacturerFieldLabel;
 
@@ -123,14 +123,10 @@ export function FieldAliasSection({ fieldDefinitionId, fieldLabel, dataSource = 
     setResourcesLoading(true);
     try {
       const [companies, defs] = await Promise.all([
-        listCompanies(),
+        listManufacturers(),
         getFieldDefinitions(),
       ]);
-      setManufacturers(
-        companies
-          .filter((c) => c.companyType === 'manufacturer' || c.companyType === 'both')
-          .map((c) => ({ id: c.id, name: c.name }))
-      );
+      setManufacturers(companies.map((c) => ({ id: c.id, name: c.name })));
       setAllFieldDefs(defs);
     } catch {
       toast({ title: 'Error', description: 'Failed to load resources', variant: 'destructive' });

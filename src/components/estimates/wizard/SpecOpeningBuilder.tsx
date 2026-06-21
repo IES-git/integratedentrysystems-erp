@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Loader2, AlertCircle, DoorOpen, Square, LayoutPanelLeft, GlassWater,
   Wrench, KeyRound, ShieldCheck, ClipboardList, Plus, Trash2, CheckCircle2, Layers,
-  ChevronDown, ChevronRight,
+  ChevronDown, ChevronRight, ArrowLeft, Wand2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,8 +46,9 @@ import {
 } from '@/lib/pricing';
 import { priceOpeningLive } from '@/lib/cpq/live-pricing';
 import { buildNormalizedSpec, createOpeningDraft, createCutoutDraft, type OpeningDraft, type ComponentDraft, type HardwareSelectionDraft, type CutoutDraft } from '@/lib/cpq/opening-spec';
-import { saveOpeningDraft, loadOpeningCutouts } from '@/lib/cpq/opening-persist';
+import { saveOpeningDraft, loadOpeningCutouts, loadOpeningDraft } from '@/lib/cpq/opening-persist';
 import { loadNgpCatalog, emptyNgpCatalog, type NgpCatalog } from '@/lib/ngp-catalog-api';
+import { resolveOpeningSpecFromDb } from '@/lib/cpq/resolver';
 import { resolveInfill, type NgpInfillType, type ResolvedInfill } from '@/lib/cpq/ngp-infill';
 import {
   deriveBuilderContext, fieldTier, allowedEnumOptions, isStepVisible,
@@ -58,21 +59,27 @@ import {
 import type { EngineResult } from '@/lib/pricing';
 import type {
   OpeningConfigurationType, RuleEntityType, SpecFieldEntity, SpecFieldMapping, EstimateOpening,
+  UserOpeningSpec, ResolutionResult, ResolutionCandidate,
 } from '@/types';
 
-type StepId = 'classify' | 'doors' | 'frame' | 'panels' | 'lites' | 'cutouts' | 'preps' | 'hardware' | 'keying' | 'access' | 'review';
+type StepId = 'classify' | 'doors' | 'frame' | 'hardware' | 'panels' | 'lites' | 'cutouts' | 'preps' | 'keying' | 'access' | 'construction' | 'review';
 
+// Resolver-driven flow (plan Phase 5): requirements first (opening → door →
+// frame → hardware → lite/louver), then the resolver presents compliant
+// manufacturer constructions, then pricing/audit. The manufacturer series is an
+// OUTPUT chosen in the "Construction" step — never entered up front.
 const STEPS: { id: StepId; label: string; icon: typeof DoorOpen }[] = [
-  { id: 'classify', label: 'Classify', icon: ClipboardList },
-  { id: 'doors', label: 'Doors', icon: DoorOpen },
-  { id: 'frame', label: 'Frame', icon: Square },
+  { id: 'classify', label: 'Opening', icon: ClipboardList },
+  { id: 'doors', label: 'Door construction', icon: DoorOpen },
+  { id: 'frame', label: 'Frame & wall', icon: Square },
+  { id: 'hardware', label: 'Hardware', icon: Wrench },
   { id: 'panels', label: 'Panels', icon: LayoutPanelLeft },
   { id: 'lites', label: 'Lites/Glass', icon: GlassWater },
   { id: 'cutouts', label: 'Glass / Louvers', icon: GlassWater },
   { id: 'preps', label: 'Preparations', icon: Layers },
-  { id: 'hardware', label: 'Hardware', icon: Wrench },
   { id: 'keying', label: 'Keying', icon: KeyRound },
   { id: 'access', label: 'Access Control', icon: ShieldCheck },
+  { id: 'construction', label: 'Construction', icon: Wand2 },
   { id: 'review', label: 'Review', icon: CheckCircle2 },
 ];
 
@@ -205,11 +212,14 @@ interface SpecOpeningBuilderProps {
   editingOpeningId?: string | null;
   editingName?: string;
   editingQuantity?: number;
+  /** Render the builder as a full page instead of a modal dialog. */
+  mode?: 'dialog' | 'page';
 }
 
 export function SpecOpeningBuilder({
   estimateId, resolveEstimateId, open, onOpenChange, onSaved,
   openingCount = 0, editingOpeningId, editingName, editingQuantity,
+  mode = 'dialog',
 }: SpecOpeningBuilderProps) {
   const [step, setStep] = useState<StepId>('classify');
   const [loading, setLoading] = useState(false);
@@ -238,14 +248,24 @@ export function SpecOpeningBuilder({
     setError(null);
     setEngineResult(null);
     setAckManualQuote(false);
+
+    // Default draft — overridden below for edit mode.
     setDraft(createOpeningDraft({
       name: editingName ?? `Opening ${openingCount + 1}`,
       quantity: editingQuantity ?? 1,
       doors: [newComponent('door', 'Door')],
       frames: [newComponent('frame', 'Frame')],
     }));
+
     setLoading(true);
-    Promise.all([loadSpecFieldDictionary(), loadHardwareCatalog(new Date().toISOString().slice(0, 10)), loadOptionDescriptors(), loadNgpCatalog(), loadHardwareCategories(), loadBaseSignatures()])
+    const catalogLoad = Promise.all([
+      loadSpecFieldDictionary(),
+      loadHardwareCatalog(new Date().toISOString().slice(0, 10)),
+      loadOptionDescriptors(),
+      loadNgpCatalog(),
+      loadHardwareCategories(),
+      loadBaseSignatures(),
+    ])
       .then(([dict, cat, desc, ngp, hwCats, sigs]) => {
         setSpecByEntity(dict.byEntity);
         setMappings(dict.mappings);
@@ -257,12 +277,24 @@ export function SpecOpeningBuilder({
       })
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load catalog'))
       .finally(() => setLoading(false));
-    // In edit mode, restore the persisted NGP cutouts.
+
+    // In edit mode, rehydrate the full draft from the persisted snapshot (or
+    // fall back to lossy reconstruction for legacy openings without a snapshot).
     if (editingOpeningId) {
-      loadOpeningCutouts(editingOpeningId)
-        .then((cutouts) => { if (cutouts.length) setDraft((prev) => ({ ...prev, cutouts })); })
-        .catch(() => { /* non-fatal */ });
+      loadOpeningDraft(editingOpeningId)
+        .then((savedDraft) => {
+          if (savedDraft) {
+            setDraft(savedDraft);
+          }
+          // Cutouts are already included in the snapshot; this is a no-op fallback
+          // for legacy openings where loadOpeningDraft does the reconstruction.
+        })
+        .catch(() => {
+          // Non-fatal: builder starts from the name/qty defaults if load fails.
+        });
     }
+
+    void catalogLoad;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -584,123 +616,157 @@ export function SpecOpeningBuilder({
   const canSave = draft.name.trim().length > 0 && blockingDeps.length === 0 &&
     integrityBlocks.length === 0 && ngpBlocks.length === 0 && !pricingBlocked;
 
+  const title = editingOpeningId ? 'Edit Opening' : 'Build Opening';
+  const description =
+    'Spec-driven configurator — classify the opening, then walk door → frame → panel → lites → preps → hardware.';
+
+  // Step rail + step content — identical between dialog and page modes.
+  const mainContent = (
+    <div className="flex flex-1 min-h-0">
+      {/* Step rail */}
+      <nav className="w-44 shrink-0 border-r bg-muted/20 py-3 overflow-y-auto">
+        {steps.map((s) => {
+          const Icon = s.icon;
+          const active = step === s.id;
+          return (
+            <button
+              key={s.id}
+              onClick={() => setStep(s.id)}
+              className={cn(
+                'flex w-full items-center gap-2 px-4 py-2 text-sm transition-colors',
+                active ? 'bg-background font-medium text-foreground border-l-2 border-primary' : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              {s.label}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0 overflow-y-auto px-6 py-4">
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <StepContent
+            step={step}
+            draft={draft}
+            ctx={ctx}
+            descriptors={descriptors}
+            hardwareConflicts={hardwareIntel.conflicts}
+            integrityIssues={integrityIssues}
+            ngpCatalog={ngpCatalog}
+            ngpIssues={ngpIssues}
+            hardwareCategories={hardwareCategories}
+            baseSignatures={baseSignatures}
+            specByEntity={specByEntity}
+            variantsByCategory={variantsByCategory}
+            prepRequirements={prepRequirements}
+            engineResult={engineResult}
+            pricing={pricing}
+            onPatch={patch}
+            onSetOpeningField={setOpeningField}
+            onAddComponent={addComponent}
+            onRemoveComponent={removeComponent}
+            onUpdateComponentField={updateComponentField}
+            onUpdateComponentMeta={updateComponentMeta}
+            onUpdateHardware={updateHardware}
+            onAddHardware={addHardware}
+            onRemoveHardware={removeHardware}
+            onAddCutout={addCutout}
+            onRemoveCutout={removeCutout}
+            onUpdateCutout={updateCutout}
+            onRunPricing={runPricing}
+          />
+        )}
+      </div>
+    </div>
+  );
+
+  const errorBlock = error ? (
+    <p className="px-6 text-sm text-destructive flex items-center gap-1.5">
+      <AlertCircle className="h-4 w-4 shrink-0" /> {error}
+    </p>
+  ) : null;
+
+  // Footer body (completeness summary + Cancel/Save) — identical between modes.
+  const footerContent = (
+    <>
+      <div className="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
+        {completeness.blockingCount > 0 ? (
+          <div className="flex flex-col gap-1">
+            <span className="flex items-center gap-1.5 text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              {completeness.blockingCount} issue{completeness.blockingCount > 1 ? 's' : ''} to resolve before this can be priced
+            </span>
+            {/* Only structural/NGP blocks are truly un-saveable; pricing gaps
+                can be routed to a manual quote with an explicit opt-in. */}
+            {integrityBlocks.length === 0 && ngpBlocks.length === 0 && (
+              <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5"
+                  checked={ackManualQuote}
+                  onChange={(e) => setAckManualQuote(e.target.checked)}
+                />
+                Save anyway for a manual quote
+              </label>
+            )}
+          </div>
+        ) : engineResult && (
+          <span>
+            Sell <strong className="text-foreground">${engineResult.totals.sellTotal.toFixed(2)}</strong>
+            {engineResult.totals.exceptionCount > 0 && (
+              <Badge variant="destructive" className="ml-2">{engineResult.totals.exceptionCount} exceptions</Badge>
+            )}
+          </span>
+        )}
+      </div>
+      <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
+      <Button onClick={handleSave} disabled={!canSave || saving}>
+        {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+        {editingOpeningId ? 'Update Opening' : 'Save Opening'}
+      </Button>
+    </>
+  );
+
+  if (mode === 'page') {
+    return (
+      <div className="flex h-full flex-col bg-background">
+        <div className="px-6 pt-5 pb-3 border-b shrink-0">
+          <Button variant="ghost" size="sm" className="-ml-2 mb-1 text-muted-foreground" onClick={() => onOpenChange(false)}>
+            <ArrowLeft className="h-4 w-4 mr-1" /> Back to Openings
+          </Button>
+          <h1 className="font-display text-2xl">{title}</h1>
+          <p className="text-sm text-muted-foreground">{description}</p>
+        </div>
+
+        {mainContent}
+        {errorBlock}
+
+        <div className="px-6 py-3 border-t shrink-0 flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2">
+          {footerContent}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-4xl max-h-[92vh] flex flex-col p-0 gap-0">
         <DialogHeader className="px-6 pt-6 pb-3 border-b">
-          <DialogTitle className="font-display text-2xl">
-            {editingOpeningId ? 'Edit Opening' : 'Build Opening'}
-          </DialogTitle>
-          <DialogDescription>
-            Spec-driven configurator — classify the opening, then walk door → frame → panel → lites → preps → hardware.
-          </DialogDescription>
+          <DialogTitle className="font-display text-2xl">{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-1 min-h-0">
-          {/* Step rail */}
-          <nav className="w-44 shrink-0 border-r bg-muted/20 py-3 overflow-y-auto">
-            {steps.map((s) => {
-              const Icon = s.icon;
-              const active = step === s.id;
-              return (
-                <button
-                  key={s.id}
-                  onClick={() => setStep(s.id)}
-                  className={cn(
-                    'flex w-full items-center gap-2 px-4 py-2 text-sm transition-colors',
-                    active ? 'bg-background font-medium text-foreground border-l-2 border-primary' : 'text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  {s.label}
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Content */}
-          <div className="flex-1 min-w-0 overflow-y-auto px-6 py-4">
-            {loading ? (
-              <div className="flex items-center justify-center py-20">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : (
-              <StepContent
-                step={step}
-                draft={draft}
-                ctx={ctx}
-                descriptors={descriptors}
-                hardwareConflicts={hardwareIntel.conflicts}
-                integrityIssues={integrityIssues}
-                ngpCatalog={ngpCatalog}
-                ngpIssues={ngpIssues}
-                hardwareCategories={hardwareCategories}
-                baseSignatures={baseSignatures}
-                specByEntity={specByEntity}
-                variantsByCategory={variantsByCategory}
-                prepRequirements={prepRequirements}
-                engineResult={engineResult}
-                pricing={pricing}
-                onPatch={patch}
-                onSetOpeningField={setOpeningField}
-                onAddComponent={addComponent}
-                onRemoveComponent={removeComponent}
-                onUpdateComponentField={updateComponentField}
-                onUpdateComponentMeta={updateComponentMeta}
-                onUpdateHardware={updateHardware}
-                onAddHardware={addHardware}
-                onRemoveHardware={removeHardware}
-                onAddCutout={addCutout}
-                onRemoveCutout={removeCutout}
-                onUpdateCutout={updateCutout}
-                onRunPricing={runPricing}
-              />
-            )}
-          </div>
-        </div>
-
-        {error && (
-          <p className="px-6 text-sm text-destructive flex items-center gap-1.5">
-            <AlertCircle className="h-4 w-4 shrink-0" /> {error}
-          </p>
-        )}
+        {mainContent}
+        {errorBlock}
 
         <DialogFooter className="px-6 py-3 border-t">
-          <div className="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
-            {completeness.blockingCount > 0 ? (
-              <div className="flex flex-col gap-1">
-                <span className="flex items-center gap-1.5 text-destructive">
-                  <AlertCircle className="h-4 w-4 shrink-0" />
-                  {completeness.blockingCount} issue{completeness.blockingCount > 1 ? 's' : ''} to resolve before this can be priced
-                </span>
-                {/* Only structural/NGP blocks are truly un-saveable; pricing gaps
-                    can be routed to a manual quote with an explicit opt-in. */}
-                {integrityBlocks.length === 0 && ngpBlocks.length === 0 && (
-                  <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="h-3.5 w-3.5"
-                      checked={ackManualQuote}
-                      onChange={(e) => setAckManualQuote(e.target.checked)}
-                    />
-                    Save anyway for a manual quote
-                  </label>
-                )}
-              </div>
-            ) : engineResult && (
-              <span>
-                Sell <strong className="text-foreground">${engineResult.totals.sellTotal.toFixed(2)}</strong>
-                {engineResult.totals.exceptionCount > 0 && (
-                  <Badge variant="destructive" className="ml-2">{engineResult.totals.exceptionCount} exceptions</Badge>
-                )}
-              </span>
-            )}
-          </div>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
-          <Button onClick={handleSave} disabled={!canSave || saving}>
-            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {editingOpeningId ? 'Update Opening' : 'Save Opening'}
-          </Button>
+          {footerContent}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -760,6 +826,7 @@ function StepContent(props: StepContentProps) {
     case 'hardware': return <HardwareStep {...props} />;
     case 'keying': return <KeyingStep {...props} />;
     case 'access': return <AccessStep {...props} />;
+    case 'construction': return <ConstructionStep {...props} />;
     case 'review': return <ReviewStep {...props} />;
     default: {
       const _exhaustive: never = step;
@@ -1541,6 +1608,150 @@ function AccessStep({ draft, onPatch }: StepContentProps) {
           <KeyInput label="Cable requirements" value={ac.cableRequirements ?? ''} onChange={(v) => onPatch({ accessControl: { ...ac, cableRequirements: v } })} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** Builds the requirements-only UserOpeningSpec from the draft (series excluded). */
+function buildUserSpec(draft: OpeningDraft): UserOpeningSpec {
+  const requirements: Record<string, string> = {};
+  for (const [k, v] of Object.entries(draft.openingFields)) if (v) requirements[k] = v;
+  const firstDoor = draft.doors[0];
+  if (firstDoor) for (const [k, v] of Object.entries(firstDoor.fields)) {
+    if (v && k !== 'door.door_series_construction') requirements[k] = v;
+  }
+  const firstFrame = draft.frames[0];
+  if (firstFrame) for (const [k, v] of Object.entries(firstFrame.fields)) {
+    if (v && k !== 'frame.frame_series') requirements[k] = v;
+  }
+  return {
+    openingId: draft.openingId, estimateId: draft.estimateId, name: draft.name,
+    quantity: draft.quantity, configurationType: draft.configurationType, leafCount: draft.leafCount,
+    openingWidth: draft.openingWidth, openingHeight: draft.openingHeight,
+    fireLabelRequired: draft.fireLabelRequired, requirements,
+  };
+}
+
+/**
+ * Compliant construction selection (plan Phase 5). Runs the spec resolver
+ * against the entered requirements and lets the estimator pick a plain-language
+ * construction. The chosen candidate's manufacturer series is applied back to
+ * the door/frame components (so pricing still matches on series) — the series
+ * codes themselves appear only under "technical detail".
+ */
+function ConstructionStep({ draft, onUpdateComponentField }: StepContentProps) {
+  const [result, setResult] = useState<ResolutionResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showTech, setShowTech] = useState(false);
+
+  const reqKey = useMemo(() => {
+    const s = buildUserSpec(draft);
+    return JSON.stringify(s.requirements) + s.configurationType + s.fireLabelRequired;
+  }, [draft]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    resolveOpeningSpecFromDb(buildUserSpec(draft))
+      .then((r) => { if (!cancelled) setResult(r); })
+      .catch(() => { if (!cancelled) setResult(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reqKey]);
+
+  const applyCandidate = (cand: ResolutionCandidate) => {
+    const doorSeries = cand.resolved.series.door;
+    const frameSeries = cand.resolved.series.frame;
+    if (doorSeries) draft.doors.forEach((d) => onUpdateComponentField('door', d.id, 'door.door_series_construction', doorSeries));
+    if (frameSeries) draft.frames.forEach((f) => onUpdateComponentField('frame', f.id, 'frame.frame_series', frameSeries));
+  };
+
+  const currentDoorSeries = draft.doors[0]?.fields['door.door_series_construction'] ?? null;
+
+  // Auto-apply the single compliant construction.
+  useEffect(() => {
+    if (result?.status === 'auto' && result.selected) {
+      if (currentDoorSeries !== result.selected.resolved.series.door) applyCandidate(result.selected);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
+
+  if (loading) {
+    return <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
+  }
+  if (!result) {
+    return <div className="text-sm text-muted-foreground">Enter the door and frame requirements, then return here to choose a compliant construction.</div>;
+  }
+
+  if (result.status === 'manual_quote' || result.status === 'invalid') {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+          <div>
+            <div className="font-medium">{result.status === 'manual_quote' ? 'Routed to manual quote' : 'No compliant construction'}</div>
+            <ul className="mt-1 list-disc pl-4 text-xs">
+              {result.diagnostics.map((d, i) => <li key={i}>{d}</li>)}
+            </ul>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const renderCandidate = (cand: ResolutionCandidate) => {
+    const selected = currentDoorSeries === cand.resolved.series.door;
+    return (
+      <div key={cand.id} className={cn('rounded-md border p-3 space-y-2', selected && 'border-primary ring-1 ring-primary')}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium flex items-center gap-2">
+              {cand.title}
+              {selected && <Badge className="h-4 px-1 text-[9px]">Selected</Badge>}
+            </div>
+            <div className="text-xs text-muted-foreground">{cand.description}</div>
+          </div>
+          <Button size="sm" variant={selected ? 'secondary' : 'default'} onClick={() => applyCandidate(cand)}>
+            {selected ? 'Selected' : 'Use this'}
+          </Button>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {cand.gauge && <Badge variant="secondary" className="text-[10px] font-normal">{cand.gauge} ga</Badge>}
+          {cand.core && <Badge variant="secondary" className="text-[10px] font-normal">{cand.core}</Badge>}
+          {cand.edge && <Badge variant="secondary" className="text-[10px] font-normal">{cand.edge}</Badge>}
+          {cand.compliance.map((c) => <Badge key={c} variant="outline" className="text-[10px] font-normal">{c}</Badge>)}
+          {cand.priceImpact && <Badge variant="outline" className="text-[10px] font-normal">{cand.priceImpact}</Badge>}
+        </div>
+        {showTech && (
+          <div className="rounded bg-muted/40 p-2 text-[11px] text-muted-foreground font-mono">
+            door series {cand.technical.doorSeries ?? '—'} · frame series {cand.technical.frameSeries ?? '—'}
+            {cand.technical.optionCodes.length > 0 && <> · options {cand.technical.optionCodes.join(', ')}</>}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-sm text-muted-foreground">
+          {result.status === 'auto'
+            ? 'A single compliant construction was resolved automatically.'
+            : 'Multiple constructions comply — choose one.'}
+        </div>
+        <Button size="sm" variant="ghost" className="text-xs" onClick={() => setShowTech((v) => !v)}>
+          {showTech ? <ChevronDown className="h-3 w-3 mr-1" /> : <ChevronRight className="h-3 w-3 mr-1" />}
+          Technical detail
+        </Button>
+      </div>
+      {result.diagnostics.length > 0 && (
+        <ul className="list-disc pl-4 text-[11px] text-muted-foreground">
+          {result.diagnostics.map((d, i) => <li key={i}>{d}</li>)}
+        </ul>
+      )}
+      <div className="space-y-2">{result.candidates.map(renderCandidate)}</div>
     </div>
   );
 }

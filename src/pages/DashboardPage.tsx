@@ -10,7 +10,6 @@ import {
   Clock,
   AlertCircle,
   TrendingUp,
-  DollarSign,
 } from 'lucide-react';
 import { listEstimates } from '@/lib/estimates-api';
 import { supabase } from '@/lib/supabase';
@@ -250,64 +249,13 @@ export default function DashboardPage() {
           </>
         );
 
-      case 'finance':
-        return (
-          <>
-            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-              <StatCard
-                title="Total Revenue"
-                value="$0"
-                description="This month"
-                icon={DollarSign}
-                variant="success"
-              />
-              <StatCard
-                title="Pending Sync"
-                value={0}
-                description="QuickBooks items"
-                icon={AlertCircle}
-                variant="warning"
-              />
-              <StatCard
-                title="Approved Quotes"
-                value={quotes.filter((q) => q.status === 'approved').length}
-                description="Ready to invoice"
-                icon={FileCheck}
-                variant="accent"
-              />
-              <StatCard
-                title="Completed Orders"
-                value={orders.filter((o) => o.status === 'completed').length}
-                description="This month"
-                icon={Package}
-                variant="default"
-              />
-            </div>
-
-            <div className="mt-8">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="font-display text-xl">Financial Overview</CardTitle>
-                  <CardDescription>QuickBooks sync status and pending items</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm text-muted-foreground">
-                    Connect QuickBooks to view financial sync status.
-                  </p>
-                </CardContent>
-              </Card>
-            </div>
-          </>
-        );
-
       case 'admin':
-      case 'hr':
         return (
           <>
             <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               <StatCard
                 title="Total Users"
-                value={4}
+                value={customers.length > 0 ? customers.length : 0}
                 description="Active accounts"
                 icon={Users}
                 variant="default"
@@ -376,8 +324,12 @@ export default function DashboardPage() {
           </>
         );
 
-      default:
+      default: {
+        // Exhaustive check — TypeScript will error here if a new role is added without a case
+        const _exhaustive: never = user!.role;
+        console.warn('Unhandled role in dashboard:', _exhaustive);
         return null;
+      }
     }
   };
 
