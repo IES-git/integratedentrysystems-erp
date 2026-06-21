@@ -218,7 +218,7 @@ export function requiresDoorFramePrep(category: string): boolean {
 export function matchCrosswalk(
   category: string,
   prepCrosswalk: HardwarePrepCrosswalk[],
-  ids: { variantId?: string | null; productId?: string | null } = {},
+  ids: { variantId?: string | null; productId?: string | null; subcategory?: string | null } = {},
 ): HardwarePrepCrosswalk | null {
   if (ids.variantId) {
     const byVariant = prepCrosswalk.find((r) => r.hardwareVariantId === ids.variantId);
@@ -227,6 +227,14 @@ export function matchCrosswalk(
   if (ids.productId) {
     const byProduct = prepCrosswalk.find((r) => r.hardwareProductId === ids.productId);
     if (byProduct) return byProduct;
+  }
+  // Subcategory is the most specific governed key (deadbolt vs cylindrical_lock,
+  // overhead_holder_stop vs surface_closer) — the crosswalk is keyed by it, so a
+  // deadbolt resolves CDL/234N instead of the generic lock CYL/478.
+  if (ids.subcategory) {
+    const wantSub = slug(ids.subcategory);
+    const bySub = prepCrosswalk.find((r) => slug(r.hardwareCategory) === wantSub);
+    if (bySub) return bySub;
   }
   const want = slug(category);
   const exact = prepCrosswalk.find((r) => slug(r.hardwareCategory) === want);
@@ -262,20 +270,27 @@ function splitPrepCodes(raw: string | null): string[] {
 export function derivePrepRequirements(
   requirements: HardwareSelection[],
   catalog: HardwareCatalog,
+  /** variantId → product subcategory, so the subcategory-keyed crosswalk applies. */
+  subcategoryByVariant?: Map<string, string | null>,
 ): { prepRequirements: PrepRequirement[]; warnings: string[] } {
   const prepRequirements: PrepRequirement[] = [];
   const warnings: string[] = [];
 
   for (const req of requirements) {
     if (req.quantity <= 0) continue;
-    // Surface-mounted hardware (closers / plates / applied seals) needs no
-    // machined door/frame prep — skip silently instead of warning.
-    if (!requiresDoorFramePrep(req.category)) continue;
-    const cw = matchCrosswalk(req.category, catalog.prepCrosswalk, { variantId: req.variantId });
+    const subcategory = req.variantId ? subcategoryByVariant?.get(req.variantId) ?? null : null;
+    const cw = matchCrosswalk(req.category, catalog.prepCrosswalk, { variantId: req.variantId, subcategory });
+    // No crosswalk row: surface-mounted hardware (plain closers / plates /
+    // applied seals) legitimately needs no machined prep — skip silently;
+    // anything else is a genuine gap worth a warning.
     if (!cw) {
-      warnings.push(`No prep crosswalk found for hardware category "${req.category}".`);
+      if (!requiresDoorFramePrep(req.category)) continue;
+      warnings.push(`No prep crosswalk found for hardware "${subcategory ?? req.category}".`);
       continue;
     }
+    // A matched crosswalk row's codes drive prep emission even when the parent
+    // category is surface-mounted (e.g. an overhead holder in closers_and_arms
+    // still needs SOH/SOHS). Rows with no codes (gasketing, thresholds) emit none.
     const doorCodes = splitPrepCodes(cw.doorPrepCode);
     const frameCodes = splitPrepCodes(cw.framePrepCode);
     // Use the primary code from each side (first listed) to avoid double-charging
@@ -412,8 +427,15 @@ export function priceHardware(
 
   // Derive Pioneer preps only for hardware actually selected — an unselected
   // optional category has nothing to prep for (and shouldn't warn about a missing
-  // crosswalk).
-  const { prepRequirements, warnings: prepWarnings } = derivePrepRequirements(requirements.filter((r) => r.variantId), catalog);
+  // crosswalk). The subcategory map lets the crosswalk distinguish e.g. a
+  // deadbolt (CDL/234N) from a cylindrical lock (CYL/478).
+  const subcategoryByVariant = new Map<string, string | null>();
+  for (const [variantId, vp] of variantMap) subcategoryByVariant.set(variantId, vp.subcategory);
+  const { prepRequirements, warnings: prepWarnings } = derivePrepRequirements(
+    requirements.filter((r) => r.variantId),
+    catalog,
+    subcategoryByVariant,
+  );
   warnings.push(...prepWarnings);
 
   for (const req of requirements) {

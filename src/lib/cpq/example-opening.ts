@@ -173,10 +173,10 @@ function price(variantId: string, list: number, disc: number): HardwarePrice {
 }
 
 export const exampleVariantMap = new Map<string, VariantWithPrice>([
-  ['v-hinge', { category: 'butt_hinges', variant: variant('v-hinge', 'p-hinge', 'BB1191-4.5'), price: price('v-hinge', 40, 0.5) }],
-  ['v-lock', { category: 'cylindrical_lock', variant: variant('v-lock', 'p-lock', 'ND53PD-RHO'), price: price('v-lock', 300, 0.5) }],
-  ['v-closer', { category: 'surface_closer', variant: variant('v-closer', 'p-closer', '4040XP'), price: price('v-closer', 250, 0.6) }],
-  ['v-dps', { category: 'door_position_switch', variant: variant('v-dps', 'p-dps', '679-05'), price: price('v-dps', 80, 0.5) }],
+  ['v-hinge', { category: 'butt_hinges', subcategory: 'butt_hinge', variant: variant('v-hinge', 'p-hinge', 'BB1191-4.5'), price: price('v-hinge', 40, 0.5) }],
+  ['v-lock', { category: 'cylindrical_lock', subcategory: 'cylindrical_lock', variant: variant('v-lock', 'p-lock', 'ND53PD-RHO'), price: price('v-lock', 300, 0.5) }],
+  ['v-closer', { category: 'surface_closer', subcategory: 'surface_closer', variant: variant('v-closer', 'p-closer', '4040XP'), price: price('v-closer', 250, 0.6) }],
+  ['v-dps', { category: 'door_position_switch', subcategory: 'door_position_switch', variant: variant('v-dps', 'p-dps', '679-05'), price: price('v-dps', 80, 0.5) }],
 ]);
 
 export const exampleOpeningSpec: NormalizedOpeningSpec = {

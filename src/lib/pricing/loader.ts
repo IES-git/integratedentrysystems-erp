@@ -428,6 +428,8 @@ export async function loadHardwareCatalog(pricedAsOf: string): Promise<HardwareC
 export interface VariantWithPrice {
   variant: HardwareVariant;
   category: string;
+  /** hardware_product.subcategory — drives the subcategory-keyed prep crosswalk. */
+  subcategory: string | null;
   price: HardwarePrice | null;
 }
 
@@ -481,7 +483,7 @@ export async function loadVariantsWithPrices(
   if (ids.length === 0) return result;
 
   const [{ data: variants, error: vErr }, { data: prices, error: pErr }] = await Promise.all([
-    supabase.from('hardware_variant').select('*, hardware_product(category)').in('id', ids),
+    supabase.from('hardware_variant').select('*, hardware_product(category, subcategory)').in('id', ids),
     supabase.from('hardware_price').select('*').in('hardware_variant_id', ids).eq('review_status', 'APPROVED'),
   ]);
   if (vErr) throw new Error(`Failed to load hardware variants: ${vErr.message}`);
@@ -501,8 +503,10 @@ export async function loadVariantsWithPrices(
   for (const v of variants ?? []) {
     const row = v as Record<string, unknown>;
     const variant = mapVariant(row);
-    const category = ((row.hardware_product as { category?: string } | null)?.category) ?? '';
-    result.set(variant.id, { variant, category, price: priceByVariant.get(variant.id) ?? null });
+    const product = row.hardware_product as { category?: string; subcategory?: string | null } | null;
+    const category = product?.category ?? '';
+    const subcategory = product?.subcategory ?? null;
+    result.set(variant.id, { variant, category, subcategory, price: priceByVariant.get(variant.id) ?? null });
   }
   return result;
 }

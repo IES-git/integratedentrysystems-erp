@@ -148,6 +148,7 @@ describe('pricing engine core', () => {
     };
     const variantMap = new Map<string, VariantWithPrice>([['v1', {
       category: 'butt_hinges',
+      subcategory: 'butt_hinge',
       variant: { id: 'v1', hardwareProductId: 'p1', sku: 'HG-1', function: null, finish: null, size: null, hand: null, voltage: null, rating: null, material: null, optionAttributes: {}, createdAt: '', updatedAt: '' },
       price: { id: 'pr1', hardwareVariantId: 'v1', hardwarePriceBookId: null, listPrice: 50, discountMultiplier: 0.5, netCost: 25, uom: 'each', effectiveFrom: null, effectiveTo: null, minimumQuantity: null, sourceRowRef: null, reviewStatus: 'APPROVED', createdAt: '', updatedAt: '' },
     }]]);
