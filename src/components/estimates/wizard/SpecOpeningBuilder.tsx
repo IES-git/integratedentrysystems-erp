@@ -33,7 +33,7 @@ import {
 import { SpecFieldInput } from './SpecFieldInput';
 import { AuditableQuote } from './AuditableQuote';
 import { buildAuditableQuoteFromEngine } from '@/lib/cpq/auditable-quote';
-import { validateQuoteCompleteness, type CompletenessIssue, type CompletenessReport } from '@/lib/cpq/completeness';
+import { validateQuoteCompleteness, type BuilderStepTarget, type CompletenessIssue, type CompletenessReport } from '@/lib/cpq/completeness';
 import {
   loadSpecFieldDictionary, loadOptionDescriptors, loadHardwareCategories, loadBaseSignatures,
   type SpecFieldWithPath, type VariantOption, loadVariantsForCategory, type HardwareCategoryOption,
@@ -62,7 +62,9 @@ import type {
   UserOpeningSpec, ResolutionResult, ResolutionCandidate,
 } from '@/types';
 
-type StepId = 'classify' | 'doors' | 'frame' | 'hardware' | 'panels' | 'lites' | 'cutouts' | 'preps' | 'keying' | 'access' | 'construction' | 'review';
+// The builder's step ids are the same union the completeness model uses to
+// deep-link "Fix" buttons back to the right section.
+type StepId = BuilderStepTarget;
 
 // Resolver-driven flow (plan Phase 5): requirements first (opening → door →
 // frame → hardware → lite/louver), then the resolver presents compliant
@@ -156,14 +158,32 @@ function draftFireMinutes(draft: OpeningDraft): number | null {
  * base prices, CF, unresolved scope). Used to gate Save so a non-expert can't
  * finish an opening that doesn't actually produce a valid price.
  */
+// Where each builder-integrity finding is fixed, so its review "Fix" button
+// jumps to the right section. Hardware interdependency conflicts default to the
+// Hardware step.
+const INTEGRITY_TARGET: Record<string, BuilderStepTarget> = {
+  FIRE_NO_ACTIVE_LATCH: 'hardware',
+  DEADBOLT_ON_EGRESS: 'hardware',
+  FIRE_EXIT_NO_DOGGING: 'hardware',
+  PAIR_NEEDS_COORDINATOR: 'hardware',
+  ACCESS_POWER: 'access',
+  SPECIALTY_FRAME_MISMATCH: 'frame',
+  DOOR_WITHOUT_FRAME: 'frame',
+};
+
 function computeCompleteness(
   engineResult: EngineResult | null,
   integrityIssues: IntegrityIssue[],
   ngpIssues: CompletenessIssue[],
 ): CompletenessReport {
   const extra: CompletenessIssue[] = [
-    ...integrityIssues.map((i) => ({ code: i.code, severity: i.severity, message: i.message })),
-    ...ngpIssues,
+    ...integrityIssues.map((i) => ({
+      code: i.code,
+      severity: i.severity,
+      message: i.message,
+      target: INTEGRITY_TARGET[i.code] ?? 'hardware',
+    })),
+    ...ngpIssues.map((i) => ({ ...i, target: i.target ?? ('cutouts' as BuilderStepTarget) })),
   ];
   if (!engineResult) {
     const blockingCount = extra.filter((i) => i.severity === 'block').length;
@@ -174,7 +194,7 @@ function computeCompleteness(
   for (const m of engineResult.manualQuotes) {
     if (m.reason !== 'MISSING_PRICE' || !m.requestedInputs || seen.has(m.requestedInputs)) continue;
     seen.add(m.requestedInputs);
-    extra.push({ code: 'MANUAL_QUOTE', severity: 'warn', message: m.requestedInputs });
+    extra.push({ code: 'MANUAL_QUOTE', severity: 'warn', message: m.requestedInputs, target: 'hardware' });
   }
   return validateQuoteCompleteness(quote, {
     dependencyResults: engineResult.dependencyResults,
@@ -212,6 +232,8 @@ interface SpecOpeningBuilderProps {
   editingOpeningId?: string | null;
   editingName?: string;
   editingQuantity?: number;
+  /** Step to open on (e.g. when a review "Fix" button deep-links here). */
+  initialStep?: StepId | null;
   /** Render the builder as a full page instead of a modal dialog. */
   mode?: 'dialog' | 'page';
 }
@@ -219,6 +241,7 @@ interface SpecOpeningBuilderProps {
 export function SpecOpeningBuilder({
   estimateId, resolveEstimateId, open, onOpenChange, onSaved,
   openingCount = 0, editingOpeningId, editingName, editingQuantity,
+  initialStep = null,
   mode = 'dialog',
 }: SpecOpeningBuilderProps) {
   const [step, setStep] = useState<StepId>('classify');
@@ -244,7 +267,7 @@ export function SpecOpeningBuilder({
   // Load the dictionary-driven catalog when the dialog opens.
   useEffect(() => {
     if (!open) return;
-    setStep('classify');
+    setStep(initialStep ?? 'classify');
     setError(null);
     setEngineResult(null);
     setAckManualQuote(false);
@@ -687,6 +710,7 @@ export function SpecOpeningBuilder({
             onRemoveCutout={removeCutout}
             onUpdateCutout={updateCutout}
             onRunPricing={runPricing}
+            onGoToStep={setStep}
           />
         )}
       </div>
@@ -813,6 +837,8 @@ interface StepContentProps {
   onRemoveCutout: (id: string) => void;
   onUpdateCutout: (id: string, p: Partial<CutoutDraft>) => void;
   onRunPricing: () => void;
+  /** Jump to another builder step (used by review "Fix" buttons). */
+  onGoToStep: (id: StepId) => void;
 }
 
 function fieldsFor(map: Map<SpecFieldEntity, SpecFieldWithPath[]>, entity: SpecFieldEntity, category?: string): SpecFieldWithPath[] {
@@ -1782,7 +1808,7 @@ function ConstructionStep({ draft, onUpdateComponentField }: StepContentProps) {
   );
 }
 
-function ReviewStep({ engineResult, pricing, integrityIssues, ngpIssues, onRunPricing }: StepContentProps) {
+function ReviewStep({ engineResult, pricing, integrityIssues, ngpIssues, onRunPricing, onGoToStep }: StepContentProps) {
   if (pricing) {
     return <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
   }
@@ -1798,7 +1824,7 @@ function ReviewStep({ engineResult, pricing, integrityIssues, ngpIssues, onRunPr
       <div className="flex items-center justify-end">
         <Button size="sm" variant="ghost" onClick={onRunPricing}>Re-price</Button>
       </div>
-      <AuditableQuote quote={quote} completeness={completeness} />
+      <AuditableQuote quote={quote} completeness={completeness} onNavigate={onGoToStep} />
     </div>
   );
 }

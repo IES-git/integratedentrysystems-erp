@@ -60,6 +60,8 @@ interface OpeningsStepProps {
    * this is set to the opening to edit. OpeningsStep auto-opens the builder for it.
    */
   autoEditOpening?: import('@/types').EstimateOpeningWithItems | null;
+  /** Builder step to deep-link to when auto-editing (from a Review "Fix" button). */
+  autoEditStep?: import('@/lib/cpq/completeness').BuilderStepTarget | null;
   onAutoEditDone?: () => void;
 }
 
@@ -352,6 +354,7 @@ export function OpeningsStep({
   finishLoading = false,
   backLabel = 'Back to Customer',
   autoEditOpening = null,
+  autoEditStep = null,
   onAutoEditDone,
 }: OpeningsStepProps) {
   const navigate = useNavigate();
@@ -365,13 +368,15 @@ export function OpeningsStep({
   const [chooseDialogOpen, setChooseDialogOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editingOpening, setEditingOpening] = useState<EstimateOpeningWithItems | null>(null);
+  const [editingStep, setEditingStep] = useState<import('@/lib/cpq/completeness').BuilderStepTarget | null>(null);
   const [creatingEstimate, setCreatingEstimate] = useState(false);
 
-  // When the parent passes autoEditOpening (from "Edit configuration" on Review),
-  // auto-open the builder for that opening.
+  // When the parent passes autoEditOpening (from "Edit configuration" or a
+  // Review "Fix" button), auto-open the builder for that opening at the target step.
   useEffect(() => {
     if (!autoEditOpening) return;
     setEditingOpening(autoEditOpening);
+    setEditingStep(autoEditStep ?? null);
     setBuildDialogOpen(true);
     onAutoEditDone?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -452,12 +457,13 @@ export function OpeningsStep({
   const handleEditOpening = (opening: EstimateOpeningWithItems) => {
     // Editing always requires a real estimate (opening exists means estimate exists).
     setEditingOpening(opening);
+    setEditingStep(null);
     setBuildDialogOpen(true);
   };
 
   const handleBuildDialogOpenChange = (open: boolean) => {
     setBuildDialogOpen(open);
-    if (!open) setEditingOpening(null);
+    if (!open) { setEditingOpening(null); setEditingStep(null); }
   };
 
   const handleOpeningsCopied = (updatedOpenings: EstimateOpeningWithItems[]) => {
@@ -502,6 +508,7 @@ export function OpeningsStep({
         editingOpeningId={editingOpening?.id ?? null}
         editingName={editingOpening?.name}
         editingQuantity={editingOpening?.quantity}
+        initialStep={editingStep}
       />
 
       {/* ChooseExistingOpeningDialog — estimate created lazily inside handleCopy */}

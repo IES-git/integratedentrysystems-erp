@@ -5,7 +5,7 @@ import {
   classifyLayer,
   type QuoteLine,
 } from '@/lib/cpq/auditable-quote';
-import { validateQuoteCompleteness } from '@/lib/cpq/completeness';
+import { targetForLine, validateQuoteCompleteness } from '@/lib/cpq/completeness';
 import { priceExampleOpening } from '@/lib/cpq/example-opening';
 
 function line(p: Partial<QuoteLine>): QuoteLine {
@@ -99,6 +99,31 @@ describe('completeness validation', () => {
     ]);
     const report = validateQuoteCompleteness(quote);
     expect(report.issues.some((i) => i.code === 'PREP_MISSING_FOR_DEVICE')).toBe(true);
+  });
+
+  it('routes each line to the builder step that fixes it', () => {
+    expect(targetForLine(line({ entityType: 'door', lineType: 'BASE' }))).toBe('doors');
+    expect(targetForLine(line({ entityType: 'frame', lineType: 'BASE' }))).toBe('frame');
+    expect(targetForLine(line({ entityType: 'panel', lineType: 'BASE' }))).toBe('panels');
+    expect(targetForLine(line({ entityType: 'prep', chargeCategory: 'prep' }))).toBe('hardware');
+    expect(targetForLine(line({ entityType: 'hardware', chargeCategory: 'cylindrical_lock' }))).toBe('hardware');
+    expect(targetForLine(line({ entityType: 'hardware', chargeCategory: 'gasketing', unitOfMeasure: 'ft' }))).toBe('hardware');
+    expect(targetForLine(line({ entityType: 'lite_kit', chargeCategory: 'ngp_policy' }))).toBe('cutouts');
+    expect(targetForLine(line({ entityType: 'hardware', chargeCategory: 'keying' }))).toBe('keying');
+    expect(targetForLine(line({ entityType: 'hardware', chargeCategory: 'access_control' }))).toBe('access');
+    expect(targetForLine(line({ entityType: 'hardware', chargeCategory: 'freight' }))).toBeUndefined();
+  });
+
+  it('attaches a navigation target to each surfaced exception', () => {
+    const quote = buildAuditableQuote([
+      line({ priceStatus: 'INVALID', exceptionMessage: 'No base price' }),
+      line({ entityType: 'hardware', chargeCategory: 'exit', priceStatus: 'CONTACT_FACTORY' }),
+    ]);
+    const report = validateQuoteCompleteness(quote, { skipReconciliation: true });
+    const missing = report.issues.find((i) => i.code === 'MISSING_PRICE');
+    const cf = report.issues.find((i) => i.code === 'CONTACT_FACTORY');
+    expect(missing?.target).toBe('doors');
+    expect(cf?.target).toBe('hardware');
   });
 
   it('passes when every line is priced and preps match devices', () => {

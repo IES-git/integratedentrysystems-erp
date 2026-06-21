@@ -13,7 +13,7 @@
  */
 
 import { useState } from 'react';
-import { AlertTriangle, ShieldAlert, Info, ChevronDown, FileText } from 'lucide-react';
+import { AlertTriangle, ShieldAlert, Info, ChevronDown, FileText, ArrowRight } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import type {
@@ -21,8 +21,24 @@ import type {
   QuoteLayer,
   QuoteLine,
 } from '@/lib/cpq/auditable-quote';
-import type { CompletenessReport, CompletenessSeverity } from '@/lib/cpq/completeness';
+import type { BuilderStepTarget, CompletenessReport, CompletenessSeverity } from '@/lib/cpq/completeness';
 import type { EstimateLinePriceStatus } from '@/types';
+
+/** Human label for each builder step the "Fix" buttons can jump to. */
+const STEP_LABEL: Record<BuilderStepTarget, string> = {
+  classify: 'Opening',
+  doors: 'Door construction',
+  frame: 'Frame & wall',
+  panels: 'Panels',
+  lites: 'Lites / Glass',
+  cutouts: 'Glass / Louvers',
+  preps: 'Preparations',
+  hardware: 'Hardware',
+  keying: 'Keying',
+  access: 'Access Control',
+  construction: 'Construction',
+  review: 'Review',
+};
 
 function money(n: number | null | undefined): string {
   if (n === null || n === undefined) return '—';
@@ -61,7 +77,13 @@ const SEVERITY_STYLES: Record<CompletenessSeverity, { box: string; icon: typeof 
   info: { box: 'border-border bg-muted/40 text-muted-foreground', icon: Info },
 };
 
-function CompletenessPanel({ report }: { report: CompletenessReport }) {
+function CompletenessPanel({
+  report,
+  onNavigate,
+}: {
+  report: CompletenessReport;
+  onNavigate?: (target: BuilderStepTarget) => void;
+}) {
   if (report.issues.length === 0) {
     return (
       <div className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
@@ -90,11 +112,22 @@ function CompletenessPanel({ report }: { report: CompletenessReport }) {
               <Icon className="h-4 w-4 shrink-0" />
               {label}
             </div>
-            <ul className="mt-1 space-y-0.5 text-xs">
+            <ul className="mt-1.5 space-y-1.5 text-xs">
               {items.map((i, idx) => (
-                <li key={idx} className="flex gap-1.5">
+                <li key={idx} className="flex items-start gap-1.5">
                   <span className="font-mono opacity-60 shrink-0">{i.code}</span>
-                  <span>{i.message}</span>
+                  <span className="flex-1">{i.message}</span>
+                  {i.target && onNavigate && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate(i.target!)}
+                      className="shrink-0 inline-flex items-center gap-1 rounded border bg-background/80 px-1.5 py-0.5 text-[11px] font-medium hover:bg-background"
+                      title={`Go to ${STEP_LABEL[i.target]} to fix this`}
+                    >
+                      Fix in {STEP_LABEL[i.target]}
+                      <ArrowRight className="h-3 w-3" />
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -258,12 +291,17 @@ interface AuditableQuoteProps {
   quote: AuditableQuoteModel;
   completeness: CompletenessReport;
   className?: string;
+  /**
+   * When provided, completeness issues render a "Fix in <step>" button that
+   * jumps the user to the builder step that resolves the issue.
+   */
+  onNavigate?: (target: BuilderStepTarget) => void;
 }
 
-export function AuditableQuote({ quote, completeness, className }: AuditableQuoteProps) {
+export function AuditableQuote({ quote, completeness, className, onNavigate }: AuditableQuoteProps) {
   return (
     <div className={cn('space-y-4', className)}>
-      <CompletenessPanel report={completeness} />
+      <CompletenessPanel report={completeness} onNavigate={onNavigate} />
 
       {/* Totals header */}
       <div className="flex flex-wrap items-center gap-4 rounded-lg border bg-primary/5 px-4 py-3">

@@ -16,6 +16,7 @@ import {
   loadEstimateLinesByOpening,
 } from '@/lib/cpq/estimate-lines-api';
 import { estimateGrandTotal } from '@/lib/cpq/opening-totals';
+import type { BuilderStepTarget } from '@/lib/cpq/completeness';
 import { supabase } from '@/lib/supabase';
 import type { Company } from '@/types';
 
@@ -68,6 +69,8 @@ export default function ManualEstimateWizardPage() {
   // When the user clicks "Edit configuration" on the Review step, we store the
   // target opening here, step back to Openings, and OpeningsStep auto-opens it.
   const [pendingEditOpening, setPendingEditOpening] = useState<import('@/types').EstimateOpeningWithItems | null>(null);
+  // Optional builder step to deep-link to when a Review "Fix" button is clicked.
+  const [pendingEditStep, setPendingEditStep] = useState<BuilderStepTarget | null>(null);
 
   useEffect(() => {
     const init = async () => {
@@ -328,7 +331,8 @@ export default function ManualEstimateWizardPage() {
               finishLabel={saving ? 'Saving…' : 'Review & Pricing →'}
               finishLoading={saving}
               autoEditOpening={pendingEditOpening}
-              onAutoEditDone={() => setPendingEditOpening(null)}
+              autoEditStep={pendingEditStep}
+              onAutoEditDone={() => { setPendingEditOpening(null); setPendingEditStep(null); }}
             />
           )}
 
@@ -338,8 +342,9 @@ export default function ManualEstimateWizardPage() {
               onBack={() => setCurrentStepIndex(1)}
               onFinish={handleFinish}
               finishLoading={saving}
-              onEditOpening={(opening) => {
+              onEditOpening={(opening, target) => {
                 setPendingEditOpening(opening);
+                setPendingEditStep(target ?? null);
                 setCurrentStepIndex(1);
               }}
             />

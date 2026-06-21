@@ -47,7 +47,7 @@ import {
   updateEstimateReviewFields,
 } from '@/lib/cpq/estimate-lines-api';
 import { buildAuditableQuoteFromEstimateLines } from '@/lib/cpq/auditable-quote';
-import { validateQuoteCompleteness, type CompletenessReport } from '@/lib/cpq/completeness';
+import { validateQuoteCompleteness, type BuilderStepTarget, type CompletenessReport } from '@/lib/cpq/completeness';
 import {
   estimateGrandTotal,
   estimateHasAnyPrice,
@@ -93,8 +93,12 @@ interface ReviewStepProps {
   onBack: () => void;
   onFinish: () => void | Promise<void>;
   finishLoading?: boolean;
-  /** Called when the user clicks "Edit configuration" for an opening. */
-  onEditOpening?: (opening: EstimateOpeningWithItems) => void;
+  /**
+   * Called when the user clicks "Edit configuration" for an opening, or a
+   * completeness "Fix" button. `target` deep-links the builder to the step that
+   * resolves the issue.
+   */
+  onEditOpening?: (opening: EstimateOpeningWithItems, target?: BuilderStepTarget) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +413,7 @@ interface EngineOpeningCardProps {
   opening: EstimateOpeningWithItems;
   engineLines: EstimateLine[];
   onQuantityChange: (id: string, qty: number) => Promise<void>;
-  onEditOpening: (() => void) | undefined;
+  onEditOpening: ((target?: BuilderStepTarget) => void) | undefined;
   onLineOverride: (lineId: string, price: number | null) => void;
   sellAdjustmentPct: number | null;
 }
@@ -523,7 +527,7 @@ function EngineOpeningCard({
       {expanded && (
         <CardContent className="pt-0 space-y-3 pb-4">
           {/* Auditable quote breakdown */}
-          <AuditableQuote quote={quote} completeness={completeness} />
+          <AuditableQuote quote={quote} completeness={completeness} onNavigate={onEditOpening} />
 
           {/* Per-line sell price overrides toggle */}
           <div>
@@ -879,7 +883,7 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
                   opening={opening}
                   engineLines={engineLines}
                   onQuantityChange={handleQuantityChange}
-                  onEditOpening={onEditOpening ? () => onEditOpening(opening) : undefined}
+                  onEditOpening={onEditOpening ? (target) => onEditOpening(opening, target) : undefined}
                   onLineOverride={handleLineOverride}
                   sellAdjustmentPct={adjustmentPct && !isNaN(adjustmentPct) ? adjustmentPct : null}
                 />

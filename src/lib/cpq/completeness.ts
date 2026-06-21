@@ -13,9 +13,27 @@
 
 import type { DependencyOutcome } from '@/lib/pricing';
 import { requiresDoorFramePrep } from '@/lib/pricing';
-import type { AuditableQuote, QuoteLayer, QuoteLine } from './auditable-quote';
+import { classifyLayer, type AuditableQuote, type QuoteLayer, type QuoteLine } from './auditable-quote';
 
 export type CompletenessSeverity = 'block' | 'warn' | 'info';
+
+/**
+ * A spec-builder step an issue can deep-link to so the estimator can jump
+ * straight to the section that needs fixing. Mirrors the builder's `StepId`.
+ */
+export type BuilderStepTarget =
+  | 'classify'
+  | 'doors'
+  | 'frame'
+  | 'panels'
+  | 'lites'
+  | 'cutouts'
+  | 'preps'
+  | 'hardware'
+  | 'keying'
+  | 'access'
+  | 'construction'
+  | 'review';
 
 export interface CompletenessIssue {
   code: string;
@@ -23,6 +41,48 @@ export interface CompletenessIssue {
   message: string;
   /** The offending line's description, when the issue traces to one line. */
   lineDescription?: string;
+  /**
+   * The builder step that fixes this issue. Lets the review surface a "Fix"
+   * button that jumps the user to the exact section that needs attention.
+   */
+  target?: BuilderStepTarget;
+}
+
+/**
+ * Maps a quote line to the builder step where the estimator changes the
+ * selection behind it (e.g. a hardware exception → the Hardware step, a missing
+ * door base price → the Construction/series step).
+ */
+export function targetForLine(line: QuoteLine): BuilderStepTarget | undefined {
+  const layer = classifyLayer(line);
+  switch (layer) {
+    case 'pioneer_base':
+    case 'pioneer_adders':
+      return line.entityType === 'frame'
+        ? 'frame'
+        : line.entityType === 'panel'
+          ? 'panels'
+          : line.entityType === 'door'
+            ? 'doors'
+            : 'construction';
+    case 'pioneer_preps':
+      return 'hardware';
+    case 'ngp_infill':
+      return 'cutouts';
+    case 'hardware':
+    case 'linear':
+      return 'hardware';
+    case 'keying':
+      return 'keying';
+    case 'access_control':
+      return 'access';
+    case 'services':
+      return undefined;
+    default: {
+      const _exhaustive: never = layer;
+      return _exhaustive;
+    }
+  }
 }
 
 export interface CompletenessReport {
@@ -35,6 +95,7 @@ export interface CompletenessReport {
 
 /** Maps an exception line-status to a stable issue code + message. */
 function statusIssue(line: QuoteLine): CompletenessIssue | null {
+  const target = targetForLine(line);
   switch (line.priceStatus) {
     case 'INVALID': {
       const isTemplate = /template/i.test(line.exceptionMessage ?? '');
@@ -43,6 +104,7 @@ function statusIssue(line: QuoteLine): CompletenessIssue | null {
         severity: 'block',
         message: line.exceptionMessage ?? `No price resolved for "${line.description}".`,
         lineDescription: line.description,
+        target,
       };
     }
     case 'CONTACT_FACTORY':
@@ -51,6 +113,7 @@ function statusIssue(line: QuoteLine): CompletenessIssue | null {
         severity: 'block',
         message: line.exceptionMessage ?? `"${line.description}" is contact-factory — obtain a factory quote before finalizing.`,
         lineDescription: line.description,
+        target,
       };
     case 'EXTERNAL_PENDING':
       return {
@@ -58,6 +121,7 @@ function statusIssue(line: QuoteLine): CompletenessIssue | null {
         severity: 'block',
         message: line.exceptionMessage ?? `"${line.description}" requires external pricing before finalizing.`,
         lineDescription: line.description,
+        target,
       };
     case 'PRICED':
     case 'INCLUDED':
@@ -128,6 +192,7 @@ export function reconcilePrepVsDevice(quote: AuditableQuote): CompletenessIssue[
         severity: 'warn',
         message: `Hardware "${humanize(group)}" has no matching door/frame prep — verify the prep crosswalk.`,
         lineDescription: device.description,
+        target: 'hardware',
       });
     }
   }
@@ -142,6 +207,7 @@ export function reconcilePrepVsDevice(quote: AuditableQuote): CompletenessIssue[
         severity: 'warn',
         message: `Prep "${prep.description}" has no matching hardware device selected.`,
         lineDescription: prep.description,
+        target: 'hardware',
       });
     }
   }
@@ -183,11 +249,14 @@ export function validateQuoteCompleteness(
   }
 
   // 2. Dependency-rule outcomes (incompatible ratings / required combos).
+  // These almost always trace to a hardware/config combination, so route the
+  // user to the Hardware step to resolve the incompatibility.
   for (const dep of opts.dependencyResults ?? []) {
     issues.push({
       code: 'DEPENDENCY_RULE',
       severity: dep.blocking ? 'block' : 'warn',
       message: dep.message,
+      target: 'hardware',
     });
   }
 
