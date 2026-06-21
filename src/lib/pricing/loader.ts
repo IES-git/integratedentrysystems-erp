@@ -178,16 +178,31 @@ export async function loadRuleSet(
 ): Promise<LoadedRuleSet> {
   // rule_action_parameter has TWO FKs to price_rule (price_rule_id + reference_rule_id),
   // so the embed must name the FK explicitly or PostgREST errors on the ambiguity.
-  const { data: ruleRows, error } = await supabase
-    .from('price_rule')
-    .select('*, rule_condition(*), rule_action_parameter!rule_action_parameter_price_rule_id_fkey(*), included_scope(*), quantity_tier(*)')
-    .eq('price_book_id', priceBookDocumentId)
-    .eq('review_status', 'APPROVED')
-    .order('priority', { ascending: true });
-  if (error) throw new Error(`Failed to load price rules: ${error.message}`);
+  //
+  // PostgREST caps a single response at ~1000 rows. A published book can have many
+  // thousands of rules (NGP alone is ~18k dimensional cells), so we MUST page
+  // through every row — otherwise rules past the first page silently fail to load
+  // and components report "no base price matched". Order by (priority, id) for a
+  // stable pagination window.
+  const PAGE = 1000;
+  const ruleRows: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('price_rule')
+      .select('*, rule_condition(*), rule_action_parameter!rule_action_parameter_price_rule_id_fkey(*), included_scope(*), quantity_tier(*)')
+      .eq('price_book_id', priceBookDocumentId)
+      .eq('review_status', 'APPROVED')
+      .order('priority', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`Failed to load price rules: ${error.message}`);
+    const batch = (data ?? []) as Record<string, unknown>[];
+    ruleRows.push(...batch);
+    if (batch.length < PAGE) break;
+  }
 
-  const rules = (ruleRows ?? [])
-    .map((r) => mapRule(r as Record<string, unknown>))
+  const rules = ruleRows
+    .map((r) => mapRule(r))
     .filter((r) => withinEffective(r.effectiveFrom, r.effectiveTo, pricedAsOf));
 
   const { data: depRows, error: depErr } = await supabase
@@ -199,6 +214,79 @@ export async function loadRuleSet(
   if (depErr) throw new Error(`Failed to load dependency rules: ${depErr.message}`);
 
   return { rules, dependencyRules: (depRows ?? []).map((r) => mapDependency(r as Record<string, unknown>)) };
+}
+
+const RULE_EMBED = '*, rule_condition(*), rule_action_parameter!rule_action_parameter_price_rule_id_fkey(*), included_scope(*), quantity_tier(*)';
+
+/** A PostgREST select builder that supports `.range()` (returns a thenable). */
+type RangeableBuilder = {
+  range: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+};
+
+/** Pages through every approved rule matching a PostgREST query builder. */
+async function loadAllRules(build: () => RangeableBuilder): Promise<Record<string, unknown>[]> {
+  const PAGE = 1000;
+  const rows: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build().range(from, from + PAGE - 1);
+    if (error) throw new Error(`Failed to load price rules: ${error.message}`);
+    const batch = (data ?? []) as Record<string, unknown>[];
+    rows.push(...batch);
+    if (batch.length < PAGE) break;
+  }
+  return rows;
+}
+
+/**
+ * Loads ONLY the NGP rules an opening references: the dimensional matrices for
+ * the resolved price tables, the glazing-tape direct rules for the resolved tape
+ * models, and the (few) option-adder rules. This keeps NGP pricing fast — a full
+ * NGP book is ~18k rules; an opening touches a handful of tables.
+ */
+export async function loadNgpScopedRuleSet(
+  ngpDocumentId: string | null,
+  priceTableIds: string[],
+  tapeModels: string[],
+  pricedAsOf: string,
+): Promise<LoadedRuleSet> {
+  if (!ngpDocumentId) return { rules: [], dependencyRules: [] };
+  const tableIds = [...new Set(priceTableIds.filter(Boolean))];
+  const tapes = [...new Set(tapeModels.filter(Boolean))];
+  const collected: Record<string, unknown>[] = [];
+
+  if (tableIds.length > 0) {
+    collected.push(...await loadAllRules(() => supabase
+      .from('price_rule')
+      .select(RULE_EMBED)
+      .eq('price_book_id', ngpDocumentId)
+      .eq('review_status', 'APPROVED')
+      .in('price_table_id', tableIds)
+      .order('id', { ascending: true })));
+  }
+  if (tapes.length > 0) {
+    collected.push(...await loadAllRules(() => supabase
+      .from('price_rule')
+      .select(RULE_EMBED)
+      .eq('price_book_id', ngpDocumentId)
+      .eq('review_status', 'APPROVED')
+      .eq('entity_type', 'glazing_tape')
+      .in('item_or_option_code', tapes)
+      .order('id', { ascending: true })));
+  }
+  // Option-adder rules (charge_category 'option:*') are few; load them all so the
+  // NGP option pass can resolve finish/galv/zinc/etc.
+  collected.push(...await loadAllRules(() => supabase
+    .from('price_rule')
+    .select(RULE_EMBED)
+    .eq('price_book_id', ngpDocumentId)
+    .eq('review_status', 'APPROVED')
+    .like('charge_category', 'option:%')
+    .order('id', { ascending: true })));
+
+  const rules = collected
+    .map((r) => mapRule(r))
+    .filter((r) => withinEffective(r.effectiveFrom, r.effectiveTo, pricedAsOf));
+  return { rules, dependencyRules: [] };
 }
 
 function withinEffective(from: string | null, to: string | null, asOf: string): boolean {

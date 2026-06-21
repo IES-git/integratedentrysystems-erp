@@ -23,6 +23,7 @@ import type {
 
 /** The minimal line shape the auditable quote groups + totals. */
 export interface QuoteLine {
+  componentId: string | null;
   entityType: RuleEntityType | null;
   lineType: EstimateLineType;
   chargeCategory: string | null;
@@ -39,6 +40,8 @@ export interface QuoteLine {
   grossMarginPct: number | null;
   priceStatus: EstimateLinePriceStatus;
   calculationExpression: string;
+  /** The spec field_path → value pairs that satisfied the matched rule. */
+  matchedConditions: Record<string, unknown> | null;
   sourcePage: string | null;
   priceBookId: string | null;
   confidence: number | null;
@@ -66,6 +69,8 @@ export interface QuoteLayer {
   grossMargin: number;
   /** Lines with an unresolved exception status (INVALID/CF/EXTERNAL_PENDING). */
   exceptionCount: number;
+  /** Data-quality warning, e.g. when one component matched >1 base price. */
+  warning: string | null;
 }
 
 export interface HardwareRollup {
@@ -178,6 +183,32 @@ function isException(status: EstimateLinePriceStatus): boolean {
   return EXCEPTION_STATUSES.has(status);
 }
 
+/**
+ * Flags when a single component matched more than one BASE price — the
+ * double-counting signal (e.g. a mis-extracted size-code rule stacking on the
+ * real base). Counts priced BASE lines per componentId.
+ */
+function duplicateBaseWarning(baseLines: QuoteLine[]): string | null {
+  const byComponent = new Map<string, QuoteLine[]>();
+  for (const l of baseLines) {
+    if (l.lineType !== 'BASE' || l.priceStatus !== 'PRICED') continue;
+    const key = l.componentId ?? `${l.entityType ?? 'unknown'}:no-component`;
+    if (!byComponent.has(key)) byComponent.set(key, []);
+    byComponent.get(key)!.push(l);
+  }
+  const offenders = [...byComponent.values()].filter((lines) => lines.length > 1);
+  if (offenders.length === 0) return null;
+  const detail = offenders
+    .map((lines) => `${lines[0].entityType ?? 'component'} matched ${lines.length} base prices (${lines.map((l) => money(l.sellPrice)).join(' + ')})`)
+    .join('; ');
+  return `Possible double-count: ${detail}. Verify the price book — only one base should apply per component.`;
+}
+
+function money(n: number | null | undefined): string {
+  if (n === null || n === undefined) return '—';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+}
+
 function humanizeCategory(category: string): string {
   return category.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -204,6 +235,7 @@ export function buildAuditableQuote(lines: QuoteLine[]): AuditableQuote {
       sellTotal,
       grossMargin: sellTotal - netTotal,
       exceptionCount: layerLines.filter((l) => isException(l.priceStatus)).length,
+      warning: id === 'pioneer_base' ? duplicateBaseWarning(layerLines) : null,
     });
   }
 
@@ -281,6 +313,7 @@ function sum(lines: QuoteLine[], pick: (l: QuoteLine) => number | null): number 
 /** Adapts a live `EngineLine` (Phase 3) to the auditable `QuoteLine` shape. */
 export function fromEngineLine(line: EngineLine): QuoteLine {
   return {
+    componentId: line.componentId,
     entityType: line.entityType,
     lineType: line.lineType,
     chargeCategory: line.chargeCategory,
@@ -297,6 +330,7 @@ export function fromEngineLine(line: EngineLine): QuoteLine {
     grossMarginPct: line.grossMarginPct,
     priceStatus: line.priceStatus,
     calculationExpression: line.calculationExpression,
+    matchedConditions: line.matchedConditions,
     sourcePage: line.sourcePage,
     priceBookId: line.priceBookId,
     confidence: line.confidence,
@@ -307,6 +341,7 @@ export function fromEngineLine(line: EngineLine): QuoteLine {
 /** Adapts a persisted `estimate_line` row to the auditable `QuoteLine` shape. */
 export function fromEstimateLine(line: EstimateLine): QuoteLine {
   return {
+    componentId: line.componentId,
     entityType: line.entityType,
     lineType: line.lineType,
     chargeCategory: line.chargeCategory,
@@ -323,6 +358,7 @@ export function fromEstimateLine(line: EstimateLine): QuoteLine {
     grossMarginPct: line.grossMarginPct,
     priceStatus: line.priceStatus ?? 'PRICED',
     calculationExpression: line.calculationExpression ?? '',
+    matchedConditions: line.matchedConditions,
     sourcePage: line.sourcePage,
     priceBookId: line.priceBookId,
     confidence: line.confidence,
@@ -331,9 +367,12 @@ export function fromEstimateLine(line: EstimateLine): QuoteLine {
 }
 
 export function buildAuditableQuoteFromEngine(lines: EngineLine[]): AuditableQuote {
-  return buildAuditableQuote(lines.map(fromEngineLine));
+  // Hide exclusive-group / override / included-scope suppression lines from the
+  // quote display (they're always $0 and just noise — e.g. every losing matrix
+  // cell). They remain in the persisted estimate_line rows for the full audit.
+  return buildAuditableQuote(lines.filter((l) => !l.includedOrSuppressedBy).map(fromEngineLine));
 }
 
 export function buildAuditableQuoteFromEstimateLines(lines: EstimateLine[]): AuditableQuote {
-  return buildAuditableQuote(lines.map(fromEstimateLine));
+  return buildAuditableQuote(lines.filter((l) => !l.includedOrSuppressedBy).map(fromEstimateLine));
 }

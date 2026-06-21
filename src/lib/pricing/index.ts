@@ -28,6 +28,10 @@ export {
   matchCrosswalk,
   pickSellRule,
   computeSell,
+  resolveHardwareNet,
+  MAX_PLAUSIBLE_HARDWARE_NET,
+  requiresDoorFramePrep,
+  SURFACE_MOUNTED_CATEGORIES,
   type PrepRequirement,
 } from './hardware';
 export { evalQuantityFormula } from './quantity';

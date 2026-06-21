@@ -180,6 +180,103 @@ export interface VariantOption {
 }
 
 /**
+ * One approved base-price rule reduced to its enumerable EQ/IN constraints
+ * (series / material / gauge / etc.) keyed by field_path. Used to drive
+ * cascading "only priceable" filtering of the door/frame/panel dropdowns so a
+ * non-expert can only pick combinations that actually have a published price.
+ */
+export type BaseSignature = Record<string, string>;
+export type BaseSignatures = Record<string, BaseSignature[]>; // entity -> signatures
+
+/** Resolves the published document that actually carries door base prices. */
+async function resolveBaseDocId(): Promise<string | null> {
+  const { data } = await supabase
+    .from('price_rule')
+    .select('price_book_id, price_book_document!inner(status, effective_date)')
+    .eq('entity_type', 'door')
+    .eq('action_type', 'BASE_AMOUNT')
+    .eq('review_status', 'APPROVED')
+    .eq('price_book_document.status', 'published')
+    .order('effective_date', { ascending: false, foreignTable: 'price_book_document', nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+  return (data?.price_book_id as string | undefined) ?? null;
+}
+
+/**
+ * Loads the enumerable constraint signatures of every approved base rule (door /
+ * frame / panel) from the active base book. Dimension/numeric conditions are
+ * skipped (those are free-entry, matched by range), leaving the discrete picks
+ * (series, material, gauge, …) the builder should constrain.
+ */
+export async function loadBaseSignatures(): Promise<BaseSignatures> {
+  const out: BaseSignatures = { door: [], frame: [], panel: [] };
+  const docId = await resolveBaseDocId();
+  if (!docId) return out;
+  const { data, error } = await supabase
+    .from('price_rule')
+    .select('entity_type, rule_condition(field_path, operator, value_1, value_type)')
+    .eq('price_book_id', docId)
+    .eq('action_type', 'BASE_AMOUNT')
+    .eq('review_status', 'APPROVED')
+    .in('entity_type', ['door', 'frame', 'panel']);
+  if (error) throw new Error(`Failed to load base signatures: ${error.message}`);
+  for (const r of data ?? []) {
+    const row = r as Record<string, unknown>;
+    const et = row.entity_type as string;
+    if (!out[et]) continue;
+    const sig: BaseSignature = {};
+    for (const c of (row.rule_condition as Record<string, unknown>[] | undefined) ?? []) {
+      const fp = c.field_path as string | null;
+      const op = c.operator as string | null;
+      const v1 = c.value_1 as string | null;
+      if (!fp || !v1) continue;
+      // Only discrete constraints (EQ/IN) — range conditions (width/height LTE/
+      // BETWEEN) are free-entry and matched numerically, so they're excluded by
+      // the operator filter. EQ dimension fields (e.g. jamb depth 8 3/4) ARE
+      // discrete picks and must be captured.
+      if (op !== 'EQ' && op !== 'IN') continue;
+      // Take the first listed value of an IN list as the canonical key (rules are
+      // typically single-valued EQ here).
+      sig[fp] = String(v1).split(/[|,]/)[0].trim();
+    }
+    if (Object.keys(sig).length > 0) out[et].push(sig);
+  }
+  return out;
+}
+
+export interface HardwareCategoryOption {
+  category: string;
+  label: string;
+  variantCount: number;
+}
+
+/**
+ * Lists the hardware categories that actually have catalog variants, so the
+ * builder can offer individual hardware selection (independent of any set
+ * template). Categories with no variants are omitted (nothing to price).
+ */
+export async function loadHardwareCategories(): Promise<HardwareCategoryOption[]> {
+  const { data, error } = await supabase
+    .from('hardware_variant')
+    .select('hardware_product!inner(category)');
+  if (error) throw new Error(`Failed to load hardware categories: ${error.message}`);
+  const counts = new Map<string, number>();
+  for (const r of data ?? []) {
+    const cat = ((r as Record<string, unknown>).hardware_product as { category?: string | null } | null)?.category;
+    if (!cat) continue;
+    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([category, variantCount]) => ({
+      category,
+      label: category.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+      variantCount,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
  * Loads selectable hardware variants for a canonical category, with their
  * current approved price. Used by the hardware step to filter by
  * function/finish/size/rating/hand.

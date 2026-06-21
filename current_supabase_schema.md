@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-05-21 (wizard rules & hardware Phase 3 — extended subcategory CHECK constraints to include mount_it, seeded ANCHOR hardware family, added door_role field definition)
+Last updated: 2026-06-20 (CPQ Phase 1 pricing-data remediation — added spec_value_alias governance table, qa_issue_summary view, cleaned rule_condition vocabulary, assigned exclusive groups, seeded service_scope defaults; see "Pricing data remediation" section)
 
 ## Authentication Status
 
@@ -1791,6 +1791,30 @@ Phase 6 (cutover, GATED — not yet executed; preconditions: Pioneer book ingest
 - Legacy grid tables marked deprecated/read-only via comments (migration `cpq_v2_deprecate_legacy_grid_tables`).
 - The destructive drop lives in `db/migrations/retire_legacy_grid.sql` (drops `pricing_adder_cells`, `pricing_cells`, `pricing_rows`, `pricing_columns`, `pricing_tables`) — run only once the preconditions hold.
 - Existing estimates are re-entered into the engine model via `migrateAllEstimates()` (`src/lib/cpq/migrate-estimates.ts`), which reconstructs a NormalizedOpeningSpec per opening and persists `estimate_line` (explicit exceptions where no published rule exists yet).
+
+### Pricing data remediation (CPQ Phase 1–4, 2026-06-20)
+
+Remediation of price-book data gaps and the builder↔rules value disconnect. Migrations: `cpq_v2_spec_value_alias`, `cpq_v2_clean_rule_condition_vocab`, `cpq_v2_drop_literal_null_conditions`, `cpq_v2_assign_exclusive_groups`, `cpq_v2_seed_service_scope`, `cpq_v2_review_rules_and_hardware_coverage`, `cpq_v2_qa_issue_summary_view`.
+
+- **public.spec_value_alias** (NEW) — governed vocabulary. Maps raw extracted `rule_condition` values to the canonical token in `opening_spec_field.allowed_values`.
+  - Columns: `id` (uuid PK), `field_path` (text), `raw_value` (text), `canonical_value` (text, NULL for rejects), `target_operator` (text CHECK `EQ`|`IN`, default `EQ`), `status` (text CHECK `alias`|`reject`), `notes` (text), `created_at`. UNIQUE(`field_path`, `raw_value`).
+  - RLS: `auth_read` (using true); `admin_insert`/`admin_update`/`admin_delete` via `is_admin()`.
+  - Seed (`db/seeds`/migration): recoverable aliases (e.g. `FEMA 361`→`FEMA`, `Piocane 50`→`F50`/`W50`, `STK 14`→`STK`, `F/DW`→IN `F|DW`, `Galvannealed`→`galvannealed`) and rejects (series codes / jamb depths / STC table dumps / headers leaked into gauge fields).
+- **public.qa_issue_summary** (NEW view) — aggregates `qa_issue` by `price_book_title`, `price_book_id`, `check_name`, `severity`, `status` with `issue_count` + `last_seen`. Powers the Price Book QA dashboard (`/app/pricing/qa`).
+- **public.rule_condition** (data only) — applied aliases to `value_1` (preserving original in `source_phrase`, setting `normalized_value`), converted multi-value EQ operands to `IN`, and deleted 505 meaningless `EQ 'null'` blank-cell conditions.
+- **public.price_rule** (data only) — assigned `exclusive_group` (`auto:<md5>`) to identical-signature duplicate `BASE_AMOUNT` rules (scoped by book+table+entity+signature) so the engine cannot double-count; auto-approved 1,284 clean `UNREVIEWED` rules (PRICED + cite source + no reject-flagged condition). 161 rules referencing unrecoverable values stay `UNREVIEWED`.
+- **public.service_scope** (seed) — default `install` (per_leaf), `freight` (percent_of), `tax` (percent_of) rows with PLACEHOLDER rates flagged in `notes` for ops/finance review, so quotes are no longer materials-only.
+- **public.qa_issue** (data) — new `check_name`s: `vocab_unrecoverable` (ERROR, reject-flagged conditions), `condition_blank_artifact` (INFO, resolved), `hardware_missing_price` (ERROR, 48 variants with no approved price). The QA gate (`src/lib/cpq/qa-checks.ts`) added `evaluateVocabularyQa` (→`vocab_out_of_vocabulary`/`vocab_alias_pending`) and `evaluateHardwareCoverage` (→`hardware_missing_price`), both wired into `runQaChecks`.
+
+Audit queries live in `db/audits/rule_condition_vocab_audit.sql`.
+
+#### Spurious base-rule fix (2026-06-20, migration `cpq_v2_fix_spurious_base_rules`)
+Live validation showed multiple "base" lines stacking on one component (e.g. a door priced at $828 + phantom $83 + $69; a frame at $41 + phantom $98). Root causes and fixes (all `price_rule` data, demoted to `review_status='REJECTED'` so the engine — which loads only APPROVED — skips them, and flagged in `qa_issue` for re-ingestion):
+- **Unconditional empty BASE rules** (4 frame: amounts 39/98/108/156, raw `" | = X"`, no conditions) matched every frame → REJECTED; `qa_issue.check_name='base_rule_unconditional'`.
+- **Size-code-as-dimension-bound BASE rules** (216 door+frame): a size code like `2070` (2'0"×7'0") or `240` (2" face + 4-0 width) stored as `nominal_*_width/height` bound ≥200in, making the bound always-true → REJECTED; `qa_issue.check_name='base_rule_size_code_bound'`.
+- **Regression revert:** the combined series+gauge `door.door_gauge` aliases (`H or CH 18`, `LW or C 16`, …) from `cpq_v2_clean_rule_condition_vocab` had activated ~36 mis-parsed door size-rows once the `series='null'` guards were dropped. Their `rule_condition.value_1` is restored from `source_phrase` and those `spec_value_alias` rows reclassified `alias`→`reject`.
+
+UI: `AuditableQuote` now shows each line's matched spec (`matchedConditions`) and warns when one `componentId` matches more than one BASE price (`src/lib/cpq/auditable-quote.ts` `duplicateBaseWarning`).
 
 ---
 

@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   evaluateRuleQa,
   evaluateHardwareQa,
+  evaluateVocabularyQa,
   evaluateQa,
   type QaRule,
   type QaHardwarePrice,
+  type QaCondition,
+  type VocabField,
 } from '@/lib/cpq/qa-checks';
 
 function qaRule(p: Partial<QaRule>): QaRule {
@@ -84,6 +87,41 @@ describe('hardware QA checks', () => {
 
   it('passes when net reconciles within 1%', () => {
     expect(evaluateHardwareQa([{ id: 'p1', listPrice: 100, discountMultiplier: 0.5, netCost: 50 }])).toHaveLength(0);
+  });
+});
+
+describe('vocabulary QA checks', () => {
+  const vocab = new Map<string, VocabField>([
+    ['frame.frame_series', {
+      canon: new Set(['f', 'dw', 'stk', 'spf']),
+      aliases: new Map<string, 'alias' | 'reject'>([['stk 14', 'alias'], ['cnn', 'reject']]),
+    }],
+  ]);
+  function cond(p: Partial<QaCondition>): QaCondition {
+    return { priceRuleId: 'r1', fieldPath: 'frame.frame_series', operator: 'EQ', value1: 'F', sourceRegionId: null, ...p };
+  }
+
+  it('passes a canonical token', () => {
+    expect(evaluateVocabularyQa([cond({ value1: 'F' })], vocab)).toHaveLength(0);
+  });
+
+  it('warns (recoverable) on a known alias token', () => {
+    const findings = evaluateVocabularyQa([cond({ value1: 'STK 14' })], vocab);
+    expect(findings.some((f) => f.checkName === 'vocab_alias_pending' && f.severity === 'WARNING')).toBe(true);
+  });
+
+  it('errors (blocking) on an out-of-vocabulary token', () => {
+    const findings = evaluateVocabularyQa([cond({ value1: 'XYZ' })], vocab);
+    expect(findings.some((f) => f.checkName === 'vocab_out_of_vocabulary' && f.severity === 'ERROR')).toBe(true);
+  });
+
+  it('treats every token of an IN list independently', () => {
+    const findings = evaluateVocabularyQa([cond({ operator: 'IN', value1: 'F|DW' })], vocab);
+    expect(findings).toHaveLength(0);
+  });
+
+  it('skips fields not in the governed vocabulary', () => {
+    expect(evaluateVocabularyQa([cond({ fieldPath: 'door.unknown_field', value1: 'whatever' })], vocab)).toHaveLength(0);
   });
 });
 

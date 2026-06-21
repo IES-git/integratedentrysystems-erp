@@ -1,3 +1,8 @@
+/**
+ * @deprecated LEGACY grid opening page — superseded by SpecOpeningBuilder.
+ * Scheduled for removal at the Phase 6 cutover (TARGET 2026-07-15); see
+ * db/migrations/retire_legacy_grid.sql. Do not add new features here.
+ */
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {

@@ -12,6 +12,7 @@
  */
 
 import type { DependencyOutcome } from '@/lib/pricing';
+import { requiresDoorFramePrep } from '@/lib/pricing';
 import type { AuditableQuote, QuoteLayer, QuoteLine } from './auditable-quote';
 
 export type CompletenessSeverity = 'block' | 'warn' | 'info';
@@ -90,8 +91,13 @@ function tokenOverlap(a: string, b: string): number {
 
 /** Extracts the crosswalk source category embedded in a prep line description. */
 function prepSourceCategory(line: QuoteLine): string {
-  const m = line.description.match(/\(([^)]+)\)\s*$/);
-  return (m?.[1] ?? line.chargeCategory ?? line.description).trim();
+  // The source category is the parenthetical, e.g.
+  // "Door prep CYL (Cylindrical lock) — included in base" → "Cylindrical lock".
+  // Match the LAST parenthetical anywhere (a trailing "— included in base" suffix
+  // means it's no longer anchored to end-of-string).
+  const matches = [...line.description.matchAll(/\(([^)]+)\)/g)];
+  const last = matches.length > 0 ? matches[matches.length - 1][1] : null;
+  return (last ?? line.chargeCategory ?? line.description).trim();
 }
 
 function findLayer(quote: AuditableQuote, id: QuoteLayer['id']): QuoteLine[] {
@@ -112,6 +118,9 @@ export function reconcilePrepVsDevice(quote: AuditableQuote): CompletenessIssue[
   // Devices with no matching prep.
   for (const device of devices) {
     const group = device.chargeCategory ?? device.description;
+    // Surface-mounted hardware (closers / plates / applied seals) needs no
+    // machined door/frame prep — not a reconciliation gap.
+    if (!requiresDoorFramePrep(group)) continue;
     const hasPrep = preps.some((p) => tokenOverlap(group, prepSourceCategory(p)) >= 0.34);
     if (!hasPrep) {
       issues.push({

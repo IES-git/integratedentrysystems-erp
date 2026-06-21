@@ -23,6 +23,36 @@ import type { NormalizedOpeningSpec, HardwareSelection } from './spec';
 import { evalQuantityFormula } from './quantity';
 import type { HardwareCatalog, VariantWithPrice } from './loader';
 
+/**
+ * Largest plausible per-unit net cost for a single piece of door hardware.
+ * Catalog ingestion bugs (e.g. a dollar value landing in the discount-multiplier
+ * column, producing net = list × list, or a sign flip) can yield wildly large or
+ * negative "net" figures. Anything outside (0, MAX] is treated as unusable so it
+ * never auto-selects, prices, or poisons a quote total.
+ */
+export const MAX_PLAUSIBLE_HARDWARE_NET = 100000;
+
+/**
+ * Resolves a usable per-unit net cost from a (possibly dirty) price record.
+ * Tries the stored net, then list × discount, then bare list — returning the
+ * first value that is finite and within (0, MAX]. Returns null when nothing is
+ * trustworthy (negative / zero / absurd), which callers treat as "no price"
+ * (route to manual quote; never emit a garbage line or auto-select it).
+ */
+export function resolveHardwareNet(
+  price: { netCost: number | null; listPrice: number | null; discountMultiplier: number | null } | null | undefined,
+): number | null {
+  if (!price) return null;
+  const listTimesDisc =
+    price.listPrice != null && price.discountMultiplier != null ? price.listPrice * price.discountMultiplier : null;
+  for (const candidate of [price.netCost, listTimesDisc, price.listPrice]) {
+    if (candidate != null && Number.isFinite(candidate) && candidate > 0 && candidate <= MAX_PLAUSIBLE_HARDWARE_NET) {
+      return Math.round(candidate * 100) / 100;
+    }
+  }
+  return null;
+}
+
 export interface PrepRequirement {
   hardwareCategory: string;
   entityType: 'door' | 'frame';
@@ -38,6 +68,15 @@ export interface HardwarePricingResult {
   manualQuotes: EngineManualQuote[];
   prepRequirements: PrepRequirement[];
   warnings: string[];
+}
+
+/**
+ * Whether a hardware category is priced per linear foot — i.e. the catalog has a
+ * linear_hardware_rule for it (weather seals / thresholds / sweeps). Catalog-
+ * driven (not a hardcoded list) so it works for any vendor's linear categories.
+ */
+function isLinearCategory(category: string, catalog: HardwareCatalog): boolean {
+  return catalog.linearRules.some((l) => similarity(category, l.hardwareCategory) >= 0.34);
 }
 
 /** Normalizes a category label to comparable tokens (drops separators/case). */
@@ -141,6 +180,21 @@ export function generateHardwareRequirements(
   return { requirements: [...byCategory.values()], warnings };
 }
 
+/**
+ * Hardware categories that fasten to the door/frame WITHOUT a machined prep —
+ * surface closers (through-bolted), kick / armor / mop plates (screwed on), and
+ * applied perimeter seals / thresholds. They have no door/frame prep code, so a
+ * "missing crosswalk / missing prep" finding for them is a false positive.
+ */
+export const SURFACE_MOUNTED_CATEGORIES = [
+  'closers_and_arms', 'protection_accessories', 'weather_seals', 'thresholds',
+];
+
+/** True when a hardware category needs a machined door/frame prep (vs surface-mount). */
+export function requiresDoorFramePrep(category: string): boolean {
+  return !SURFACE_MOUNTED_CATEGORIES.some((c) => similarity(category, c) >= 0.34);
+}
+
 /** Finds the best crosswalk row for a (canonical or descriptive) category. */
 export function matchCrosswalk(
   category: string,
@@ -177,6 +231,9 @@ export function derivePrepRequirements(
 
   for (const req of requirements) {
     if (req.quantity <= 0) continue;
+    // Surface-mounted hardware (closers / plates / applied seals) needs no
+    // machined door/frame prep — skip silently instead of warning.
+    if (!requiresDoorFramePrep(req.category)) continue;
     const cw = matchCrosswalk(req.category, catalog.prepCrosswalk);
     if (!cw) {
       warnings.push(`No prep crosswalk found for hardware category "${req.category}".`);
@@ -316,11 +373,17 @@ export function priceHardware(
   const { requirements, warnings: reqWarnings } = generateHardwareRequirements(spec, catalog);
   warnings.push(...reqWarnings);
 
-  const { prepRequirements, warnings: prepWarnings } = derivePrepRequirements(requirements, catalog);
+  // Derive Pioneer preps only for hardware actually selected — an unselected
+  // optional category has nothing to prep for (and shouldn't warn about a missing
+  // crosswalk).
+  const { prepRequirements, warnings: prepWarnings } = derivePrepRequirements(requirements.filter((r) => r.variantId), catalog);
   warnings.push(...prepWarnings);
 
   for (const req of requirements) {
     if (req.quantity <= 0) continue;
+    // Linear accessories (weather seals / thresholds) are priced per-foot below
+    // for the SELECTED variant only — never per-each here (that double-counts).
+    if (isLinearCategory(req.category, catalog)) continue;
     const base: Omit<EngineLine, 'priceStatus' | 'lineType' | 'calculationExpression' | 'exceptionMessage' | 'unitListPrice' | 'extendedListPrice' | 'discountMultiplier' | 'extendedNetPrice' | 'sellPrice' | 'grossMargin' | 'grossMarginPct'> = {
       priceRuleId: null,
       entityType: 'hardware',
@@ -340,25 +403,28 @@ export function priceHardware(
     };
 
     if (!req.variantId) {
+      // Optional + unselected → omit entirely (non-blocking). Only a REQUIRED
+      // category with no variant is a true blocking exception.
+      if (!req.required) continue;
       lines.push({
         ...base,
-        lineType: req.required ? 'WARNING' : 'WARNING',
+        lineType: 'WARNING',
         priceStatus: 'INVALID',
         unitListPrice: null, extendedListPrice: null, discountMultiplier: null,
         extendedNetPrice: null, sellPrice: null, grossMargin: null, grossMarginPct: null,
         calculationExpression: 'No variant selected',
-        exceptionMessage: req.required
-          ? `Required hardware "${req.category}" has no variant selected.`
-          : `Hardware "${req.category}" not yet selected.`,
+        exceptionMessage: `Required hardware "${req.category}" has no variant selected.`,
       });
-      if (req.required) {
-        manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Select a variant for ${req.category}` });
-      }
+      manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Select a variant for ${req.category}` });
       continue;
     }
 
     const vp = variantMap.get(req.variantId);
-    if (!vp || !vp.price || (vp.price.netCost == null && vp.price.listPrice == null)) {
+    // Resolve a TRUSTWORTHY net (positive, non-absurd). A negative / zero /
+    // wildly-large stored net is dirty catalog data and must never become a
+    // priced line (it once produced a -$230k lock) — route it to manual quote.
+    const net = resolveHardwareNet(vp?.price ?? null);
+    if (!vp || net == null) {
       lines.push({
         ...base,
         lineType: 'MANUAL_QUOTE',
@@ -366,27 +432,15 @@ export function priceHardware(
         unitListPrice: vp?.price?.listPrice ?? null, extendedListPrice: null,
         discountMultiplier: vp?.price?.discountMultiplier ?? null,
         extendedNetPrice: null, sellPrice: null, grossMargin: null, grossMarginPct: null,
-        calculationExpression: 'No approved price for selected variant',
-        exceptionMessage: `No approved price for "${req.category}" variant — routed to manual quote.`,
+        calculationExpression: 'No usable approved price for selected variant',
+        exceptionMessage: `No usable approved price for "${req.category}" variant — routed to manual quote.`,
       });
       manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Price hardware variant for ${req.category}` });
       continue;
     }
 
-    const list = vp.price.listPrice;
-    const disc = vp.price.discountMultiplier;
-    const net = vp.price.netCost ?? (list != null && disc != null ? list * disc : null);
-    if (net == null) {
-      lines.push({
-        ...base, lineType: 'MANUAL_QUOTE', priceStatus: 'INVALID',
-        unitListPrice: list, extendedListPrice: null, discountMultiplier: disc,
-        extendedNetPrice: null, sellPrice: null, grossMargin: null, grossMarginPct: null,
-        calculationExpression: 'Net cost unresolved (list × discount missing)',
-        exceptionMessage: `Cannot compute net for "${req.category}".`,
-      });
-      manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Provide list × discount for ${req.category}` });
-      continue;
-    }
+    const list = vp.price?.listPrice ?? null;
+    const disc = vp.price?.discountMultiplier ?? null;
 
     const extendedNet = net * req.quantity;
     const sellRule = pickSellRule(req.category, catalog.sellRules, ctx);
@@ -412,30 +466,45 @@ export function priceHardware(
     });
   }
 
-  // Length-driven accessories (weatherstrip / sweeps / thresholds) — step 6.
-  for (const lin of catalog.linearRules) {
-    const wantsCategory = requirements.some((r) => similarity(r.category, lin.hardwareCategory) >= 0.34);
-    if (!wantsCategory) continue;
-    const lengthFt = computeLinearLength(spec, lin);
+  // Length-driven accessories (weather seals / thresholds) — step 6. Price ONE
+  // line per SELECTED linear category, using that variant's per-foot rule. The
+  // catalog has one linear rule per variant, so we must NOT price them all.
+  const linByVariant = new Map(
+    catalog.linearRules.filter((l) => l.hardwareVariantId).map((l) => [l.hardwareVariantId as string, l]),
+  );
+  for (const req of requirements) {
+    if (!isLinearCategory(req.category, catalog)) continue;
+    if (!req.variantId) continue; // optional accessory; nothing selected → no line
+    const lin = linByVariant.get(req.variantId)
+      ?? catalog.linearRules.find((l) => l.hardwareVariantId === req.variantId)
+      ?? catalog.linearRules.find((l) => similarity(l.hardwareCategory, req.category) >= 0.34);
+    const basis = lin ?? {
+      lengthBasis: req.category === 'thresholds' ? 'width' : 'perimeter',
+      cutIncrement: 1, wastePct: 10, minimumLength: null, perFootPrice: null,
+    };
+    const lengthFt = computeLinearLength(spec, basis);
+    // Prefer the selected variant's current approved per-foot price, then the rule's.
+    const vp = variantMap.get(req.variantId);
+    const perFoot = resolveHardwareNet(vp?.price ?? null) ?? lin?.perFootPrice ?? null;
     if (lengthFt == null) {
-      warnings.push(`Linear accessory "${lin.hardwareCategory}": cannot resolve ${lin.lengthBasis} length from opening dimensions.`);
+      warnings.push(`Linear accessory "${req.category}": cannot resolve length from opening dimensions.`);
       continue;
     }
-    if (lin.perFootPrice == null) {
-      manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Per-foot price for ${lin.hardwareCategory}` });
+    if (perFoot == null) {
+      manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Per-foot price for ${req.category}` });
       continue;
     }
-    const net = lin.perFootPrice * lengthFt;
-    const sellRule = pickSellRule(lin.hardwareCategory, catalog.sellRules, ctx);
+    const net = perFoot * lengthFt;
+    const sellRule = pickSellRule(req.category, catalog.sellRules, ctx);
     const { sell, gm, gmPct } = computeSell(net, null, sellRule);
     lines.push({
       lineType: 'ADDER', priceRuleId: null, entityType: 'hardware',
-      chargeCategory: lin.hardwareCategory, description: `${lin.hardwareCategory} (linear)`,
-      selectedOptionCode: null, quantity: Math.round(lengthFt * 100) / 100, unitOfMeasure: 'ft',
-      unitListPrice: lin.perFootPrice, extendedListPrice: null, discountMultiplier: null,
+      chargeCategory: req.category, description: `${req.category.replace(/_/g, ' ')} (linear${vp?.variant.sku ? ` — ${vp.variant.sku}` : ''})`,
+      selectedOptionCode: vp?.variant.sku ?? null, quantity: Math.round(lengthFt * 100) / 100, unitOfMeasure: 'ft',
+      unitListPrice: perFoot, extendedListPrice: null, discountMultiplier: null,
       extendedNetPrice: net, sellPrice: sell, grossMargin: gm, grossMarginPct: gmPct,
       priceStatus: 'PRICED',
-      calculationExpression: `${lin.perFootPrice.toFixed(2)}/ft × ${lengthFt.toFixed(2)}ft = ${net.toFixed(2)}`,
+      calculationExpression: `${perFoot.toFixed(2)}/ft × ${lengthFt.toFixed(2)}ft = ${net.toFixed(2)}`,
       matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
       priceBookId: ctx.priceBookId, confidence: null, exceptionMessage: null, componentId: null, sortOrder: sortOrder++,
     });

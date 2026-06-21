@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft, Boxes, Layers, DollarSign, FileSpreadsheet, ShieldCheck, LucideIcon } from 'lucide-react';
+import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft, Boxes, Layers, DollarSign, FileSpreadsheet, ShieldCheck, ClipboardCheck, LucideIcon } from 'lucide-react';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/sidebar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -65,6 +65,11 @@ const adminNavigation: { title: string; href: string; icon: LucideIcon }[] = [
     title: 'Price Book Ingestion',
     href: '/app/pricing/ingest',
     icon: FileSpreadsheet
+  },
+  {
+    title: 'Price Book QA',
+    href: '/app/pricing/qa',
+    icon: ClipboardCheck
   },
   {
     title: 'Items',

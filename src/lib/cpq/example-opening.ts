@@ -199,8 +199,10 @@ export const exampleOpeningSpec: NormalizedOpeningSpec = {
     { category: 'cylindrical_lock', variantId: 'v-lock', quantity: 1, required: true, source: 'set_template' },
     { category: 'surface_closer', variantId: 'v-closer', quantity: 1, required: true, source: 'set_template' },
     { category: 'door_position_switch', variantId: 'v-dps', quantity: 1, required: false, source: 'set_template' },
-    { category: 'gasketing', variantId: null, quantity: 0, required: false, source: 'set_template' },
-    { category: 'threshold', variantId: null, quantity: 0, required: false, source: 'set_template' },
+    // Linear accessories: a variant is selected so one per-foot line is priced
+    // from the category linear rule (the engine no longer prices every rule).
+    { category: 'gasketing', variantId: 'v-gask', quantity: 1, required: false, source: 'set_template' },
+    { category: 'threshold', variantId: 'v-thr', quantity: 1, required: false, source: 'set_template' },
   ],
   keying: null,
   accessControl: null,

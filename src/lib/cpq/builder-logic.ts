@@ -20,7 +20,7 @@
 import { parseDoorDimension, formatDimensionHyphen } from '@/components/pricing/dimension-utils';
 import { hingesPerLeaf } from '@/components/estimates/wizard/opening-rules';
 import type { OpeningConfigurationType, SpecFieldEntity } from '@/types';
-import type { SpecFieldWithPath } from '@/lib/cpq-catalog-api';
+import type { SpecFieldWithPath, BaseSignature } from '@/lib/cpq-catalog-api';
 import type { OpeningDraft, ComponentDraft } from './opening-spec';
 
 // ---------------------------------------------------------------------------
@@ -766,6 +766,163 @@ export function validateBuilderIntegrity(draft: OpeningDraft): IntegrityIssue[] 
   }
 
   return issues;
+}
+
+// ---------------------------------------------------------------------------
+// Priceable-combination filtering (only offer values that have a base price)
+// ---------------------------------------------------------------------------
+
+function normVal(v: string): string {
+  return String(v ?? '').trim().toLowerCase();
+}
+
+/** All enumerable field_paths that appear in a set of base-rule signatures. */
+export function baseFieldPaths(signatures: BaseSignature[]): string[] {
+  const s = new Set<string>();
+  for (const sig of signatures) for (const k of Object.keys(sig)) s.add(k);
+  return [...s];
+}
+
+/**
+ * The values of `fieldPath` that keep a priceable base rule reachable given the
+ * OTHER fields already chosen (cascading). When the current selection is itself
+ * unsatisfiable, falls back to every priceable value for the field so the user
+ * can recover instead of facing an empty list.
+ */
+export function availableBaseValues(
+  signatures: BaseSignature[],
+  fieldPath: string,
+  selection: Record<string, string>,
+): string[] {
+  const consistent = new Set<string>();
+  const all = new Set<string>();
+  for (const sig of signatures) {
+    const val = sig[fieldPath];
+    if (val == null) continue;
+    all.add(val);
+    let ok = true;
+    for (const [k, v] of Object.entries(selection)) {
+      if (k === fieldPath || !v) continue;
+      if (sig[k] != null && normVal(sig[k]) !== normVal(v)) { ok = false; break; }
+    }
+    if (ok) consistent.add(val);
+  }
+  return [...(consistent.size > 0 ? consistent : all)];
+}
+
+/** The component's current base-field selection (field_path → value). */
+export function componentBaseSelection(
+  comp: ComponentDraft,
+  fieldPaths: string[],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const seriesPath = SERIES_FIELD_PATH_BY_ENTITY[comp.entityType];
+  for (const fp of fieldPaths) {
+    const v = comp.fields[fp] ?? (fp === seriesPath ? comp.familyCode ?? '' : '');
+    if (v) out[fp] = v;
+  }
+  return out;
+}
+
+const SERIES_FIELD_PATH_BY_ENTITY: Record<string, string | undefined> = {
+  door: 'door.door_series_construction',
+  frame: 'frame.frame_series',
+  panel: 'panel.panel_construction_series',
+};
+
+/**
+ * Restricts a field's enum options to those that (a) pass the compatibility
+ * filter and (b) keep a priceable base rule reachable. Returns `base` unchanged
+ * when the field isn't a base-driving field or no signatures are known.
+ */
+export function priceableEnumOptions(
+  base: string[] | null,
+  field: SpecFieldWithPath,
+  comp: ComponentDraft,
+  signatures: BaseSignature[],
+): string[] | null {
+  if (!field.fieldPath || signatures.length === 0) return base;
+  const paths = baseFieldPaths(signatures);
+  if (!paths.includes(field.fieldPath)) return base;
+  // `base` is null when the compatibility layer imposed no restriction — in that
+  // case filter the field's full enum so priceability still applies.
+  const candidates = base ?? field.enumOptions;
+  if (!candidates || candidates.length === 0) return base;
+  const selection = componentBaseSelection(comp, paths);
+  const allowed = new Set(availableBaseValues(signatures, field.fieldPath, selection).map(normVal));
+  const filtered = candidates.filter((o) => allowed.has(normVal(o)));
+  // Safeguard: never hide everything (avoids an un-pickable field on odd data).
+  return filtered.length > 0 ? filtered : (base ?? candidates);
+}
+
+/**
+ * Base-field values that are FORCED (exactly one priceable choice given the rest
+ * of the selection) and not yet set — so the builder can auto-fill them. Returns
+ * field_path → value (e.g. door.door_material → CRS once a CRS-only series is
+ * chosen).
+ */
+export function forcedBaseValues(
+  comp: ComponentDraft,
+  signatures: BaseSignature[],
+): Record<string, string> {
+  if (signatures.length === 0) return {};
+  const paths = baseFieldPaths(signatures);
+  const selection = componentBaseSelection(comp, paths);
+  const out: Record<string, string> = {};
+  for (const fp of paths) {
+    if (selection[fp]) continue; // already chosen
+    const opts = availableBaseValues(signatures, fp, selection);
+    if (opts.length === 1) out[fp] = opts[0];
+  }
+  return out;
+}
+
+/** The most frequent value in a list (ties → first sorted, deterministic). */
+function mostCommon(values: string[]): string | null {
+  if (values.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+}
+
+/**
+ * Auto-fill values for base fields that are MANDATORY for pricing (appear in
+ * every reachable signature) but not yet chosen — forced values when there's one
+ * option, else a sensible default (the most common priceable value). Only runs
+ * once the component's series is chosen, and never overrides the series itself,
+ * so a non-expert lands on a priceable combination with zero extra picks while
+ * everything stays overridable.
+ */
+export function autoFillBaseValues(
+  comp: ComponentDraft,
+  signatures: BaseSignature[],
+): Record<string, string> {
+  if (signatures.length === 0) return {};
+  const paths = baseFieldPaths(signatures);
+  const seriesPath = SERIES_FIELD_PATH_BY_ENTITY[comp.entityType];
+  const selection = componentBaseSelection(comp, paths);
+  // Wait until the identity pick (series) is made so defaults are consistent.
+  if (seriesPath && !selection[seriesPath]) return {};
+
+  const matches = (working: Record<string, string>) => signatures.filter((sig) =>
+    Object.entries(working).every(([k, v]) => !v || sig[k] == null || normVal(sig[k]) === normVal(v)));
+  if (matches(selection).length === 0) return {};
+
+  const out: Record<string, string> = {};
+  const working = { ...selection };
+  // Accumulate each pick into `working` so later fields stay consistent with it
+  // (e.g. once gauge is defaulted, jamb depth defaults to a value valid for it).
+  for (const fp of paths) {
+    if (fp === seriesPath || working[fp]) continue;
+    const consistent = matches(working);
+    if (consistent.length === 0) continue;
+    // Mandatory = present in every reachable signature (missing it blocks pricing).
+    const present = consistent.filter((sig) => sig[fp] != null);
+    if (present.length !== consistent.length) continue;
+    const value = mostCommon(present.map((sig) => sig[fp]));
+    if (value) { out[fp] = value; working[fp] = value; }
+  }
+  return out;
 }
 
 /** Whether a builder step should be shown for the current configuration. */

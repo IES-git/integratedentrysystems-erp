@@ -10,6 +10,7 @@ import { priceExampleOpening } from '@/lib/cpq/example-opening';
 
 function line(p: Partial<QuoteLine>): QuoteLine {
   return {
+    componentId: null,
     entityType: 'door',
     lineType: 'BASE',
     chargeCategory: 'base',
@@ -26,6 +27,7 @@ function line(p: Partial<QuoteLine>): QuoteLine {
     grossMarginPct: null,
     priceStatus: 'PRICED',
     calculationExpression: '',
+    matchedConditions: null,
     sourcePage: null,
     priceBookId: null,
     confidence: null,
@@ -55,6 +57,24 @@ describe('auditable quote layer classification', () => {
     expect(all?.netTotal).toBe(210);
     expect(all?.sellTotal).toBe(420);
     expect(quote.hardwareRollups.filter((r) => r.group !== 'all')).toHaveLength(2);
+  });
+
+  it('warns when one component matches more than one base price', () => {
+    const quote = buildAuditableQuote([
+      line({ componentId: 'door-1', entityType: 'door', lineType: 'BASE', sellPrice: 828 }),
+      line({ componentId: 'door-1', entityType: 'door', lineType: 'BASE', sellPrice: 69 }),
+    ]);
+    const base = quote.layers.find((l) => l.id === 'pioneer_base');
+    expect(base?.warning).toMatch(/double-count/i);
+  });
+
+  it('does not warn when separate components each have one base', () => {
+    const quote = buildAuditableQuote([
+      line({ componentId: 'door-1', entityType: 'door', lineType: 'BASE', sellPrice: 828 }),
+      line({ componentId: 'frame-1', entityType: 'frame', lineType: 'BASE', sellPrice: 41 }),
+    ]);
+    const base = quote.layers.find((l) => l.id === 'pioneer_base');
+    expect(base?.warning).toBeNull();
   });
 });
 

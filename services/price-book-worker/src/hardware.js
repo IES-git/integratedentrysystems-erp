@@ -57,12 +57,15 @@ const CATEGORY_KEYWORDS = [
   ['Closers and arms', /closer|door control|\barm\b/i],
   ['Exit devices', /exit device|panic|rim device|vertical rod|mortise exit|\bcvr\b|\bsvr\b/i],
   ['Exit trim / pulls', /exit trim|device trim|night latch|dummy trim/i],
-  ['Cylindrical/mortise locks and deadbolts', /lockset|cylindrical lock|mortise lock|deadbolt|deadlock|\block\b|cylinder/i],
+  // NOTE: avoid a bare /\block\b/ here — it greedily swallowed "MAG LOCK"
+  // (access control) and "...LATCH PROTECTOR : CYLINDRICAL LOCK". Match real
+  // locking devices by their specific device words instead.
+  ['Cylindrical/mortise locks and deadbolts', /lockset|cylindrical lock|cylindrical lever|mortise lock|deadbolt|deadlock|multilatch|key.?in.?lever/i],
   ['Inactive-leaf hardware', /flush bolt|auto bolt|coordinator|astragal|inactive leaf|\bfb\b|\bafb\b/i],
   ['Lite kits and louvers', /lite kit|louver|vision kit|glass kit/i],
   ['Weather seals', /weather|gasket|seal|sweep|smoke seal|astragal seal|perimeter/i],
   ['Thresholds', /threshold|saddle/i],
-  ['Protection/accessories', /kick plate|armor plate|mop plate|protection|push plate|pull plate|stop|holder|silencer|viewer/i],
+  ['Protection/accessories', /kick plate|armor plate|mop plate|protection|protector|latch protector|push plate|pull plate|\bstop\b|holder|silencer|viewer/i],
   ['Keying', /keying|key blank|core\b|sfic|key cylinder|master key/i],
   ['Access control', /access control|reader|maglock|mag lock|electric strike|\bestk\b|power supply|controller|rex\b|credential/i],
 ];
@@ -274,15 +277,32 @@ export async function runIngestHardware(sb, priceBookId) {
     const partNo = cell(row, C.R);
     const attrs = buildAttributes(category, row);
 
-    const list = num(cell(row, C.T));
-    const multiplier = num(cell(row, C.S));
+    const rawList = num(cell(row, C.T));
+    const rawMultiplier = num(cell(row, C.S));
     const sourceNet = num(cell(row, C.U));
-    const recomputedNet = list != null && multiplier != null ? Math.round(list * multiplier * 100) / 100 : (sourceNet ?? null);
-    // Net reconciliation: queue rows that don't reconcile within 1%.
+    // A net cost (or list) for a single piece of door hardware is positive and
+    // not six-figures. Catalog rows occasionally drop a dollar value (the list
+    // price, or an unrelated number) into the discount-multiplier column, which
+    // makes list × m explode into list², negatives, or absurd costs.
+    const MAX_NET = 100000;
+    const sane = (n) => n != null && isFinite(n) && n > 0 && n <= MAX_NET;
+    const list = sane(rawList) ? rawList : null;
+    // A discount/cost multiplier must be a sane fraction (0 < m <= 3). Anything
+    // larger is not a multiplier — ignore it rather than multiply by it.
+    const multiplier = rawMultiplier != null && rawMultiplier > 0 && rawMultiplier <= 3 ? rawMultiplier : null;
+    // Prefer list × sane-multiplier, then the row's own net, then bare list.
+    // Keep only a positive, in-bounds result; otherwise leave net null + flag.
+    const computed = list != null && multiplier != null ? Math.round(list * multiplier * 100) / 100 : null;
+    const recomputedNet = [computed, sourceNet, list].find(sane) ?? null;
+    // Net reconciliation: queue rows we couldn't trust (no usable net, the row's
+    // own net disagrees >1%, or the multiplier was out of band and ignored).
     let netReconciled = true;
-    if (list != null && multiplier != null && sourceNet != null && sourceNet !== 0) {
-      const delta = Math.abs(recomputedNet - sourceNet) / Math.abs(sourceNet);
-      netReconciled = delta <= 0.01;
+    if (recomputedNet == null) {
+      netReconciled = false;
+    } else if (sane(sourceNet) && Math.abs(recomputedNet - sourceNet) / sourceNet > 0.01) {
+      netReconciled = false;
+    } else if (rawMultiplier != null && multiplier == null) {
+      netReconciled = false;
     }
 
     // Product (group alternate brands/models as variants, not duplicates).

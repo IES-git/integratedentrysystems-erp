@@ -30,6 +30,7 @@ import ItemManagementPage from "@/pages/ItemManagementPage";
 import ItemManagementProgressivePage from "@/pages/ItemManagementProgressivePage";
 import PricingPage from "@/pages/PricingPage";
 import PriceBookIngestPage from "@/pages/PriceBookIngestPage";
+import QaDashboardPage from "@/pages/QaDashboardPage";
 import CompatibilityRulesPage from "@/pages/CompatibilityRulesPage";
 import NotFound from "@/pages/NotFound";
 
@@ -87,6 +88,7 @@ const App = () => (
 
                   {/* Pricing */}
                   <Route path="pricing/ingest" element={<PriceBookIngestPage />} />
+                  <Route path="pricing/qa" element={<QaDashboardPage />} />
                   <Route path="pricing" element={<PricingPage />} />
                   <Route path="pricing/doors" element={<PricingPage />} />
                   <Route path="pricing/doors/:seriesValue" element={<PricingPage />} />

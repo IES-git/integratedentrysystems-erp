@@ -1,3 +1,9 @@
+/**
+ * @deprecated LEGACY grid builder — superseded by SpecOpeningBuilder (the
+ * primary OpeningsStep flow). Scheduled for removal at the Phase 6 cutover
+ * (TARGET 2026-07-15); see db/migrations/retire_legacy_grid.sql. Do not add new
+ * features here — build them in SpecOpeningBuilder against the rule engine.
+ */
 import { useState, useEffect } from 'react';
 import {
   Plus,

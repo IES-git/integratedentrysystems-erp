@@ -133,11 +133,41 @@ function normalizeMaterial(m) {
   return m.toUpperCase();
 }
 
+// Plausible nominal maxima (inches). A parsed dimension larger than these is a
+// mis-parsed concatenated size code (e.g. "2070" -> 2070", "240" -> 240"), NOT a
+// real opening; we treat those as unparseable so the compiler skips the row
+// rather than emitting an always-true / single-axis bound that over-matches.
+export const MAX_NOMINAL_WIDTH_IN = 120; // 10 ft (generous for pairs/multi-leaf)
+export const MAX_NOMINAL_HEIGHT_IN = 144; // 12 ft
+
+/** Return n only when it is a positive, plausible dimension; else null. */
+function plausible(n, max) {
+  return n != null && Number.isFinite(n) && n > 0 && n <= max ? n : null;
+}
+
+/**
+ * Decode a compact concatenated size code with NO separator, e.g. "2070" =
+ * 2'0" x 7'0" (24 x 84) or "2868" = 2'8" x 6'8" (32 x 80). The Pioneer door
+ * grids list these as 4-digit WWHH codes where each pair is feet+inches.
+ *
+ * @param {string} s a trimmed token
+ * @returns {{ width: number, height: number } | null}
+ */
+export function decodeCompactSizeCode(s) {
+  if (!/^\d{4}$/.test(s)) return null;
+  const width = plausible(Number(s[0]) * 12 + Number(s[1]), MAX_NOMINAL_WIDTH_IN);
+  const height = plausible(Number(s[2]) * 12 + Number(s[3]), MAX_NOMINAL_HEIGHT_IN);
+  if (width == null || height == null) return null;
+  return { width, height };
+}
+
 /**
  * Parse a door-industry size label into nominal width/height inches.
  * Handles "3-0 x 7-0", "3'0\" x 7'0\"", "2-0, 2-4 x 6-8" (takes the last/widest
- * width before the height), and single-dimension labels. Feet-dash-inches:
- * "3-0" => 36", "2-4" => 28".
+ * width before the height), compact codes ("2070" => 24 x 84), and single
+ * feet-inches labels ("3-0" => 36"). Returns nulls for anything that does not
+ * resolve to a plausible dimension (bare numbers, 3-digit shortcut codes, junk)
+ * so the compiler can skip the row instead of inventing an always-true bound.
  *
  * @param {string} label
  * @returns {{ width: number|null, height: number|null }}
@@ -145,18 +175,33 @@ function normalizeMaterial(m) {
 export function parseSizeLabel(label) {
   const s = String(label ?? '').trim();
   if (!s) return { width: null, height: null };
-  // Split width x height on the first x/X/× separator.
-  const parts = s.split(/\s*[x×]\s*/i);
-  const widthPart = parts[0] ?? '';
-  const heightPart = parts[1] ?? '';
-  // For multi-size width cells ("2-0, 2-4"), use the last (largest) listed.
-  const lastWidth = widthPart.split(/[,/]/).map((p) => p.trim()).filter(Boolean).pop() ?? widthPart;
-  const width = feetInchesToInches(lastWidth);
-  const height = heightPart ? feetInchesToInches(heightPart) : null;
-  return { width, height };
+
+  // Explicit width x height.
+  if (/[x×]/i.test(s)) {
+    const parts = s.split(/\s*[x×]\s*/i);
+    const lastWidth = (parts[0] ?? '').split(/[,/]/).map((p) => p.trim()).filter(Boolean).pop() ?? parts[0];
+    return {
+      width: plausible(feetInchesToInches(lastWidth), MAX_NOMINAL_WIDTH_IN),
+      height: parts[1] ? plausible(feetInchesToInches(parts[1]), MAX_NOMINAL_HEIGHT_IN) : null,
+    };
+  }
+
+  // Compact concatenated size code (no separator): "2070" -> 24 x 84.
+  const compact = decodeCompactSizeCode(s);
+  if (compact) return compact;
+
+  // Single feet-inches dimension ("3-0", "20-0", "2-0, 2-4").
+  if (/\d\s*[-'’]\s*\d/.test(s)) {
+    const lastWidth = s.split(/[,/]/).map((p) => p.trim()).filter(Boolean).pop() ?? s;
+    return { width: plausible(feetInchesToInches(lastWidth), MAX_NOMINAL_WIDTH_IN), height: null };
+  }
+
+  // Not a recognizable dimension (bare number, 3/5-digit shortcut, junk).
+  return { width: null, height: null };
 }
 
-/** "3-0" / "3'0\"" / "3' 0\"" / "36" -> inches. */
+/** "3-0" / "3'0\"" / "3' 0\"" -> inches. Bare numbers are returned as-is (the
+ *  caller clamps via `plausible`); use `parseSizeLabel` for size labels. */
 export function feetInchesToInches(raw) {
   const s = String(raw ?? '').trim();
   if (!s) return null;

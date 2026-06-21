@@ -31,9 +31,10 @@ import {
   updateEstimateOpening,
 } from '@/lib/estimates-api';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
+import { loadEstimateLinesByOpening } from '@/lib/cpq/estimate-lines-api';
 import { SpecOpeningBuilder } from './SpecOpeningBuilder';
 import { ChooseExistingOpeningDialog } from './ChooseExistingOpeningDialog';
-import type { EstimateOpeningWithItems, OpeningTemplateType } from '@/types';
+import type { EstimateOpeningWithItems, OpeningTemplateType, EstimateLine } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Pricing total helpers
@@ -50,9 +51,33 @@ function openingItemsTotal(opening: EstimateOpeningWithItems): number {
   return itemsTotal + hardwareTotal;
 }
 
+/**
+ * Per-opening sell subtotal from the rule engine's `estimate_line` rows (the
+ * authoritative auditable price). Sums sell of priced, non-suppressed lines.
+ * Returns null when the opening has no engine lines (legacy-only openings).
+ */
+function engineSellSubtotal(lines: EstimateLine[] | undefined): number | null {
+  if (!lines || lines.length === 0) return null;
+  let sum = 0;
+  for (const line of lines) {
+    if (line.lineType === 'INCLUDED') continue;
+    sum += line.sellPrice ?? 0;
+  }
+  return sum;
+}
+
+/**
+ * Per-opening unit subtotal: prefer the engine's auditable sell total, fall back
+ * to the legacy `estimate_items.unitPrice` rollup for openings priced before the
+ * rule engine.
+ */
+function openingUnitSubtotal(opening: EstimateOpeningWithItems, engineSubtotal: number | null): number {
+  return engineSubtotal ?? openingItemsTotal(opening);
+}
+
 /** Total for an opening including the quantity multiplier. */
-function openingTotal(opening: EstimateOpeningWithItems): number {
-  return openingItemsTotal(opening) * opening.quantity;
+function openingTotal(opening: EstimateOpeningWithItems, engineSubtotal: number | null): number {
+  return openingUnitSubtotal(opening, engineSubtotal) * opening.quantity;
 }
 
 /** All priced line items across an opening (top-level + hardware). */
@@ -85,6 +110,8 @@ interface OpeningCardProps {
   deleting: boolean;
   /** Whether any item in this opening has a price (for showing total vs dash). */
   hasAnyPrice: boolean;
+  /** Engine sell subtotal for this opening (null when only legacy prices exist). */
+  engineSubtotal: number | null;
 }
 
 // Detect item category from the stored item_type first, then fall back to label heuristics.
@@ -111,12 +138,12 @@ function countItems(opening: EstimateOpeningWithItems) {
   return { topLevel, hardware: openingHardware + nestedHardware };
 }
 
-function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting, hasAnyPrice }: OpeningCardProps) {
+function OpeningCard({ opening, onDelete, onEdit, onQuantityChange, deleting, hasAnyPrice, engineSubtotal }: OpeningCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [updatingQty, setUpdatingQty] = useState(false);
 
   const { topLevel, hardware } = countItems(opening);
-  const total = openingTotal(opening);
+  const total = openingTotal(opening, engineSubtotal);
 
   const handleQtyStep = async (e: React.MouseEvent, delta: number) => {
     e.stopPropagation();
@@ -370,6 +397,7 @@ export function OpeningsStep({
   // the prop (real for existing estimates, null for new ones) and is updated
   // when createEstimate() resolves the first time.
   const [resolvedId, setResolvedId] = useState<string | null>(estimateId);
+  const [engineLinesByOpening, setEngineLinesByOpening] = useState<Map<string, EstimateLine[]>>(new Map());
   const [loadingOpenings, setLoadingOpenings] = useState(!!estimateId);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [buildDialogOpen, setBuildDialogOpen] = useState(false);
@@ -383,12 +411,18 @@ export function OpeningsStep({
     if (estimateId && !resolvedId) setResolvedId(estimateId);
   }, [estimateId, resolvedId]);
 
-  // Load existing openings only when a real estimate ID is available.
+  // Load existing openings (and their engine sell lines) when an estimate exists.
   useEffect(() => {
     if (!resolvedId) return;
     setLoadingOpenings(true);
-    getEstimateOpenings(resolvedId)
-      .then(setOpenings)
+    Promise.all([
+      getEstimateOpenings(resolvedId),
+      loadEstimateLinesByOpening(resolvedId).catch(() => new Map<string, EstimateLine[]>()),
+    ])
+      .then(([fresh, lines]) => {
+        setOpenings(fresh);
+        setEngineLinesByOpening(lines);
+      })
       .catch((err) => {
         setLoadError(err instanceof Error ? err.message : 'Failed to load openings.');
       })
@@ -443,8 +477,12 @@ export function OpeningsStep({
    */
   const refreshOpenings = async (eid: string) => {
     try {
-      const fresh = await getEstimateOpenings(eid);
+      const [fresh, lines] = await Promise.all([
+        getEstimateOpenings(eid),
+        loadEstimateLinesByOpening(eid).catch(() => new Map<string, EstimateLine[]>()),
+      ]);
       setOpenings(fresh);
+      setEngineLinesByOpening(lines);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Failed to refresh openings.');
     }
@@ -551,7 +589,9 @@ export function OpeningsStep({
             {openings.length > 0 && (
               <div className="space-y-3">
                 {openings.map((opening) => {
-                  const hasAnyPrice = allOpeningItems(opening).some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
+                  const engineSubtotal = engineSellSubtotal(engineLinesByOpening.get(opening.id));
+                  const hasAnyPrice = engineSubtotal !== null
+                    || allOpeningItems(opening).some((i) => i.unitPrice !== null && i.unitPrice !== undefined);
                   return (
                     <OpeningCard
                       key={opening.id}
@@ -561,6 +601,7 @@ export function OpeningsStep({
                       onQuantityChange={handleQuantityChange}
                       deleting={deletingId === opening.id}
                       hasAnyPrice={hasAnyPrice}
+                      engineSubtotal={engineSubtotal}
                     />
                   );
                 })}

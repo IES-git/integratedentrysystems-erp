@@ -203,10 +203,10 @@ function sizeConditions(paths, rowLabel) {
   if (height != null && paths.height) {
     out.push({ fieldPath: paths.height, operator: 'LTE', valueType: 'DIMENSION', value1: height, unit: 'in', inclusiveMax: true, sourcePhrase: rowLabel });
   }
-  // No parseable dimension: keep the label as an EQ so the rule is still addressable.
-  if (out.length === 0 && rowLabel && paths.width) {
-    out.push({ fieldPath: paths.width, operator: 'EQ', value1: String(rowLabel), sourcePhrase: rowLabel });
-  }
+  // NOTE: no EQ fallback. A size-grid row that cannot be parsed to a plausible
+  // dimension would otherwise become an always-true bound ("width <= 2070") or a
+  // single-axis string EQ that over-matches every opening. Returning [] makes the
+  // matrix compiler skip the cell (and warn) instead of mis-pricing.
   return out;
 }
 
@@ -261,6 +261,7 @@ async function compileMatrix(sb, ctx, archetype) {
   const colLabels = grid.columnLabels ?? [];
   const rowLabels = grid.rowLabels ?? [];
   let count = 0;
+  let skippedUnparseableSize = 0;
   for (const cell of grid.cells ?? []) {
     const price = parsePrice(cell.price);
     if (price == null || price <= 0) continue;
@@ -272,8 +273,13 @@ async function compileMatrix(sb, ctx, archetype) {
 
     const colConds = columnConditions(paths, colLabel);
     const sizeConds = sizeConditions(paths, rowLabel);
-    // A base/component matrix row must carry a size axis; otherwise it's noise.
-    if (sizeConds.length === 0) continue;
+    // A base/component matrix row must carry a size axis; otherwise it's noise
+    // or a mis-parsed size code — skip it (and tally) rather than emit a rule
+    // that would over-match every opening.
+    if (sizeConds.length === 0) {
+      if (String(rowLabel).trim()) skippedUnparseableSize++;
+      continue;
+    }
 
     const { exclusiveGroup, priority } = matrixStacking(entityType, archetype, ext, colConds, sizeConds);
     const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
@@ -291,6 +297,9 @@ async function compileMatrix(sb, ctx, archetype) {
       ...sizeConds,
     ]);
     count++;
+  }
+  if (skippedUnparseableSize > 0) {
+    console.warn(`[compile] ${archetype} table ${priceTableId}: skipped ${skippedUnparseableSize} priced cell(s) with an unparseable/implausible size row — re-ingest the size grid for these.`);
   }
   return count;
 }

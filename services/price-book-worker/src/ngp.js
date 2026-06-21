@@ -155,7 +155,10 @@ function ruleBase(documentId, priceTableId, entity, overrides) {
     currency_code: CURRENCY,
     priority: 100,
     stacking_behavior: 'STACK',
-    review_status: 'UNREVIEWED',
+    // The NGP source is an already-normalized, deterministic catalog (no AI
+    // extraction uncertainty), so its compiled rules are pre-approved; they only
+    // go live once the document itself is published.
+    review_status: 'APPROVED',
     ...overrides,
   };
 }

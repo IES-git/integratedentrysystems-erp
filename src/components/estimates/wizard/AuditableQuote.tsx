@@ -29,6 +29,15 @@ function money(n: number | null | undefined): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
 }
 
+/** Renders the matched spec (field → value) compactly, dropping the entity prefix. */
+function formatMatchedConditions(matched: Record<string, unknown> | null): string | null {
+  if (!matched) return null;
+  const parts = Object.entries(matched)
+    .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+    .map(([k, v]) => `${k.includes('.') ? k.slice(k.indexOf('.') + 1).replace(/_/g, ' ') : k} ${String(v)}`);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
 const STATUS_STYLES: Record<EstimateLinePriceStatus, string> = {
   PRICED: 'bg-emerald-50 text-emerald-700 border-emerald-200',
   INCLUDED: 'bg-sky-50 text-sky-700 border-sky-200',
@@ -110,6 +119,11 @@ function LineRow({ line, showMargin }: { line: QuoteLine; showMargin: boolean })
         {line.calculationExpression && (
           <div className="text-muted-foreground mt-0.5">{line.calculationExpression}</div>
         )}
+        {formatMatchedConditions(line.matchedConditions) && (
+          <div className="text-muted-foreground/80 mt-0.5">
+            <span className="opacity-60">matched:</span> {formatMatchedConditions(line.matchedConditions)}
+          </div>
+        )}
         {line.exceptionMessage && (
           <div className="text-destructive mt-0.5">{line.exceptionMessage}</div>
         )}
@@ -161,6 +175,12 @@ function LayerSection({ layer }: { layer: QuoteLayer }) {
       </button>
       {open && (
         <div>
+          {layer.warning && (
+            <div className="flex items-start gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-800 text-[11px] border-b border-amber-200">
+              <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+              <span>{layer.warning}</span>
+            </div>
+          )}
           {showMargin && (
             <div className="flex items-center gap-2 px-3 py-1 bg-muted/20 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide border-b">
               <div className="flex-1">Line</div>

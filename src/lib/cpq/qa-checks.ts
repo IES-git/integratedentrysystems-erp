@@ -59,6 +59,35 @@ export interface QaHardwarePrice {
   netCost: number | null;
 }
 
+/** One enum condition operand to validate against the governed vocabulary. */
+export interface QaCondition {
+  priceRuleId: string;
+  fieldPath: string | null;
+  operator: string;
+  value1: string | null;
+  sourceRegionId: string | null;
+}
+
+/**
+ * Governed vocabulary for an enum spec field: the canonical token set (from
+ * `opening_spec_field.allowed_values`) plus any known raw->canonical aliases
+ * (from `spec_value_alias`). All tokens are lower-cased/trimmed.
+ */
+export interface VocabField {
+  canon: Set<string>;
+  aliases: Map<string, 'alias' | 'reject'>;
+}
+
+const MULTI_VALUE_OPERATORS = new Set(['IN', 'NOT_IN']);
+const VALUE_OPERATORS = new Set(['EQ', 'NE', 'IN', 'NOT_IN']);
+
+function tokenize(value: string, operator: string): string[] {
+  if (MULTI_VALUE_OPERATORS.has(operator)) {
+    return value.split(/[|,]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+  }
+  return [value.trim().toLowerCase()].filter(Boolean);
+}
+
 /** Actions whose price legitimately has no numeric amount. */
 const NON_NUMERIC_ACTIONS = new Set([
   'CONTACT_FACTORY',
@@ -170,6 +199,75 @@ export function evaluateHardwareQa(prices: QaHardwarePrice[]): QaFinding[] {
   return findings;
 }
 
+/**
+ * Vocabulary integrity — every enum condition operand must resolve to a
+ * canonical token in `opening_spec_field.allowed_values` (the same list the
+ * builder offers). A value that the builder can never emit silently kills the
+ * rule, so:
+ *   * canonical token        -> ok
+ *   * known recoverable alias -> WARNING (auto-fixable via spec_value_alias)
+ *   * reject / unknown token  -> ERROR (blocks publication)
+ * Fields not present in `vocab` (non-enum, or unmapped) are skipped.
+ */
+export function evaluateVocabularyQa(conditions: QaCondition[], vocab: Map<string, VocabField>): QaFinding[] {
+  const findings: QaFinding[] = [];
+  for (const c of conditions) {
+    if (!c.fieldPath || !VALUE_OPERATORS.has(c.operator) || c.value1 == null) continue;
+    const field = vocab.get(c.fieldPath);
+    if (!field) continue;
+    for (const token of tokenize(c.value1, c.operator)) {
+      if (token === 'null' || field.canon.has(token)) continue;
+      const aliasStatus = field.aliases.get(token);
+      if (aliasStatus === 'alias') {
+        findings.push({
+          checkName: 'vocab_alias_pending',
+          severity: 'WARNING',
+          priceRuleId: c.priceRuleId,
+          sourceRegionId: c.sourceRegionId,
+          detail: `Condition ${c.fieldPath} value "${token}" is a known alias; run the vocabulary cleanup to canonicalize it.`,
+        });
+      } else {
+        findings.push({
+          checkName: 'vocab_out_of_vocabulary',
+          severity: 'ERROR',
+          priceRuleId: c.priceRuleId,
+          sourceRegionId: c.sourceRegionId,
+          detail: `Condition ${c.fieldPath} value "${token}" is not in the governed vocabulary for this field — the builder can never match it.`,
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+/** One hardware variant for the price-coverage check. */
+export interface QaHardwareVariant {
+  id: string;
+  sku: string | null;
+  category: string;
+  label: string;
+}
+
+/**
+ * Hardware coverage — a variant with no approved price routes to manual quote
+ * with no visibility. Flag each uncovered variant so the gap gets sourced.
+ */
+export function evaluateHardwareCoverage(
+  variants: QaHardwareVariant[],
+  pricedVariantIds: Set<string>,
+): QaFinding[] {
+  const findings: QaFinding[] = [];
+  for (const v of variants) {
+    if (pricedVariantIds.has(v.id)) continue;
+    findings.push({
+      checkName: 'hardware_missing_price',
+      severity: 'ERROR',
+      detail: `Variant ${v.sku ?? v.id} (${v.category} / ${v.label}) has no approved price; selections route to manual quote.`,
+    });
+  }
+  return findings;
+}
+
 /** Dependency coverage — a published book should carry at least some narrative deps. */
 export function evaluateDependencyCoverage(ruleCount: number, dependencyCount: number): QaFinding[] {
   if (ruleCount > 0 && dependencyCount === 0) {
@@ -189,12 +287,53 @@ export function evaluateQa(input: {
   rules: QaRule[];
   hardwarePrices: QaHardwarePrice[];
   dependencyCount: number;
+  conditions?: QaCondition[];
+  vocab?: Map<string, VocabField>;
+  hardwareVariants?: QaHardwareVariant[];
+  pricedVariantIds?: Set<string>;
 }): QaResult {
   return summarize([
     ...evaluateRuleQa(input.rules),
     ...evaluateHardwareQa(input.hardwarePrices),
     ...evaluateDependencyCoverage(input.rules.length, input.dependencyCount),
+    ...(input.conditions && input.vocab ? evaluateVocabularyQa(input.conditions, input.vocab) : []),
+    ...(input.hardwareVariants && input.pricedVariantIds
+      ? evaluateHardwareCoverage(input.hardwareVariants, input.pricedVariantIds)
+      : []),
   ]);
+}
+
+/**
+ * Loads the governed vocabulary: canonical tokens from
+ * `opening_spec_field.allowed_values` (keyed by spec_field_mapping.field_path)
+ * plus raw->status aliases from `spec_value_alias`. All tokens lower-cased.
+ */
+export async function loadGovernedVocabulary(): Promise<Map<string, VocabField>> {
+  const [{ data: fields, error: fErr }, { data: aliases, error: aErr }] = await Promise.all([
+    supabase
+      .from('spec_field_mapping')
+      .select('field_path, opening_spec_field!inner(data_type, allowed_values)'),
+    supabase.from('spec_value_alias').select('field_path, raw_value, status'),
+  ]);
+  if (fErr) throw new Error(`QA: failed to load spec field vocabulary: ${fErr.message}`);
+  if (aErr) throw new Error(`QA: failed to load value aliases: ${aErr.message}`);
+
+  const vocab = new Map<string, VocabField>();
+  for (const row of fields ?? []) {
+    const r = row as { field_path: string; opening_spec_field: { data_type?: string; allowed_values?: string | null } | null };
+    const field = r.opening_spec_field;
+    if (!field || field.data_type !== 'Enum' || !field.allowed_values) continue;
+    const canon = new Set(
+      field.allowed_values.split(';').map((t) => t.trim().toLowerCase()).filter(Boolean),
+    );
+    vocab.set(r.field_path, { canon, aliases: new Map() });
+  }
+  for (const row of aliases ?? []) {
+    const a = row as { field_path: string; raw_value: string; status: 'alias' | 'reject' };
+    const entry = vocab.get(a.field_path);
+    if (entry) entry.aliases.set(a.raw_value.trim().toLowerCase(), a.status);
+  }
+  return vocab;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,14 +349,21 @@ function conditionsKey(conds: Record<string, unknown>[]): string {
 
 /** Loads a document's rules + hardware prices and runs the QA evaluators. */
 export async function runQaChecks(documentId: string): Promise<QaResult> {
-  const [{ data: ruleRows, error: rErr }, { data: depRows, error: dErr }, { data: priceRows, error: pErr }] = await Promise.all([
+  const [
+    { data: ruleRows, error: rErr },
+    { data: depRows, error: dErr },
+    { data: priceRows, error: pErr },
+    { data: variantRows, error: vErr },
+  ] = await Promise.all([
     supabase.from('price_rule').select('*, rule_condition(field_path, field_id, operator, value_1, value_2)').eq('price_book_id', documentId),
     supabase.from('dependency_rule').select('id', { count: 'exact' }).eq('price_book_id', documentId),
     supabase.from('hardware_price').select('id, list_price, discount_multiplier, net_cost').neq('review_status', 'REJECTED'),
+    supabase.from('hardware_variant').select('id, sku, hardware_product(category, model, description)'),
   ]);
   if (rErr) throw new Error(`QA: failed to load rules: ${rErr.message}`);
   if (dErr) throw new Error(`QA: failed to load dependency rules: ${dErr.message}`);
   if (pErr) throw new Error(`QA: failed to load hardware prices: ${pErr.message}`);
+  if (vErr) throw new Error(`QA: failed to load hardware variants: ${vErr.message}`);
 
   const rules: QaRule[] = (ruleRows ?? []).map((row) => {
     const r = row as Record<string, unknown>;
@@ -250,7 +396,49 @@ export async function runQaChecks(documentId: string): Promise<QaResult> {
     };
   });
 
-  return evaluateQa({ rules, hardwarePrices, dependencyCount: depRows?.length ?? 0 });
+  // Flatten every condition for the vocabulary gate and load the governed vocab.
+  const conditions: QaCondition[] = [];
+  for (const row of ruleRows ?? []) {
+    const r = row as Record<string, unknown>;
+    for (const cond of (r.rule_condition as Record<string, unknown>[] | undefined) ?? []) {
+      conditions.push({
+        priceRuleId: r.id as string,
+        fieldPath: (cond.field_path as string | null) ?? null,
+        operator: (cond.operator as string) ?? 'EQ',
+        value1: (cond.value_1 as string | null) ?? null,
+        sourceRegionId: (r.source_region_id as string | null) ?? null,
+      });
+    }
+  }
+  const vocab = await loadGovernedVocabulary();
+
+  // Hardware coverage: variants vs the set that has an approved price.
+  const hardwareVariants: QaHardwareVariant[] = (variantRows ?? []).map((row) => {
+    const v = row as { id: string; sku: string | null; hardware_product: { category?: string; model?: string | null; description?: string | null } | null };
+    const p = v.hardware_product;
+    return {
+      id: v.id,
+      sku: v.sku,
+      category: p?.category ?? '',
+      label: p?.model ?? p?.description ?? 'unnamed',
+    };
+  });
+  const { data: pricedRows, error: pvErr } = await supabase
+    .from('hardware_price')
+    .select('hardware_variant_id')
+    .eq('review_status', 'APPROVED');
+  if (pvErr) throw new Error(`QA: failed to load priced hardware variants: ${pvErr.message}`);
+  const pricedVariantIds = new Set((pricedRows ?? []).map((r) => (r as { hardware_variant_id: string }).hardware_variant_id));
+
+  return evaluateQa({
+    rules,
+    hardwarePrices,
+    dependencyCount: depRows?.length ?? 0,
+    conditions,
+    vocab,
+    hardwareVariants,
+    pricedVariantIds,
+  });
 }
 
 /** Runs QA, replaces the document's open qa_issue rows, and returns the result. */

@@ -9,8 +9,13 @@ import {
   optionLabelsForField,
   deriveHardwareIntelligence,
   validateBuilderIntegrity,
+  availableBaseValues,
+  forcedBaseValues,
+  autoFillBaseValues,
+  priceableEnumOptions,
   type OptionDescriptors,
 } from '@/lib/cpq/builder-logic';
+import type { BaseSignature } from '@/lib/cpq-catalog-api';
 import { hingesPerLeaf } from '@/components/estimates/wizard/opening-rules';
 import { createOpeningDraft, buildNormalizedSpec, type OpeningDraft, type ComponentDraft } from '@/lib/cpq/opening-spec';
 import type { SpecFieldWithPath } from '@/lib/cpq-catalog-api';
@@ -425,5 +430,64 @@ describe('validateBuilderIntegrity (foolproof gate)', () => {
       frames: [frame({ 'frame.frame_series': 'F50' })],
     });
     expect(validateBuilderIntegrity(good).some((i) => i.severity === 'block')).toBe(false);
+  });
+});
+
+describe('priceable-combination filtering (only offer values that price)', () => {
+  // CH is CRS-only; H exists in CRS + Galvannealed; gauges 16/18.
+  const signatures: BaseSignature[] = [
+    { 'door.door_series_construction': 'CH', 'door.door_material': 'CRS', 'door.door_gauge': '16' },
+    { 'door.door_series_construction': 'CH', 'door.door_material': 'CRS', 'door.door_gauge': '18' },
+    { 'door.door_series_construction': 'H', 'door.door_material': 'CRS', 'door.door_gauge': '16' },
+    { 'door.door_series_construction': 'H', 'door.door_material': 'Galvannealed', 'door.door_gauge': '16' },
+  ];
+
+  it('cascades material options from the chosen series', () => {
+    expect(availableBaseValues(signatures, 'door.door_material', { 'door.door_series_construction': 'CH' }).sort())
+      .toEqual(['CRS']);
+    expect(availableBaseValues(signatures, 'door.door_material', { 'door.door_series_construction': 'H' }).sort())
+      .toEqual(['CRS', 'Galvannealed']);
+  });
+
+  it('forces the only priceable material once a CRS-only series is chosen', () => {
+    const comp = door({ 'door.door_series_construction': 'CH' });
+    expect(forcedBaseValues(comp, signatures)['door.door_material']).toBe('CRS');
+  });
+
+  it('does not force material when multiple are priceable', () => {
+    const comp = door({ 'door.door_series_construction': 'H' });
+    expect(forcedBaseValues(comp, signatures)['door.door_material']).toBeUndefined();
+  });
+
+  it('restricts a field enum to priceable values, with a non-empty safeguard', () => {
+    const matField = makeField('DOR-007', 'door', { fieldPath: 'door.door_material' });
+    const comp = door({ 'door.door_series_construction': 'CH' });
+    expect(priceableEnumOptions(['CRS', 'Galvannealed', 'Stainless'], matField, comp, signatures)).toEqual(['CRS']);
+    // Unknown field path → unchanged.
+    const other = makeField('DOR-099', 'door', { fieldPath: 'door.unrelated' });
+    expect(priceableEnumOptions(['a', 'b'], other, comp, signatures)).toEqual(['a', 'b']);
+  });
+
+  // Frame: F base needs a specific jamb depth (4¾/6¾/8¾) — a mandatory pick that
+  // should auto-default so the frame prices without manual entry.
+  const frameSigs: BaseSignature[] = [
+    { 'frame.frame_series': 'F', 'frame.frame_gauge': '16', 'frame.jamb_depth': '4 3/4' },
+    { 'frame.frame_series': 'F', 'frame.frame_gauge': '16', 'frame.jamb_depth': '6 3/4' },
+    { 'frame.frame_series': 'F', 'frame.frame_gauge': '16', 'frame.jamb_depth': '8 3/4' },
+  ];
+
+  it('auto-fills mandatory base fields once the series is chosen', () => {
+    const comp = frame({ 'frame.frame_series': 'F' });
+    const filled = autoFillBaseValues(comp, frameSigs);
+    expect(filled['frame.frame_gauge']).toBe('16');
+    expect(['4 3/4', '6 3/4', '8 3/4']).toContain(filled['frame.jamb_depth']);
+  });
+
+  it('does not auto-fill before the series is chosen', () => {
+    expect(autoFillBaseValues(frame({}), frameSigs)).toEqual({});
+  });
+
+  it('forces a CRS-only material via auto-fill once a CRS series is chosen', () => {
+    expect(autoFillBaseValues(door({ 'door.door_series_construction': 'CH' }), signatures)['door.door_material']).toBe('CRS');
   });
 });

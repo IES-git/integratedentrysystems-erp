@@ -41,7 +41,7 @@ import type {
 } from './engine-types';
 import { evaluateConditions } from './conditions';
 import { resolveAction, type ActionContext } from './actions';
-import { loadHardwareCatalog, loadRuleSet, loadVariantsWithPrices, type HardwareCatalog, type LoadedRuleSet } from './loader';
+import { loadHardwareCatalog, loadRuleSet, loadNgpScopedRuleSet, loadVariantsWithPrices, type HardwareCatalog, type LoadedRuleSet } from './loader';
 import { priceHardware, type PrepRequirement } from './hardware';
 import { parseDoorDimension } from '@/components/pricing/dimension-utils';
 import { loadNgpCatalog, resolveActiveNgpDocument } from '@/lib/ngp-catalog-api';
@@ -303,16 +303,18 @@ function pricePreps(
     );
     const priced = priceComponent(spec, comp, prepRules, options, sort);
     if (priced.lines.length === 0) {
-      // No prep rule at all: surface as an exception line (Pioneer prep charge missing).
+      // No separate prep charge published → standard hardware prep (hinge/lock/
+      // strike machining) is INCLUDED in the door/frame base price. Non-blocking
+      // (an INCLUDED line, not an exception) so a complete opening can finalize.
       lines.push({
-        lineType: 'WARNING', priceRuleId: null, entityType: 'prep', chargeCategory: 'prep',
-        description: comp.label, selectedOptionCode: comp.code, quantity: comp.quantity, unitOfMeasure: null,
-        unitListPrice: null, extendedListPrice: null, discountMultiplier: null, extendedNetPrice: null,
-        sellPrice: null, grossMargin: null, grossMarginPct: null, priceStatus: 'INVALID',
-        calculationExpression: 'No Pioneer prep price rule matched',
+        lineType: 'INCLUDED', priceRuleId: null, entityType: 'prep', chargeCategory: 'prep',
+        description: `${comp.label} — included in base`, selectedOptionCode: comp.code, quantity: comp.quantity, unitOfMeasure: null,
+        unitListPrice: 0, extendedListPrice: 0, discountMultiplier: null, extendedNetPrice: 0,
+        sellPrice: 0, grossMargin: null, grossMarginPct: null, priceStatus: 'INCLUDED',
+        calculationExpression: 'Prep included in door/frame base price (no separate charge published)',
         matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
         priceBookId: options.priceBookId, confidence: null,
-        exceptionMessage: `No Pioneer prep price for "${comp.code}" — prep-vs-device reconciliation pending.`,
+        exceptionMessage: null,
         componentId: null, sortOrder: sort++,
       });
       continue;
@@ -586,14 +588,30 @@ function fmtUsd(n: number): string {
  * (the latest published Pioneer document).
  */
 export async function resolveActivePriceBookDocument(): Promise<string | null> {
+  // The base book is the published document that actually carries door/frame base
+  // prices — NOT the NGP infill or Hardware documents (which are also published).
+  // Resolving by "latest published" alone is ambiguous when several docs share a
+  // null effective date, so pin to the doc that has APPROVED door base rules.
   const { data } = await supabase
+    .from('price_rule')
+    .select('price_book_id, price_book_document!inner(id, status, effective_date)')
+    .eq('entity_type', 'door')
+    .eq('action_type', 'BASE_AMOUNT')
+    .eq('review_status', 'APPROVED')
+    .eq('price_book_document.status', 'published')
+    .order('effective_date', { ascending: false, foreignTable: 'price_book_document', nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+  if (data?.price_book_id) return data.price_book_id as string;
+  // Fallback: latest published document (legacy behavior).
+  const { data: doc } = await supabase
     .from('price_book_document')
     .select('id')
     .eq('status', 'published')
     .order('effective_date', { ascending: false })
     .limit(1)
     .maybeSingle();
-  return (data?.id as string | undefined) ?? null;
+  return (doc?.id as string | undefined) ?? null;
 }
 
 /**
@@ -695,10 +713,21 @@ export async function priceOpening(
   const documentId = options.priceBookDocumentId ?? (await resolveActivePriceBookDocument());
   const ngpDocumentId = await resolveActiveNgpDocument();
 
+  // Only load the NGP rules this opening references (resolved price tables + tape
+  // models) — a full NGP book is ~18k rules.
+  const ngpTableIds = spec.components
+    .filter((c) => NGP_ENTITY_SET.has(c.entityType))
+    .map((c) => (c.fields['infill.price_table_id'] != null ? String(c.fields['infill.price_table_id']) : ''))
+    .filter(Boolean);
+  const ngpTapeModels = spec.components
+    .filter((c) => c.entityType === 'glazing_tape')
+    .map((c) => (c.fields['infill.tape_model'] != null ? String(c.fields['infill.tape_model']) : c.code ?? ''))
+    .filter(Boolean);
+
   const [ruleSet, catalog, ngpRuleSet, ngpCatalog] = await Promise.all([
     documentId ? loadRuleSet(documentId, pricedAsOf) : Promise.resolve<LoadedRuleSet>({ rules: [], dependencyRules: [] }),
     loadHardwareCatalog(pricedAsOf),
-    ngpDocumentId ? loadRuleSet(ngpDocumentId, pricedAsOf) : Promise.resolve<LoadedRuleSet>({ rules: [], dependencyRules: [] }),
+    loadNgpScopedRuleSet(ngpDocumentId, ngpTableIds, ngpTapeModels, pricedAsOf),
     loadNgpCatalog(ngpDocumentId),
   ]);
 

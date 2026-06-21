@@ -7,8 +7,9 @@
  *
  * This module remains ONLY to serve legacy grid consumers (the old builders,
  * QuoteBuilderPage, CompareVendorsPanel, cpq/service.ts) until the Phase 6
- * cutover drops the legacy `pricing_*` grid tables and deletes this file. Do not
- * add new callers — use `@/lib/pricing` instead.
+ * cutover (TARGET 2026-07-15) drops the legacy `pricing_*` grid tables (see
+ * db/migrations/retire_legacy_grid.sql) and deletes this file. Do not add new
+ * callers — use `@/lib/pricing` instead.
  *
  * Runtime pricing lookup engine.
  *
