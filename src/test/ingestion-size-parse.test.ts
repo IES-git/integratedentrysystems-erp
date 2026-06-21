@@ -5,6 +5,8 @@ import {
   parseSizeLabel,
   decodeCompactSizeCode,
   MAX_NOMINAL_WIDTH_IN,
+  parseFrameOpeningRow,
+  classifyArchetype,
 } from '../../services/price-book-worker/src/normalize.js';
 
 describe('ingestion size-label parsing', () => {
@@ -43,5 +45,49 @@ describe('ingestion size-label parsing', () => {
     expect(decodeCompactSizeCode('207')).toBeNull();
     expect(decodeCompactSizeCode('20700')).toBeNull();
     expect(decodeCompactSizeCode('abcd')).toBeNull();
+  });
+});
+
+describe('frame complete-opening row parsing', () => {
+  it('parses the F-series format (height SINGLE/PAIR OPENING widths)', () => {
+    expect(parseFrameOpeningRow('7-0 SINGLE OPENING (3S) 2-6, 2-8, 2-10, 3-0 | 16 GAGE MATERIAL 6 3/4"'))
+      .toEqual({ heightIn: 84, openingType: '3S' });
+    expect(parseFrameOpeningRow('6-8 PAIR OPENING (3P) 4-0 | 16 GAGE MATERIAL 4 3/4"'))
+      .toEqual({ heightIn: 80, openingType: '3P' });
+  });
+
+  it('parses the DW-series pipe-delimited format', () => {
+    expect(parseFrameOpeningRow('6-8 | PAIR OPENING (3P) | 6-8, 7-0, 7-4, 7-8, 8-0 | 18 GAGE MATERIAL | 6 5/8"'))
+      .toEqual({ heightIn: 80, openingType: '3P' });
+  });
+
+  it('uses the larger height for a combined "7-10 & 8-0" row', () => {
+    expect(parseFrameOpeningRow('7-10 & 8-0 | SINGLE OPENING (3S) | 2-0, 2-4 | 14 GAGE MATERIAL | 5-1/2"'))
+      .toEqual({ heightIn: 96, openingType: '3S' });
+  });
+
+  it('returns nulls for component/head/jamb rows (not complete openings)', () => {
+    expect(parseFrameOpeningRow('2" Single (H) 2-6, 2-8, 2-10, 3-0 | 16 GAGE MATERIAL 6 3/4"'))
+      .toEqual({ heightIn: null, openingType: null });
+    expect(parseFrameOpeningRow('Strike (SJ) 6-8 | 16 GAGE MATERIAL 6 3/4"'))
+      .toEqual({ heightIn: null, openingType: null });
+  });
+});
+
+describe('frame table archetype classification', () => {
+  const grid = { cells: [{}], rowLabels: ['7-0 SINGLE OPENING (3S) 3-0'], columnLabels: ['16 GAGE 6 3/4"', 'x', 'y'] };
+  it('keeps complete frame unit tables as a base matrix', () => {
+    expect(classifyArchetype({ title: 'F Series - Complete 3 Sided Frame Units', detectedCategory: 'frames' }, grid)).toBe('base_matrix');
+  });
+  it('demotes component/heads-&-jambs, mullion, sill and stick-jamb tables off the base matrix', () => {
+    for (const title of [
+      'F Series - Component Parts / Heads & Jambs',
+      'DW Series - Component Parts / Headers & Jambs',
+      'Stick Material 16 Gage - Intermediate Mullions',
+      'Stick Material 16 Gage - Sill Components',
+      'Stick Material 14 Gage - Stick Jambs',
+    ]) {
+      expect(classifyArchetype({ title, detectedCategory: 'frames' }, grid)).not.toBe('base_matrix');
+    }
   });
 });

@@ -200,6 +200,29 @@ export function parseSizeLabel(label) {
   return { width: null, height: null };
 }
 
+/**
+ * Parse a "Complete … Frame Unit" row label into the door HEIGHT and opening
+ * TYPE the row prices, e.g.:
+ *   "7-0 SINGLE OPENING (3S) 2-6, 2-8, 2-10, 3-0 | 16 GAGE …"  -> { heightIn:84, openingType:'3S' }
+ *   "6-8 | PAIR OPENING (3P) | 6-8, 7-0, … | 18 GAGE …"        -> { heightIn:80, openingType:'3P' }
+ *   "7-10 & 8-0 | SINGLE OPENING (3S) | 2-0, 2-4 | …"          -> { heightIn:96, openingType:'3S' }
+ * The leading token is the door height (a combined "7-10 & 8-0" row uses the
+ * larger height as the LTE bound). Returns nulls when the row is not a complete
+ * opening row (so component/option rows are unaffected).
+ *
+ * @param {string} label
+ * @returns {{ heightIn: number|null, openingType: '3S'|'3P'|null }}
+ */
+export function parseFrameOpeningRow(label) {
+  const s = String(label ?? '').trim();
+  const m = s.match(/^\s*([0-9]+\s*[-'’]\s*[0-9]+(?:\s*&\s*[0-9]+\s*[-'’]\s*[0-9]+)?)\s*\|?\s*(single|pair)\s+opening/i);
+  if (!m) return { heightIn: null, openingType: null };
+  const heights = m[1].split('&').map((t) => feetInchesToInches(t.trim())).filter((n) => n != null);
+  const heightIn = heights.length ? plausible(Math.max(...heights), MAX_NOMINAL_HEIGHT_IN) : null;
+  const openingType = /single/i.test(m[2]) ? '3S' : '3P';
+  return { heightIn, openingType };
+}
+
 /** "3-0" / "3'0\"" / "3' 0\"" -> inches. Bare numbers are returned as-is (the
  *  caller clamps via `plausible`); use `parseSizeLabel` for size labels. */
 export function feetInchesToInches(raw) {
@@ -234,6 +257,15 @@ export function classifyArchetype(meta, grid) {
 
   // No prices at all -> narrative / notes table.
   if (cells.length === 0) return 'narrative';
+
+  // Frame COMPONENT/PART tables (heads & jambs, mullions, sill components, stick
+  // jambs) are NOT complete frames. They must never compile as a base/size matrix
+  // (their part prices — e.g. a $44 head — would otherwise compete as a full-frame
+  // base price). Route them to the adder list so they price as options, never base.
+  // "Complete … Frame Units" tables do NOT match these patterns and stay base.
+  if (/component part|heads?\s*&?\s*jambs?|headers?\s*&?\s*jambs?|mullion|sill component|stick jamb/.test(hay)) {
+    return 'code_adder_list';
+  }
 
   if (/contact factory|consult factory/.test(hay)) return 'contact_factory';
   if (/oversize|over size|over-size/.test(hay)) return 'size_oversize';
@@ -280,7 +312,7 @@ export function fieldPaths(entityType) {
     case 'door':
       return { series: 'door.door_series_construction', gauge: 'door.door_gauge', material: 'door.door_material', width: 'door.nominal_door_width', height: 'door.nominal_door_height', depth: null };
     case 'frame':
-      return { series: 'frame.frame_series', gauge: 'frame.frame_gauge', material: 'frame.frame_material', width: 'frame.nominal_frame_width', height: 'frame.nominal_frame_height', depth: 'frame.jamb_depth' };
+      return { series: 'frame.frame_series', gauge: 'frame.frame_gauge', material: 'frame.frame_material', width: 'frame.nominal_frame_width', height: 'frame.nominal_frame_height', depth: 'frame.jamb_depth', type: 'frame.frame_type' };
     case 'panel':
       return { series: 'panel.panel_construction_series', gauge: 'panel.panel_gauge', material: 'panel.panel_material', width: 'panel.panel_width', height: 'panel.panel_height', depth: null };
     default:

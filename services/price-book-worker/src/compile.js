@@ -18,6 +18,7 @@ import {
   fieldPaths,
   flattenColumnHeader,
   parseSizeLabel,
+  parseFrameOpeningRow,
   normalizeToken,
   parsePrice,
 } from './normalize.js';
@@ -343,6 +344,22 @@ async function compileMatrix(sb, ctx, archetype) {
     const colConds = colRes.conds;
 
     const sizeConds = sizeConditions(paths, rowLabel);
+    // Frame "Complete … Frame Unit" rows encode the door HEIGHT and SINGLE/PAIR
+    // opening type in the row label (e.g. "7-0 SINGLE OPENING (3S) 2-6,…,3-0").
+    // Capture height as a size bound (so the tightest enclosing height wins, via
+    // matrixStacking priority) and opening type as a match condition (so a single
+    // opening can't price off a pair row, and vice-versa). Without this, width-
+    // only matching conflated 6-8/7-0/7-2 and single/pair into one wrong cell.
+    const frameConds = [];
+    if (entityType === 'frame') {
+      const fr = parseFrameOpeningRow(rowLabel);
+      if (fr.heightIn != null && paths.height && !sizeConds.some((c) => /height/i.test(c.fieldPath ?? ''))) {
+        sizeConds.push({ fieldPath: paths.height, operator: 'LTE', valueType: 'DIMENSION', value1: String(fr.heightIn), unit: 'in', inclusiveMax: true, sourcePhrase: rowLabel });
+      }
+      if (fr.openingType && paths.type) {
+        frameConds.push({ fieldPath: paths.type, operator: 'EQ', valueType: 'CODE', value1: fr.openingType, sourcePhrase: rowLabel });
+      }
+    }
     // A base/component matrix row must carry a size axis; otherwise it's noise
     // or a mis-parsed size code — skip it (and tally) rather than emit a rule
     // that would over-match every opening.
@@ -365,6 +382,7 @@ async function compileMatrix(sb, ctx, archetype) {
       ...seriesRes.conds,
       ...colConds,
       ...sizeConds,
+      ...frameConds,
     ]);
     count++;
   }
