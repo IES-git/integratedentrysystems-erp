@@ -231,11 +231,16 @@ export function matchCrosswalk(
   const want = slug(category);
   const exact = prepCrosswalk.find((r) => slug(r.hardwareCategory) === want);
   if (exact) return exact;
-  // Guarded legacy fallback (kept narrow so it cannot silently mis-route).
+  // Token-overlap fallback: the seeded crosswalk is still keyed by DESCRIPTIVE
+  // names ("Butt hinge 4-1/2 standard weight", "Cylindrical lock"), not the
+  // canonical category slugs, so exact/id matching above won't hit until the
+  // crosswalk is re-keyed. Match the best-scoring row (>= 0.34) so requested
+  // categories like `butt_hinges` / `cylindrical_mortise_locks_and_deadbolts`
+  // still resolve their door/frame preps.
   let best: { row: HardwarePrepCrosswalk; score: number } | null = null;
   for (const row of prepCrosswalk) {
     const score = similarity(category, row.hardwareCategory);
-    if (score >= 0.6 && (!best || score > best.score)) best = { row, score };
+    if (score >= 0.34 && (!best || score > best.score)) best = { row, score };
   }
   return best?.row ?? null;
 }

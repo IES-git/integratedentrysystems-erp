@@ -552,6 +552,23 @@ describe('priceable-combination filtering (only offer values that price)', () =>
     expect(autoFillBaseValues(frame({}), frameSigs)).toEqual({});
   });
 
+  it('generates a guided dropdown for a free Dimension base field (jamb depth)', () => {
+    // FRM-010 jamb depth has NO dictionary enum, but the price book defines the
+    // valid depths for F/16 — they should be offered (sorted ascending).
+    const jamb = makeField('FRM-010', 'frame', { fieldPath: 'frame.jamb_depth', dataType: 'Dimension', enumOptions: [] });
+    const comp = frame({ 'frame.frame_series': 'F', 'frame.frame_gauge': '16' });
+    expect(priceableEnumOptions(null, jamb, comp, frameSigs)).toEqual(['4 3/4', '6 3/4', '8 3/4']);
+  });
+
+  it('narrows the generated jamb-depth options to the current selection', () => {
+    const sigs: BaseSignature[] = [
+      { 'frame.frame_series': 'F', 'frame.frame_gauge': '16', 'frame.jamb_depth': '4 3/4' },
+      { 'frame.frame_series': 'F', 'frame.frame_gauge': '14', 'frame.jamb_depth': '8 3/4' },
+    ];
+    const jamb = makeField('FRM-010', 'frame', { fieldPath: 'frame.jamb_depth', dataType: 'Dimension', enumOptions: [] });
+    expect(priceableEnumOptions(null, jamb, frame({ 'frame.frame_series': 'F', 'frame.frame_gauge': '16' }), sigs)).toEqual(['4 3/4']);
+  });
+
   it('forces a CRS-only material via auto-fill once a CRS series is chosen', () => {
     expect(autoFillBaseValues(door({ 'door.door_series_construction': 'CH' }), signatures)['door.door_material']).toBe('CRS');
   });

@@ -915,15 +915,44 @@ export function priceableEnumOptions(
   if (!field.fieldPath || signatures.length === 0) return base;
   const paths = baseFieldPaths(signatures);
   if (!paths.includes(field.fieldPath)) return base;
+  const selection = componentBaseSelection(comp, paths);
+  const priceable = availableBaseValues(signatures, field.fieldPath, selection);
   // `base` is null when the compatibility layer imposed no restriction — in that
   // case filter the field's full enum so priceability still applies.
   const candidates = base ?? field.enumOptions;
-  if (!candidates || candidates.length === 0) return base;
-  const selection = componentBaseSelection(comp, paths);
-  const allowed = new Set(availableBaseValues(signatures, field.fieldPath, selection).map(normVal));
+  if (!candidates || candidates.length === 0) {
+    // The dictionary has no enum for this base field (e.g. jamb depth is a free
+    // "Dimension"), but the price book DOES define which values are valid for the
+    // current series/gauge — surface them as a guided dropdown instead of a blank
+    // text box. Sorted so dimension-like values read in ascending order.
+    return priceable.length > 0 ? sortDimensionLike(priceable) : base;
+  }
+  const allowed = new Set(priceable.map(normVal));
   const filtered = candidates.filter((o) => allowed.has(normVal(o)));
   // Safeguard: never hide everything (avoids an un-pickable field on odd data).
   return filtered.length > 0 ? filtered : (base ?? candidates);
+}
+
+/** Parses a dimension-like token ("6 3/4", "4-3/4", "36") to inches for sorting. */
+function dimensionValue(raw: string): number | null {
+  const s = String(raw).trim();
+  const m = /^(\d+)(?:\s*[-\s]\s*(\d+)\s*\/\s*(\d+))?$/.exec(s);
+  if (m) {
+    const whole = Number(m[1]);
+    const frac = m[2] && m[3] ? Number(m[2]) / Number(m[3]) : 0;
+    return whole + frac;
+  }
+  const n = Number(s.replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Sorts values numerically when they all look like dimensions, else alphabetically. */
+function sortDimensionLike(values: string[]): string[] {
+  const parsed = values.map((v) => ({ v, n: dimensionValue(v) }));
+  if (parsed.every((p) => p.n != null)) {
+    return [...parsed].sort((a, b) => (a.n as number) - (b.n as number)).map((p) => p.v);
+  }
+  return [...values].sort((a, b) => a.localeCompare(b));
 }
 
 /**

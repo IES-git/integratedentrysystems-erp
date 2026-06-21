@@ -74,8 +74,8 @@ describe('status semantics — never a silent zero', () => {
     expect(res.lines.some((l) => l.lineType === 'INCLUDED' && /not applicable/i.test(l.calculationExpression))).toBe(false);
   });
 
-  it('a missing prep price routes to manual review (not assumed included)', () => {
-    // Hardware needs a HINGE prep, but the rule set publishes NO prep rule.
+  it('a missing SPECIAL prep price routes to manual review (not assumed included)', () => {
+    // Hardware needs a non-standard prep, but the rule set publishes NO prep rule.
     const catalog: HardwareCatalog = {
       ...emptyCatalog,
       setTemplates: [{
@@ -86,7 +86,7 @@ describe('status semantics — never a silent zero', () => {
       }],
       prepCrosswalk: [{
         id: 'cw', hardwareCategory: 'butt_hinges', hardwareProductId: null, hardwareVariantId: null,
-        doorPrepCode: 'HINGE', framePrepCode: 'HINGEF', templateId: null, handRequired: false, locationRequired: false,
+        doorPrepCode: 'SPECIALX', framePrepCode: 'SPECIALY', templateId: null, handRequired: false, locationRequired: false,
         additionalRequiredFields: null, quantityBasis: 'per_device', pricingBehavior: 'separate_line', notes: null,
         createdAt: '', updatedAt: '',
       }],
@@ -108,6 +108,39 @@ describe('status semantics — never a silent zero', () => {
     expect(prepLine?.priceStatus).toBe('INVALID');
     expect(prepLine?.lineType).not.toBe('INCLUDED');
     expect(res.manualQuotes.some((m) => m.reason === 'MISSING_PRICE')).toBe(true);
+  });
+
+  it('a missing STANDARD machined prep (e.g. butt-hinge 450) is included (N/C), not blocking', () => {
+    const catalog: HardwareCatalog = {
+      ...emptyCatalog,
+      setTemplates: [{
+        id: 'set', name: 'single', useCase: 'single', fireRated: false, accessControlled: false,
+        ratedFlags: {}, selectionConditions: { configuration_type: 'single' },
+        createdAt: '', updatedAt: '',
+        items: [{ id: 'i1', hardwareSetTemplateId: 'set', category: 'butt_hinges', quantityFormula: '3', required: true, position: 1, compatibleVariants: {}, createdAt: '' }],
+      }],
+      prepCrosswalk: [{
+        id: 'cw', hardwareCategory: 'butt_hinges', hardwareProductId: null, hardwareVariantId: null,
+        doorPrepCode: '450--', framePrepCode: '450--', templateId: null, handRequired: false, locationRequired: false,
+        additionalRequiredFields: null, quantityBasis: 'per_device', pricingBehavior: 'standard prep included', notes: null,
+        createdAt: '', updatedAt: '',
+      }],
+    };
+    const spec = buildGoldenSpec({
+      id: 'sp', label: 'standard prep', configurationType: 'single', leafCount: 1, fireLabel: false,
+      doorWidths: ['3-0'], doorQtys: [1], frameQty: 1, openingQty: 1,
+    });
+    spec.hardware = [{ category: 'butt_hinges', variantId: 'v1', quantity: 3, required: true, source: 'set_template' }];
+    const variantMap = new Map<string, VariantWithPrice>([['v1', {
+      category: 'butt_hinges',
+      variant: { id: 'v1', hardwareProductId: 'p1', sku: 'HG-1', function: null, finish: null, size: null, hand: null, voltage: null, rating: null, material: null, optionAttributes: {}, createdAt: '', updatedAt: '' },
+      price: { id: 'pr1', hardwareVariantId: 'v1', hardwarePriceBookId: null, listPrice: 50, discountMultiplier: 0.5, netCost: 25, uom: 'each', effectiveFrom: null, effectiveTo: null, minimumQuantity: null, sourceRowRef: null, reviewStatus: 'APPROVED', createdAt: '', updatedAt: '' },
+    }]]);
+    const res = priceOpeningCore(spec, buildGoldenRuleSet(), catalog, variantMap, opts);
+    const prepLines = res.lines.filter((l) => l.entityType === 'prep');
+    expect(prepLines.length).toBeGreaterThan(0);
+    expect(prepLines.every((l) => l.lineType === 'INCLUDED' && l.priceStatus === 'INCLUDED')).toBe(true);
+    expect(res.manualQuotes.some((m) => m.reason === 'MISSING_PRICE')).toBe(false);
   });
 });
 

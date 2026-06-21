@@ -48,7 +48,7 @@ import { priceOpeningLive } from '@/lib/cpq/live-pricing';
 import { buildNormalizedSpec, createOpeningDraft, createCutoutDraft, type OpeningDraft, type ComponentDraft, type HardwareSelectionDraft, type CutoutDraft } from '@/lib/cpq/opening-spec';
 import { saveOpeningDraft, loadOpeningCutouts, loadOpeningDraft } from '@/lib/cpq/opening-persist';
 import { loadNgpCatalog, emptyNgpCatalog, type NgpCatalog } from '@/lib/ngp-catalog-api';
-import { resolveOpeningSpecFromDb } from '@/lib/cpq/resolver';
+import { resolveOpeningSpecFromDb, withTimeout } from '@/lib/cpq/resolver';
 import { resolveInfill, type NgpInfillType, type ResolvedInfill } from '@/lib/cpq/ngp-infill';
 import {
   deriveBuilderContext, fieldTier, allowedEnumOptions, isStepVisible,
@@ -552,8 +552,15 @@ export function SpecOpeningBuilder({
   // ---- live pricing ----
   const runPricing = async () => {
     setPricing(true);
+    setError(null);
     try {
-      const result = await priceOpeningLive(buildNormalizedSpec(draft, mappings, ngpCatalog));
+      // Bound the call so a stalled request surfaces an error + retry instead of
+      // an indefinite spinner.
+      const result = await withTimeout(
+        priceOpeningLive(buildNormalizedSpec(draft, mappings, ngpCatalog)),
+        30000,
+        'Pricing',
+      );
       setEngineResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Pricing failed');

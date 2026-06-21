@@ -1,5 +1,37 @@
 import { describe, it, expect } from 'vitest';
-import { resolveHardwareNet, MAX_PLAUSIBLE_HARDWARE_NET, requiresDoorFramePrep } from '@/lib/pricing';
+import { resolveHardwareNet, MAX_PLAUSIBLE_HARDWARE_NET, requiresDoorFramePrep, matchCrosswalk } from '@/lib/pricing';
+import type { HardwarePrepCrosswalk } from '@/types';
+
+const cw = (hardwareCategory: string, doorPrepCode: string | null, framePrepCode: string | null): HardwarePrepCrosswalk => ({
+  id: hardwareCategory, hardwareCategory, hardwareProductId: null, hardwareVariantId: null,
+  doorPrepCode, framePrepCode, templateId: null, handRequired: false, locationRequired: false,
+  additionalRequiredFields: null, quantityBasis: null, pricingBehavior: null, notes: null,
+  createdAt: '', updatedAt: '',
+});
+
+describe('matchCrosswalk', () => {
+  // The seeded crosswalk is keyed by descriptive names, not canonical slugs.
+  const rows = [
+    cw('Butt hinge 4-1/2 standard weight', '450--', '450--'),
+    cw('Cylindrical lock', 'CYL / L / T', '478/234 or special strike'),
+    cw('Closer', 'STD', 'REG'),
+  ];
+
+  it('resolves canonical category slugs to descriptive crosswalk rows', () => {
+    expect(matchCrosswalk('butt_hinges', rows)?.doorPrepCode).toBe('450--');
+    expect(matchCrosswalk('cylindrical_mortise_locks_and_deadbolts', rows)?.framePrepCode).toBe('478/234 or special strike');
+  });
+
+  it('prefers an exact slug match when the crosswalk is re-keyed to slugs', () => {
+    const slugRows = [cw('butt_hinges', 'EXACT', 'EXACT'), ...rows];
+    expect(matchCrosswalk('butt_hinges', slugRows)?.doorPrepCode).toBe('EXACT');
+  });
+
+  it('prefers a variant-id match over a category match', () => {
+    const withVariant: HardwarePrepCrosswalk = { ...cw('anything', 'V', 'V'), hardwareVariantId: 'v-123' };
+    expect(matchCrosswalk('butt_hinges', [...rows, withVariant], { variantId: 'v-123' })?.doorPrepCode).toBe('V');
+  });
+});
 
 const price = (netCost: number | null, listPrice: number | null = null, discountMultiplier: number | null = null) => ({
   netCost,

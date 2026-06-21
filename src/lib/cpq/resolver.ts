@@ -333,40 +333,55 @@ function buildCandidate(
 // DB loader
 // ---------------------------------------------------------------------------
 
+/** Rejects if `promise` does not settle within `ms` (prevents indefinite spinners). */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label = 'request'): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 /**
  * Loads the resolver catalog (capabilities + policies joined to family codes)
- * for a catalog version. Returns an empty catalog when the resolver tables are
- * not yet provisioned, so callers can fall back to the legacy path.
+ * for a catalog version. Uses plain queries + an in-JS join (no PostgREST embed)
+ * so it cannot stall on join-RLS / relationship resolution, and times out rather
+ * than hanging. Returns an empty catalog on any error so callers fall back.
  */
 export async function loadResolverCatalog(catalogVersion = 'R1'): Promise<ResolverCatalog> {
   const empty: ResolverCatalog = { capabilities: [], policies: [], catalogVersion };
   try {
-    const [{ data: caps }, { data: pols }] = await Promise.all([
-      supabase
-        .from('product_family_capability')
-        .select('component_scope, field, operator, value, value2, product_family!inner(family_code)')
-        .eq('catalog_version', catalogVersion),
-      supabase
-        .from('family_resolution_policy')
-        .select('component_scope, rank, auto_accept, display_label, product_family!inner(family_code)')
-        .eq('catalog_version', catalogVersion),
-    ]);
+    const [famRes, capRes, polRes] = await withTimeout(Promise.all([
+      supabase.from('product_family').select('id, family_code'),
+      supabase.from('product_family_capability').select('family_id, component_scope, field, operator, value, value2').eq('catalog_version', catalogVersion),
+      supabase.from('family_resolution_policy').select('family_id, component_scope, rank, auto_accept, display_label').eq('catalog_version', catalogVersion),
+    ]), 15000, 'Resolver catalog load');
 
-    const capabilities: ResolverCapability[] = (caps ?? []).map((r: Record<string, unknown>) => ({
-      familyCode: (r.product_family as { family_code: string }).family_code,
-      scope: r.component_scope as ResolverComponentScope,
-      field: r.field as string,
-      operator: r.operator as ConditionOperator,
-      value: (r.value as string | null) ?? null,
-      value2: (r.value2 as string | null) ?? null,
-    }));
-    const policies: ResolverPolicy[] = (pols ?? []).map((r: Record<string, unknown>) => ({
-      scope: r.component_scope as ResolverComponentScope,
-      familyCode: (r.product_family as { family_code: string }).family_code,
-      rank: (r.rank as number) ?? 100,
-      autoAccept: (r.auto_accept as boolean) ?? true,
-      label: (r.display_label as string | null) ?? null,
-    }));
+    const codeById = new Map<string, string>(
+      ((famRes.data ?? []) as Array<{ id: string; family_code: string }>).map((f) => [f.id, f.family_code]),
+    );
+
+    const capabilities: ResolverCapability[] = ((capRes.data ?? []) as Array<Record<string, unknown>>)
+      .filter((r) => codeById.has(r.family_id as string))
+      .map((r) => ({
+        familyCode: codeById.get(r.family_id as string)!,
+        scope: r.component_scope as ResolverComponentScope,
+        field: r.field as string,
+        operator: r.operator as ConditionOperator,
+        value: (r.value as string | null) ?? null,
+        value2: (r.value2 as string | null) ?? null,
+      }));
+    const policies: ResolverPolicy[] = ((polRes.data ?? []) as Array<Record<string, unknown>>)
+      .filter((r) => codeById.has(r.family_id as string))
+      .map((r) => ({
+        scope: r.component_scope as ResolverComponentScope,
+        familyCode: codeById.get(r.family_id as string)!,
+        rank: (r.rank as number) ?? 100,
+        autoAccept: (r.auto_accept as boolean) ?? true,
+        label: (r.display_label as string | null) ?? null,
+      }));
     return { capabilities, policies, catalogVersion };
   } catch {
     return empty;
