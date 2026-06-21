@@ -119,6 +119,9 @@ export default function PriceBookIngestPage() {
   const [ruleReviewExt, setRuleReviewExt] = useState<PriceBookExtraction | null>(null);
   const [compilingIds, setCompilingIds] = useState<Set<string>>(new Set());
   const [compilingAll, setCompilingAll] = useState(false);
+  // Multi-select recompile: which extracted tables are checked, and a busy flag.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [recompiling, setRecompiling] = useState(false);
   const [hardwareIngestingId, setHardwareIngestingId] = useState<string | null>(null);
   const [ngpIngestingId, setNgpIngestingId] = useState<string | null>(null);
   const [proposalId, setProposalId] = useState<string | null>(null);
@@ -660,6 +663,55 @@ export default function PriceBookIngestPage() {
     } finally {
       setCompilingIds((prev) => { const next = new Set(prev); next.delete(ext.id); return next; });
     }
+  };
+
+  /** Toggle one table in the recompile selection. */
+  const toggleSelected = (id: string, on: boolean) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id); else next.delete(id);
+      return next;
+    });
+
+  /** Select / clear all recompilable (grid-extracted) tables in the open book. */
+  const selectAllExtracted = () => {
+    const all = bookExtractions.filter((e) => e.gridExtracted).map((e) => e.id);
+    setSelectedIds((prev) => (prev.size >= all.length ? new Set() : new Set(all)));
+  };
+
+  /**
+   * CPQ v2 — recompile EVERY selected table from its extracted grid (no
+   * re-extraction). Recompiled rules return to UNREVIEWED, so afterwards use
+   * "Approve all compiled" then "Publish version" to make them live.
+   */
+  const recompileSelected = async () => {
+    if (!reviewBook || selectedIds.size === 0) return;
+    const ids = bookExtractions.filter((e) => selectedIds.has(e.id) && e.gridExtracted).map((e) => e.id);
+    if (ids.length === 0) {
+      toast({ title: 'Nothing to recompile', description: 'Selected tables have no extracted grid.', variant: 'destructive' });
+      return;
+    }
+    setRecompiling(true);
+    let done = 0; let failed = 0; let totalRules = 0;
+    for (const id of ids) {
+      setCompilingIds((p) => new Set(p).add(id));
+      try {
+        const r = await compilePriceBookTable(id);
+        done++; totalRules += r.ruleCount ?? 0;
+      } catch {
+        failed++;
+      } finally {
+        setCompilingIds((p) => { const n = new Set(p); n.delete(id); return n; });
+      }
+    }
+    await reloadBookExtractions(reviewBook);
+    setSelectedIds(new Set());
+    setRecompiling(false);
+    toast({
+      title: 'Recompiled selected tables',
+      description: `${done}/${ids.length} table(s) → ${totalRules} rule(s)${failed ? ` (${failed} failed)` : ''}. Next: "Approve all compiled", then "Publish version".`,
+      variant: failed ? 'destructive' : undefined,
+    });
   };
 
   const [approvingAll, setApprovingAll] = useState(false);
@@ -1680,6 +1732,19 @@ export default function PriceBookIngestPage() {
               </div>
               <div className="flex flex-col items-end gap-2">
                 <div className="flex flex-wrap items-center justify-end gap-2">
+                  {/* Multi-select recompile (worker-only): recompile just the tables
+                      you check — e.g. after a compiler fix — without re-extracting. */}
+                  {hasPriceBookWorker && bookExtractions.some((e) => e.gridExtracted) && (
+                    <Button size="sm" variant="ghost" onClick={selectAllExtracted} disabled={recompiling || processingBook}>
+                      {selectedIds.size >= bookExtractions.filter((e) => e.gridExtracted).length && selectedIds.size > 0 ? 'Clear selection' : 'Select all extracted'}
+                    </Button>
+                  )}
+                  {hasPriceBookWorker && selectedIds.size > 0 && (
+                    <Button size="sm" onClick={recompileSelected} disabled={recompiling || processingBook}>
+                      {recompiling ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
+                      {recompiling ? `Recompiling ${selectedIds.size}…` : `Recompile selected (${selectedIds.size})`}
+                    </Button>
+                  )}
                   {/* One-click pipeline: extract → compile → approve (worker-only). */}
                   {hasPriceBookWorker && bookExtractions.some((e) => e.status !== 'approved' && e.status !== 'discarded') && (
                     <Button size="sm" onClick={processEntireBook} disabled={processingBook || extractingAll || compilingAll || approvingAll}>
@@ -1749,6 +1814,15 @@ export default function PriceBookIngestPage() {
 
                 return (
                   <div key={ext.id} className="flex items-center gap-4 px-6 py-4">
+                    {/* Recompile multi-select (only for tables that have a grid). */}
+                    {hasPriceBookWorker && ext.gridExtracted && (
+                      <Checkbox
+                        className="shrink-0"
+                        checked={selectedIds.has(ext.id)}
+                        onCheckedChange={(c) => toggleSelected(ext.id, c === true)}
+                        aria-label={`Select ${ext.title ?? 'table'} for recompile`}
+                      />
+                    )}
                     {/* Left: title + meta */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -1794,6 +1868,15 @@ export default function PriceBookIngestPage() {
                           <Button size="sm" variant="outline" onClick={() => setViewExtraction(ext)}>
                             <Eye className="mr-1.5 h-3.5 w-3.5" />Grid
                           </Button>
+                          {/* Recompile an already-approved table from its grid (e.g.
+                              after a compiler fix). Sends it back to "review". */}
+                          {hasPriceBookWorker && ext.gridExtracted && (
+                            <Button size="sm" variant="outline" onClick={() => compileGrid(ext)} disabled={compilingIds.has(ext.id) || recompiling}
+                              title="Recompile this table's rules from its extracted grid">
+                              {compilingIds.has(ext.id) ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
+                              Recompile
+                            </Button>
+                          )}
                         </>
                       )}
 
