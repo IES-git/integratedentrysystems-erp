@@ -1336,9 +1336,24 @@ function matchesCriteria(v: VariantOption, c: Partial<HwCriteria>): boolean {
 }
 
 /**
+ * Accessory subcategories that share a device category but are NOT the device
+ * itself (e.g. latch guards / pulls / trim live in the lock category). They must
+ * never be auto-selected over a real device, or the cheapest-first sort lands on
+ * a $17 latch protector instead of an actual lockset.
+ */
+const ACCESSORY_SUBCATEGORIES = ['latch grd', 'latch guard', 'pull trim', 'pull', 'trim', 'astragal', 'filler'];
+
+function isAccessorySubcategory(sub: string | null): boolean {
+  if (!sub) return false;
+  const s = sub.trim().toLowerCase();
+  return ACCESSORY_SUBCATEGORIES.some((a) => s === a || s.includes(a));
+}
+
+/**
  * Variants matching the criteria, with the fire-rating gate applied (when an
- * opening is labeled and both rated/unrated exist, keep only rated), sorted with
- * priced variants first then cheapest net.
+ * opening is labeled and both rated/unrated exist, keep only rated), then
+ * accessory subcategories demoted below real devices, sorted with priced
+ * variants first then cheapest net.
  */
 function filterVariants(variants: VariantOption[], criteria: Partial<HwCriteria>, fireLabeled: boolean): VariantOption[] {
   let out = variants.filter((v) => matchesCriteria(v, criteria));
@@ -1346,6 +1361,10 @@ function filterVariants(variants: VariantOption[], criteria: Partial<HwCriteria>
     const rated = out.filter((v) => isFireRating(v.variant.rating));
     if (rated.length > 0 && rated.length < out.length) out = rated;
   }
+  // If real (non-accessory) devices exist in this category, drop the accessories
+  // so auto-select can't pick a latch guard / pull / trim as the "device".
+  const realDevices = out.filter((v) => !isAccessorySubcategory(v.subcategory));
+  if (realDevices.length > 0 && realDevices.length < out.length) out = realDevices;
   return [...out].sort((a, b) =>
     (Number(hasVariantPrice(b)) - Number(hasVariantPrice(a))) || (variantNet(a) - variantNet(b)));
 }

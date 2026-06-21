@@ -177,6 +177,8 @@ export interface VariantOption {
   variant: HardwareVariant;
   price: HardwarePrice | null;
   productDescription: string | null;
+  /** hardware_product.subcategory — distinguishes real devices from accessories. */
+  subcategory: string | null;
 }
 
 /**
@@ -284,13 +286,13 @@ export async function loadHardwareCategories(): Promise<HardwareCategoryOption[]
 export async function loadVariantsForCategory(category: string): Promise<VariantOption[]> {
   const { data, error } = await supabase
     .from('hardware_variant')
-    .select('*, hardware_product!inner(category, description), hardware_price(*)')
+    .select('*, hardware_product!inner(category, subcategory, description), hardware_price(*)')
     .eq('hardware_product.category', category);
   if (error) throw new Error(`Failed to load variants for ${category}: ${error.message}`);
 
   return (data ?? []).map((r) => {
     const row = r as Record<string, unknown>;
-    const product = row.hardware_product as { description?: string | null } | null;
+    const product = row.hardware_product as { description?: string | null; subcategory?: string | null } | null;
     const prices = (row.hardware_price as Record<string, unknown>[] | undefined) ?? [];
     const approved = prices.find((p) => p.review_status === 'APPROVED') ?? prices[0];
     return {
@@ -328,6 +330,7 @@ export async function loadVariantsForCategory(category: string): Promise<Variant
           }
         : null,
       productDescription: product?.description ?? null,
+      subcategory: product?.subcategory ?? null,
     };
   });
 }
