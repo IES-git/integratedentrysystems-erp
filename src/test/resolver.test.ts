@@ -83,4 +83,27 @@ describe('resolveOpeningSpec', () => {
     const codes = r.candidates.flatMap((c) => c.technical.optionCodes);
     expect(codes).toContain('HP');
   });
+
+  it('keeps the BASE series and puts the core upgrade in options (CHP is not a series)', () => {
+    // Polystyrene + continuous weld must resolve to base series CH with a CHP
+    // core-upgrade option — NOT a non-existent "CHP" base series.
+    const r = resolveOpeningSpec(spec({ 'opening.wall_construction': 'masonry', 'door.core_type': 'polystyrene', 'door.edge_seam_construction': 'continuous weld' }), catalog());
+    expect(r.status).toBe('auto');
+    expect(r.selected?.technical.doorSeries).toBe('CH');
+    expect(r.selected?.technical.optionCodes).toContain('CHP');
+  });
+
+  it('resolves a steel-stiffened core to the stiffened base family (C), not a glued series', () => {
+    const r = resolveOpeningSpec(spec({ 'opening.wall_construction': 'masonry', 'door.core_type': 'steel stiffened', 'door.edge_seam_construction': 'continuous weld' }), {
+      ...catalog(),
+      // add C as an eligible base family for this test
+      capabilities: [
+        ...catalog().capabilities,
+        ...SPECIALTY.map((f) => cap('C', 'door', f, 'MISSING')),
+      ],
+      policies: [...catalog().policies, { scope: 'door', familyCode: 'C', rank: 42, autoAccept: true, label: 'Steel-stiffened, continuous weld' }],
+    });
+    expect(r.status).toBe('auto');
+    expect(r.selected?.technical.doorSeries).toBe('C');
+  });
 });
