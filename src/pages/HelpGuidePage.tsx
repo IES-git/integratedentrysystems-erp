@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
@@ -13,7 +14,9 @@ import {
   HelpCircle,
   Layers,
   LockKeyhole,
+  Maximize2,
   RefreshCw,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
@@ -22,10 +25,13 @@ import {
   Upload,
   Users,
   Wrench,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 
 type GuideSectionId =
   | 'start'
@@ -322,6 +328,123 @@ function MiniCard({
   );
 }
 
+function GuideScreenshot({
+  src,
+  alt,
+  caption,
+  steps,
+}: {
+  src: string;
+  alt: string;
+  caption: string;
+  steps?: string[];
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [zoom, setZoom] = useState(1);
+
+  const handleOpenChange = (open: boolean) => {
+    setIsOpen(open);
+    if (!open) {
+      setZoom(1);
+    }
+  };
+
+  const openViewer = () => {
+    setZoom(1);
+    setIsOpen(true);
+  };
+
+  return (
+    <>
+      <figure className="space-y-2">
+        <div className="overflow-hidden rounded-md border bg-muted/20">
+          <button
+            type="button"
+            onClick={openViewer}
+            className="group relative block w-full cursor-zoom-in text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            aria-label={`Open larger screenshot view: ${caption}`}
+          >
+            <img src={src} alt={alt} className="w-full" loading="lazy" />
+            <span className="absolute right-3 top-3 inline-flex h-9 w-9 items-center justify-center rounded-md border bg-background/95 text-foreground opacity-100 shadow-sm transition sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-visible:opacity-100">
+              <Maximize2 className="h-4 w-4" />
+            </span>
+          </button>
+        </div>
+        <figcaption className="text-xs leading-5 text-muted-foreground">{caption}</figcaption>
+        {steps && steps.length > 0 && (
+          <ol className="list-decimal space-y-1 pl-5 text-xs leading-5 text-muted-foreground">
+            {steps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+        )}
+      </figure>
+
+      <Dialog open={isOpen} onOpenChange={handleOpenChange}>
+        <DialogContent className="flex h-[92vh] max-h-[92vh] w-[96vw] max-w-[96vw] flex-col gap-0 overflow-hidden p-0">
+          <div className="flex flex-col gap-3 border-b px-4 py-3 pr-12 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <DialogTitle className="font-display text-base tracking-wide">Screenshot Detail</DialogTitle>
+              <DialogDescription className="mt-1 text-xs leading-5">{caption}</DialogDescription>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setZoom((value) => Math.max(0.75, value - 0.25))}
+                disabled={zoom <= 0.75}
+                aria-label="Zoom out"
+              >
+                <ZoomOut className="h-4 w-4" />
+              </Button>
+              <span className="w-12 text-center text-xs tabular-nums text-muted-foreground">
+                {Math.round(zoom * 100)}%
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setZoom((value) => Math.min(2.5, value + 0.25))}
+                disabled={zoom >= 2.5}
+                aria-label="Zoom in"
+              >
+                <ZoomIn className="h-4 w-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setZoom(1)}
+                aria-label="Reset zoom"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto bg-muted/30 p-4">
+            <div className="mx-auto flex w-full justify-center">
+              <img
+                src={src}
+                alt={alt}
+                className="h-auto max-w-none rounded-md border bg-background shadow-sm"
+                style={{ width: `${Math.round(zoom * 100)}%` }}
+              />
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function ScreenshotGrid({ children }: { children: React.ReactNode }) {
+  return <div className="grid gap-4 lg:grid-cols-2">{children}</div>;
+}
+
 export default function HelpGuidePage() {
   return (
     <div className="min-h-full p-4 sm:p-6 lg:p-8">
@@ -426,6 +549,16 @@ export default function HelpGuidePage() {
                   },
                 ]}
               />
+              <GuideScreenshot
+                src="/help-guide/01-navigation-help.png"
+                alt="Annotated screenshot of the Help Guide and app sidebar navigation"
+                caption="Start from the left sidebar: it is the map for daily workflow areas, admin tools, and this Help Guide."
+                steps={[
+                  'Use the main navigation group for daily workflow areas.',
+                  'Open Help Guide when a user needs the SOP from inside the app.',
+                  'Use Guide Navigation to jump directly to the training topic needed.',
+                ]}
+              />
             </PageSection>
 
             <PageSection id="roles" eyebrow="Security" title="User Access and Roles" icon={ShieldCheck}>
@@ -484,6 +617,29 @@ export default function HelpGuidePage() {
                   'Save the quote after presentation changes so the layout, copy, and line visibility are preserved.',
                 ]}
               />
+              <ScreenshotGrid>
+                <GuideScreenshot
+                  src="/help-guide/07-estimates-list.png"
+                  alt="Annotated screenshot of the Estimates list with Create New, Upload New, and Quote actions"
+                  caption="The estimate list is the starting point for manual entry, uploaded estimate processing, and converting priced estimates into quotes."
+                  steps={[
+                    'Create New starts a manual estimate.',
+                    'Upload New processes a PDF or image estimate source.',
+                    'Quote converts a priced estimate into customer or manufacturer quote workflows.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/13-quotes-new-flow.png"
+                  alt="Annotated screenshot of the Select Estimate modal in the new quote workflow"
+                  caption="Quote creation starts by selecting a processed estimate, then confirming the quote details and recipients."
+                  steps={[
+                    'Search when the processed estimate list is long.',
+                    'Filter by customer or sales rep to narrow the eligible estimates.',
+                    'Select the estimate that should become the quote source.',
+                    'Create Quote becomes available after an estimate is selected.',
+                  ]}
+                />
+              </ScreenshotGrid>
             </PageSection>
 
             <PageSection id="app-map" eyebrow="Navigation" title="Different Functionalities Within the App" icon={Layers}>
@@ -520,6 +676,39 @@ export default function HelpGuidePage() {
                   },
                 ]}
               />
+              <ScreenshotGrid>
+                <GuideScreenshot
+                  src="/help-guide/02-customers-list.png"
+                  alt="Annotated screenshot of Customers list actions"
+                  caption="Search existing accounts before adding a customer; use Add for a new customer or Bulk Markup for pricing maintenance."
+                  steps={[
+                    'Bulk Markup opens account-level multiplier maintenance.',
+                    'Add starts a new customer record.',
+                    'Open a customer row to review contacts, account settings, and company details.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/03-customers-add-modal.png"
+                  alt="Annotated screenshot of the New Customer modal"
+                  caption="The New Customer modal collects the company record and optional primary contact in one step."
+                  steps={[
+                    'Company Name is required for the customer record.',
+                    'Enter billing and shipping addresses when known.',
+                    'Keep Add a primary contact enabled when contact information is available.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/21-customer-detail-settings.png"
+                  alt="Annotated screenshot of customer Account Settings"
+                  caption="The customer detail page contains account-level pricing settings such as Cost Multiplier and payment terms."
+                  steps={[
+                    'Company Information stores billing, shipping, and notes.',
+                    'Account Settings controls the customer cost multiplier and payment terms.',
+                    'Contacts stores the people associated with the account.',
+                    'Edit Company updates company identity, address, notes, and status.',
+                  ]}
+                />
+              </ScreenshotGrid>
               <Callout title="Customer deletion warning" tone="warning">
                 Deleting a customer removes its contacts and can unset customer references on related records.
                 Prefer marking a company inactive when preserving history matters.
@@ -544,6 +733,16 @@ export default function HelpGuidePage() {
                   body="In Bulk Markup, add category, subcategory, or item columns. Enter a multiplier only where that target should override the customer's default."
                 />
               </MiniGrid>
+              <GuideScreenshot
+                src="/help-guide/04-customers-bulk-markup.png"
+                alt="Annotated screenshot of the Bulk Markup Manager"
+                caption="Bulk Markup lets admins maintain a default multiplier per customer and add targeted category, subcategory, or item override columns."
+                steps={[
+                  'Edit the customer default multiplier for broad account-level markup.',
+                  'Add Item creates targeted override columns for specific pricing exceptions.',
+                  'Select Done after markup changes are reviewed.',
+                ]}
+              />
               <DefinitionTable
                 items={[
                   { term: '1.00', definition: 'No markup. Customer price equals the underlying cost.' },
@@ -586,6 +785,29 @@ export default function HelpGuidePage() {
                   },
                 ]}
               />
+              <ScreenshotGrid>
+                <GuideScreenshot
+                  src="/help-guide/05-manufacturers-list.png"
+                  alt="Annotated screenshot of the Manufacturers list"
+                  caption="Use Manufacturers to keep supplier records clean before assigning pricing tables, source books, or RFQ recipients."
+                  steps={[
+                    'Add Manufacturer creates a new supplier record.',
+                    'Search manufacturers before adding a new one.',
+                    'Keep manufacturer names consistent because they appear in pricing and quote workflows.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/06-manufacturers-add-modal.png"
+                  alt="Annotated screenshot of the New Manufacturer modal"
+                  caption="Add a manufacturer with a consistent company name and notes that help the team understand source-book or product-line context."
+                  steps={[
+                    'Company Name is required and should match the team’s pricing-table naming convention.',
+                    'Add address information when it helps with supplier records.',
+                    'Use Notes for product lines, lead times, source books, or rep context.',
+                    'Create Manufacturer saves the supplier record.',
+                  ]}
+                />
+              </ScreenshotGrid>
               <Callout title="Manufacturer deletion warning" tone="warning">
                 Deleting a manufacturer also removes contacts and unassigns linked estimate items. Use this only for true duplicates or bad records.
               </Callout>
@@ -658,6 +880,66 @@ export default function HelpGuidePage() {
                   },
                 ]}
               />
+              <Callout title="Opening builder visual path" tone="success">
+                For a new opening, start in the Estimate Wizard, move to Openings, select Build Opening,
+                then complete each Spec Builder tab before returning to Review & Pricing.
+              </Callout>
+              <ScreenshotGrid>
+                <GuideScreenshot
+                  src="/help-guide/09-estimates-manual-builder.png"
+                  alt="Annotated screenshot of the manual estimate customer step"
+                  caption="Create New opens the manual estimate wizard, where the first decision is how to assign or defer the customer."
+                  steps={[
+                    'The Estimate Wizard shows Customer, Openings, and Review steps.',
+                    'Choose how the estimate should be assigned to a customer.',
+                    'Continue to Openings after the customer decision is complete.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/10-estimates-openings-step.png"
+                  alt="Annotated screenshot of the manual estimate openings step"
+                  caption="The Openings step is where users either build a new opening or copy an existing opening into the estimate."
+                  steps={[
+                    'Confirm you are on the Openings step of the Estimate Wizard.',
+                    'Use the empty-state Build Opening button for the first opening.',
+                    'Use Build Opening for a new spec or Choose Existing Opening to copy a reusable opening.',
+                    'Move to Review & Pricing only after the estimate has the correct openings.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/11-estimates-spec-builder.png"
+                  alt="Annotated screenshot of the Build Opening spec builder"
+                  caption="The spec builder organizes required opening details into tabs and shows pricing-blocking issues before save."
+                  steps={[
+                    'Use the left tab list to move through each part of the opening specification.',
+                    'Complete required opening identity, quantity, configuration, and size fields.',
+                    'Set performance and logistics details such as fire label and wall construction.',
+                    'Resolve blocking issues before the opening can be priced.',
+                    'Save Opening becomes the handoff back to the estimate when required details are complete.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/22-estimates-spec-door-construction.png"
+                  alt="Annotated screenshot of the Door Construction tab in the Build Opening spec builder"
+                  caption="Door Construction is one of the Spec Builder tabs used to capture product-specific door details before pricing."
+                  steps={[
+                    'Stay oriented with the Spec Builder tab list.',
+                    'Complete manufacturer, base product, size, activity, and elevation details for the door.',
+                    'Use Add when the opening includes another door component.',
+                    'Resolve pricing-blocking issues as they appear.',
+                    'Save Opening after required spec fields are complete.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/08-estimates-upload-modal.png"
+                  alt="Annotated screenshot of the Upload Estimate modal"
+                  caption="Upload New supports PDFs and images. Drop the source file, then process it for extraction and review."
+                  steps={[
+                    'Drop a PDF or image file into the upload area.',
+                    'Process the selected files to start extraction and review.',
+                  ]}
+                />
+              </ScreenshotGrid>
               <Checklist
                 items={[
                   'Use Remix from the estimate list when an existing estimate is close to the new job.',
@@ -718,6 +1000,49 @@ export default function HelpGuidePage() {
                   },
                 ]}
               />
+              <ScreenshotGrid>
+                <GuideScreenshot
+                  src="/help-guide/12-quotes-list.png"
+                  alt="Annotated screenshot of the Quotes list"
+                  caption="The Quotes page shows quote status counts, starts new quote creation, and exposes row actions for saved quotes."
+                  steps={[
+                    'New Quote starts quote creation from a processed estimate.',
+                    'Status cards summarize quote pipeline state.',
+                    'The quote table is where saved drafts and completed quotes are reviewed.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/13-quotes-new-flow.png"
+                  alt="Annotated screenshot of quote estimate selection"
+                  caption="Select a processed estimate and use filters when the quote list grows."
+                  steps={[
+                    'Search by file name or customer.',
+                    'Filter by customer or sales rep when needed.',
+                    'Select the processed estimate that should become the quote.',
+                    'Create Quote continues after a valid estimate is selected.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/14-quotes-row-actions.png"
+                  alt="Annotated screenshot of quote row actions"
+                  caption="Use row actions to view details, edit an existing quote, or clone a quote when a similar version is needed."
+                  steps={[
+                    'Open the row action menu for a saved quote.',
+                    'Choose View Details, Edit Quote, or Clone Quote from the menu.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/15-quotes-edit-builder.png"
+                  alt="Annotated screenshot of the quote edit builder"
+                  caption="The quote builder is where users refresh pricing, review markup, inspect line totals, and control PDF document sections."
+                  steps={[
+                    'Refresh from Pricing Tables before final save when pricing data may have changed.',
+                    'Review the customer markup banner and account-level multiplier.',
+                    'Inspect opening line items, quantities, per-line multipliers, and sell totals.',
+                    'Use Document Layout to control PDF sections and detail levels.',
+                  ]}
+                />
+              </ScreenshotGrid>
               <Callout title="Customer quote vs manufacturer RFQ" tone="warning">
                 Customer Quote is the customer-facing commercial document. Manufacturer RFQ is supplier-facing and should be treated as internal/supplier communication, not customer distribution.
               </Callout>
@@ -755,6 +1080,30 @@ export default function HelpGuidePage() {
                   body="Admin-only defaults for markup rules and service scopes such as freight, tax, labor, wiring, glazing, packaging, commissioning, and field work."
                 />
               </MiniGrid>
+              <ScreenshotGrid>
+                <GuideScreenshot
+                  src="/help-guide/16-pricing-hub.png"
+                  alt="Annotated screenshot of the Pricing hub"
+                  caption="The Pricing hub routes users to table maintenance, price book ingestion, QA, and pricing defaults."
+                  steps={[
+                    'Pricing Tables is for live table maintenance.',
+                    'Price Book Ingestion is for uploading and reviewing source books.',
+                    'Price Book QA is for quality checks and blocking issues.',
+                    'Pricing Defaults is for broad markup and service-scope policy.',
+                  ]}
+                />
+                <GuideScreenshot
+                  src="/help-guide/17-pricing-defaults.png"
+                  alt="Annotated screenshot of Pricing Defaults"
+                  caption="Pricing Defaults centralizes broad markup rules plus freight, tax, and service-scope calculations."
+                  steps={[
+                    'Markup Rules control broad sell pricing policy.',
+                    'Add Rule creates another markup rule.',
+                    'Services, Freight, and Tax controls add-on and percentage-based scopes.',
+                    'Add Scope creates another service, freight, tax, labor, or related pricing scope.',
+                  ]}
+                />
+              </ScreenshotGrid>
               <StepList
                 items={[
                   {
@@ -806,6 +1155,16 @@ export default function HelpGuidePage() {
                   },
                 ]}
               />
+              <GuideScreenshot
+                src="/help-guide/18-templates-list.png"
+                alt="Annotated screenshot of the Templates list"
+                caption="Templates are organized by audience so quote creation can quickly apply the right customer or manufacturer document layout."
+                steps={[
+                  'New Template creates a reusable quote document layout.',
+                  'Audience summary cards separate customer and manufacturer template counts.',
+                  'Open row actions to edit or manage an existing template.',
+                ]}
+              />
             </PageSection>
 
             <PageSection id="admin-users" eyebrow="Administration" title="Inviting New Users as an Admin" icon={LockKeyhole}>
@@ -831,6 +1190,16 @@ export default function HelpGuidePage() {
                     body:
                       'Use the active switch to deactivate or reactivate a user. Use the row action menu to change roles or delete a user. You cannot deactivate or delete your own current account from the table.',
                   },
+                ]}
+              />
+              <GuideScreenshot
+                src="/help-guide/20-admin-invite-modal.png"
+                alt="Annotated screenshot of the Invite User modal"
+                caption="Admin users invite teammates by entering identity fields, choosing the correct role, and sending the invite email."
+                steps={[
+                  'Enter the required identity fields before sending the invite.',
+                  'Assign the correct role for the user’s expected access.',
+                  'Send Invite emails the user and creates their profile.',
                 ]}
               />
               <Callout title="Recommended access practice" tone="success">
