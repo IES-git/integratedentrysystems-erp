@@ -190,20 +190,30 @@ export interface VariantOption {
 export type BaseSignature = Record<string, string>;
 export type BaseSignatures = Record<string, BaseSignature[]>; // entity -> signatures
 
-/** Resolves the published document that actually carries door base prices. */
-async function resolveBaseDocId(): Promise<string | null> {
-  const { data } = await supabase
-    .from('price_rule')
-    .select('price_book_id, price_book_document!inner(status, source_verified, effective_date)')
-    .eq('entity_type', 'door')
-    .eq('action_type', 'BASE_AMOUNT')
-    .eq('review_status', 'APPROVED')
-    .eq('price_book_document.status', 'published')
-    .eq('price_book_document.source_verified', true)
-    .order('effective_date', { ascending: false, foreignTable: 'price_book_document', nullsFirst: false })
-    .limit(1)
-    .maybeSingle();
-  return (data?.price_book_id as string | undefined) ?? null;
+/** Resolves every published, source-verified document that carries base prices. */
+async function resolveBaseDocIds(): Promise<string[]> {
+  const ids = new Set<string>();
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('price_rule')
+      .select('price_book_id, price_book_document!inner(status, source_verified, effective_date)')
+      .eq('action_type', 'BASE_AMOUNT')
+      .eq('review_status', 'APPROVED')
+      .eq('price_book_document.status', 'published')
+      .eq('price_book_document.source_verified', true)
+      .in('entity_type', ['door', 'frame', 'panel'])
+      .order('effective_date', { ascending: false, foreignTable: 'price_book_document', nullsFirst: false })
+      .order('price_book_id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`Failed to resolve base price books: ${error.message}`);
+    for (const row of data ?? []) {
+      const id = row.price_book_id as string | null;
+      if (id) ids.add(id);
+    }
+    if ((data ?? []).length < PAGE) break;
+  }
+  return [...ids];
 }
 
 /**
@@ -214,17 +224,25 @@ async function resolveBaseDocId(): Promise<string | null> {
  */
 export async function loadBaseSignatures(): Promise<BaseSignatures> {
   const out: BaseSignatures = { door: [], frame: [], panel: [] };
-  const docId = await resolveBaseDocId();
-  if (!docId) return out;
-  const { data, error } = await supabase
-    .from('price_rule')
-    .select('entity_type, rule_condition(field_path, operator, value_1, value_type)')
-    .eq('price_book_id', docId)
-    .eq('action_type', 'BASE_AMOUNT')
-    .eq('review_status', 'APPROVED')
-    .in('entity_type', ['door', 'frame', 'panel']);
-  if (error) throw new Error(`Failed to load base signatures: ${error.message}`);
-  for (const r of data ?? []) {
+  const docIds = await resolveBaseDocIds();
+  if (docIds.length === 0) return out;
+  const rows: Record<string, unknown>[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('price_rule')
+      .select('entity_type, rule_condition(field_path, operator, value_1, value_type)')
+      .in('price_book_id', docIds)
+      .eq('action_type', 'BASE_AMOUNT')
+      .eq('review_status', 'APPROVED')
+      .in('entity_type', ['door', 'frame', 'panel'])
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`Failed to load base signatures: ${error.message}`);
+    rows.push(...((data ?? []) as Record<string, unknown>[]));
+    if ((data ?? []).length < PAGE) break;
+  }
+  for (const r of rows) {
     const row = r as Record<string, unknown>;
     const et = row.entity_type as string;
     if (!out[et]) continue;
