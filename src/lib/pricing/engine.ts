@@ -725,28 +725,29 @@ function fmtUsd(n: number): string {
  * (the latest published Pioneer document).
  */
 export async function resolveActivePriceBookDocument(): Promise<string | null> {
-  // The base book is the published document that actually carries door/frame base
-  // prices — NOT the NGP infill or Hardware documents (which are also published).
-  // Resolving by "latest published" alone is ambiguous when several docs share a
-  // null effective date, so pin to the doc that has APPROVED door base rules.
+  // The default base book is Pioneer. Other steel manufacturers are selected
+  // through component/manufacturer pins; they should not silently replace the
+  // default fallback just because their effective date is newer.
   const { data } = await supabase
     .from('price_rule')
-    .select('price_book_id, price_book_document!inner(id, status, source_verified, effective_date)')
+    .select('price_book_id, price_book_document!inner(id, status, source_verified, effective_date, ingestion_profile_key)')
     .eq('entity_type', 'door')
     .eq('action_type', 'BASE_AMOUNT')
     .eq('review_status', 'APPROVED')
     .eq('price_book_document.status', 'published')
     .eq('price_book_document.source_verified', true)
+    .eq('price_book_document.ingestion_profile_key', 'pioneer-steel-doors-frames')
     .order('effective_date', { ascending: false, foreignTable: 'price_book_document', nullsFirst: false })
     .limit(1)
     .maybeSingle();
   if (data?.price_book_id) return data.price_book_id as string;
-  // Fallback: latest published document (legacy behavior).
+  // Fallback: latest published Pioneer document (legacy behavior, but scoped).
   const { data: doc } = await supabase
     .from('price_book_document')
     .select('id')
     .eq('status', 'published')
     .eq('source_verified', true)
+    .eq('ingestion_profile_key', 'pioneer-steel-doors-frames')
     .order('effective_date', { ascending: false })
     .limit(1)
     .maybeSingle();

@@ -8,6 +8,7 @@ import {
   parseFrameOpeningRow,
   classifyArchetype,
 } from '../../services/price-book-worker/src/normalize.js';
+import { matrixSizeLabelForRow } from '../../services/price-book-worker/src/compile.js';
 
 describe('ingestion size-label parsing', () => {
   it('parses explicit width x height feet-inches', () => {
@@ -55,6 +56,42 @@ describe('ingestion size-label parsing', () => {
     expect(decodeCompactSizeCode('207')).toBeNull();
     expect(decodeCompactSizeCode('20700')).toBeNull();
     expect(decodeCompactSizeCode('abcd')).toBeNull();
+  });
+
+  it('reconstructs vertically merged height cells across Pioneer width rows', () => {
+    const grid = {
+      columnLabels: ['Width', 'Height', '18 Gauge CRS'],
+      rowLabels: [
+        '2-0, 2-4',
+        '2-6, 2-8,',
+        '2-10, 3-0',
+        '3-4, 3-6, 3-8',
+        '3-10, 4-0',
+        '2-0, 2-4',
+        '2-6, 2-8,',
+        '2-10, 3-0',
+        '3-4, 3-6, 3-8',
+        '3-10, 4-0',
+        '2-0, 2-4',
+        '2-6, 2-8,',
+        '2-10, 3-0',
+        '3-4, 3-6, 3-8',
+        '3-10, 4-0',
+      ],
+      cells: [
+        { row: 2, col: 1, rawValue: "6' 8\"" },
+        { row: 7, col: 1, rawValue: "7' 0\"" },
+        { row: 11, col: 1, rawValue: "7' 2\"" },
+        { row: 12, col: 1, rawValue: "7' 10\"" },
+        { row: 13, col: 1, rawValue: "8' 0\"" },
+      ],
+    };
+
+    expect(parseSizeLabel(matrixSizeLabelForRow(grid, 0))).toEqual({ width: 28, height: 80 });
+    expect(parseSizeLabel(matrixSizeLabelForRow(grid, 7))).toEqual({ width: 36, height: 84 });
+    expect(parseSizeLabel(matrixSizeLabelForRow(grid, 10))).toEqual({ width: 28, height: 86 });
+    expect(parseSizeLabel(matrixSizeLabelForRow(grid, 12))).toEqual({ width: 36, height: 94 });
+    expect(parseSizeLabel(matrixSizeLabelForRow(grid, 14))).toEqual({ width: 48, height: 96 });
   });
 });
 

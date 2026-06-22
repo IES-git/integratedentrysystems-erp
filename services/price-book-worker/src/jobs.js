@@ -22,10 +22,11 @@ import {
 } from './gemini.js';
 import { parseSpreadsheet, extractGridFromSheet } from './spreadsheet.js';
 import { interpretGridCell, normalizeToken } from './normalize.js';
-import { getPdfPageCount, slicePdfToPageHint } from './pdf.js';
+import { canonicalizePageHint, getPdfPageCount, parsePageRange, slicePdfToPageHint } from './pdf.js';
 import {
   buildProfileCatalogChecklist,
   evaluateCatalogProfileCoverage,
+  getProfileCatalogSeeds,
   identifyPriceBookProfile,
 } from './profiles.js';
 
@@ -45,6 +46,15 @@ const MAX_CATALOG_ROUNDS = 10;
 const EXTRACT_ALL_CONCURRENCY = 4;
 
 const BUCKET = 'price-book-files';
+
+export function catalogTableIdentity(table) {
+  const title = String(table?.title ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const pageRange = parsePageRange(table?.page_hint);
+  const location = pageRange
+    ? `${pageRange.start}-${pageRange.end}`
+    : String(table?.page_hint ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return `${title}|${location}`;
+}
 
 async function downloadBytes(sb, path) {
   const { data: blob, error } = await sb.storage.from(BUCKET).download(path);
@@ -69,10 +79,24 @@ async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart, 
   let lastTruncated = false;
   let roundsUsed = 0;
   let reachedNaturalStop = false;
+  let profileConfirmedStop = false;
+
+  // Exact governed sources may define structural catalog seeds for small priced
+  // blocks that vision models routinely overlook beside a dominant matrix.
+  // Seeds contain location/classification only — never prices — and are still
+  // extracted from the source PDF by the normal per-table evidence workflow.
+  for (const seed of getProfileCatalogSeeds(profile)) {
+    seed.page_hint = canonicalizePageHint(seed.page_hint);
+    const key = catalogTableIdentity(seed);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    all.push(seed);
+  }
 
   for (let round = 0; round < MAX_CATALOG_ROUNDS && all.length < MAX_TABLES; round++) {
     roundsUsed = round + 1;
-    const excludeTitles = all.map((t) => `${t.title} @ ${t.page_hint ?? 'unknown page'}`);
+    const excludeTitles = all.map((t) =>
+      `${t.title} @ ${canonicalizePageHint(t.page_hint) ?? 'unknown page'}`);
     const prompt = buildCatalogPrompt(
       book.category,
       aliasHints,
@@ -91,7 +115,8 @@ async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart, 
 
     let added = 0;
     for (const t of tables) {
-      const key = `${t.title.trim().toLowerCase()}|${(t.page_hint ?? '').toString().trim().toLowerCase()}`;
+      t.page_hint = canonicalizePageHint(t.page_hint);
+      const key = catalogTableIdentity(t);
       if (seen.has(key)) continue;
       seen.add(key);
       all.push(t);
@@ -101,13 +126,27 @@ async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart, 
 
     console.log(`[catalog] round ${round + 1}: +${added} (total ${all.length})${truncated ? ' [truncated]' : ''}`);
 
-    // Done when the model produced nothing new AND was not cut off mid-list.
-    if (added === 0 && !truncated) {
-      reachedNaturalStop = true;
+    if (added === 0) {
+      // A clean empty pass is the strongest stopping signal.
+      if (!truncated) {
+        reachedNaturalStop = true;
+        break;
+      }
+
+      // Known governed sources have an independent whole-book coverage gate.
+      // When that gate is already satisfied, a truncated response containing
+      // zero new normalized title+physical-page locations is a valid stop:
+      // the truncated prefix only repeated locations already cataloged.
+      const coverage = evaluateCatalogProfileCoverage(profile, all);
+      if (profile && coverage.passed) {
+        reachedNaturalStop = true;
+        profileConfirmedStop = true;
+        break;
+      }
+
+      // Unknown or still-incomplete sources remain explicitly unproven.
       break;
     }
-    // Defensive: if a round adds nothing yet keeps claiming truncation, stop.
-    if (added === 0) break;
   }
 
   const hitTableCap = all.length >= MAX_TABLES;
@@ -115,10 +154,11 @@ async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart, 
   return {
     tables: all,
     vendorName,
-    truncated: lastTruncated || hitTableCap || exhaustedRounds,
+    truncated: (!reachedNaturalStop && lastTruncated) || hitTableCap || exhaustedRounds,
     hitTableCap,
     exhaustedRounds,
     roundsUsed,
+    profileConfirmedStop,
   };
 }
 
@@ -229,6 +269,7 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
       hitTableCap = false,
       exhaustedRounds = false,
       roundsUsed = 1,
+      profileConfirmedStop = false,
     } = catalog;
 
     // Fail loudly rather than silently degrading to a single bogus "whole book"
@@ -271,6 +312,7 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
         hitTableCap,
         exhaustedRounds,
         responseTruncated: truncated && !hitTableCap && !exhaustedRounds,
+        profileConfirmedStop,
       },
       issues: [
         ...profileCoverage.issues,

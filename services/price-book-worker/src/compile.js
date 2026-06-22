@@ -17,6 +17,8 @@ import {
   categoryToEntityType,
   fieldPaths,
   flattenColumnHeader,
+  feetInchesToInches,
+  MAX_NOMINAL_HEIGHT_IN,
   parseSizeLabel,
   parseFrameOpeningRow,
   parsePageHint,
@@ -304,6 +306,42 @@ function sizeConditions(paths, rowLabel) {
   return out;
 }
 
+/**
+ * Reconstruct a row's size label when Width and Height are separate columns and
+ * the printed Height cell is vertically merged across several width rows.
+ *
+ * The extractor preserves only nonblank cells, so a merged height appears once
+ * near the visual center of its row span. Assigning each row to the nearest
+ * explicit height anchor reconstructs the printed spans deterministically:
+ * e.g. Pioneer page 14 anchors at rows 2, 7, 11, 12, and 13 map to
+ * 6'8" (rows 0-4), 7'0" (5-9), 7'2" (10-11), 7'10" (12), 8'0" (13-14).
+ */
+export function matrixSizeLabelForRow(grid, rowIndex) {
+  const rowLabel = String(grid?.rowLabels?.[rowIndex] ?? '').trim();
+  if (!rowLabel || parseSizeLabel(rowLabel).height != null) return rowLabel;
+
+  const heightCols = (grid?.columnLabels ?? [])
+    .map((label, index) => ({ label: String(label ?? ''), index }))
+    .filter(({ label }) => /\bheight\b/i.test(label))
+    .map(({ index }) => index);
+  if (heightCols.length === 0) return rowLabel;
+
+  const anchors = (grid?.cells ?? []).flatMap((cell) => {
+    if (!heightCols.includes(cell.col)) return [];
+    const rawValue = String(cell.rawValue ?? cell.raw_value ?? '').trim();
+    const height = feetInchesToInches(rawValue);
+    if (height == null || height <= 0 || height > MAX_NOMINAL_HEIGHT_IN) return [];
+    return [{ row: Number(cell.row), rawValue }];
+  });
+  if (anchors.length === 0) return rowLabel;
+
+  anchors.sort((a, b) => {
+    const distance = Math.abs(a.row - rowIndex) - Math.abs(b.row - rowIndex);
+    return distance !== 0 ? distance : a.row - b.row;
+  });
+  return `${rowLabel} | ${anchors[0].rawValue}`;
+}
+
 /** A label that is a header / non-data token (becomes junk if compiled as a value). */
 function isHeaderish(label) {
   const s = String(label ?? '').trim().toLowerCase();
@@ -367,6 +405,7 @@ async function compileMatrix(sb, ctx, archetype) {
     if (status === 'PRICED' && (price == null || price <= 0)) continue;
     const colLabel = colLabels[cell.col] ?? '';
     const rowLabel = rowLabels[cell.row] ?? '';
+    const rowSizeLabel = matrixSizeLabelForRow(grid, cell.row);
     // Skip header / non-data cells that otherwise compile into junk rules
     // (e.g. a "Price" column header parsed as a gauge value).
     if (isHeaderish(rowLabel) || isHeaderish(colLabel)) continue;
@@ -379,7 +418,7 @@ async function compileMatrix(sb, ctx, archetype) {
     if (seriesRes.rejected || colRes.rejected) { skippedRejected++; continue; }
     const colConds = colRes.conds;
 
-    const sizeConds = sizeConditions(paths, rowLabel);
+    const sizeConds = sizeConditions(paths, rowSizeLabel);
     // Frame "Complete … Frame Unit" rows encode the door HEIGHT and SINGLE/PAIR
     // opening type in the row label (e.g. "7-0 SINGLE OPENING (3S) 2-6,…,3-0").
     // Capture height as a size bound (so the tightest enclosing height wins, via
@@ -413,7 +452,7 @@ async function compileMatrix(sb, ctx, archetype) {
       exclusive_group: exclusiveGroup,
       stacking_behavior: exclusiveGroup ? 'EXCLUSIVE_GROUP' : 'STACK',
       priority,
-      raw_value_text: `${rowLabel} | ${colLabel} = ${interpreted.rawValue}`,
+      raw_value_text: `${rowSizeLabel} | ${colLabel} = ${interpreted.rawValue}`,
     }));
     await insertConditions(sb, ruleId, [
       ...seriesRes.conds,
@@ -430,6 +469,100 @@ async function compileMatrix(sb, ctx, archetype) {
     console.warn(`[compile] ${archetype} table ${priceTableId}: skipped ${skippedRejected} priced cell(s) whose series/column value was rejected by the governed vocabulary (spec_value_alias).`);
   }
   return count;
+}
+
+function labelWithoutOptionCode(label, code) {
+  let s = String(label ?? '').trim();
+  const codeText = String(code ?? '').trim();
+  if (codeText && s.toLowerCase().startsWith(codeText.toLowerCase())) {
+    s = s.slice(codeText.length).trim();
+  } else {
+    s = s.replace(/^([A-Z0-9][A-Z0-9/\-+.]{0,15})\b\s*/i, '').trim();
+  }
+  return s.replace(/^[-–—:|,.\s]+/, '').trim();
+}
+
+function fieldPathFromAdderContext(entityType, paths, ext, grid, rowIndex) {
+  const rawHint = grid?.rowFieldHints?.[rowIndex] ?? grid?.row_field_hints?.[rowIndex] ?? null;
+  const hint = String(rawHint ?? '').trim();
+  if (hint.includes('.')) return hint;
+
+  const hintHay = hint.toLowerCase().replace(/[_-]+/g, ' ');
+  const titleHay = `${ext?.title ?? ''} ${ext?.description ?? ''}`.toLowerCase();
+  const hay = `${hintHay} ${titleHay}`;
+
+  if (/(^|\b)(material|material type|door material|frame material|panel material)(\b|$)/.test(hay)) return paths.material;
+  if (/(^|\b)(core|construction|door construction)(\b|$)/.test(hay) && paths.core) return paths.core;
+  if (/(^|\b)(edge|seamless|lockseam|seam)(\b|$)/.test(hay) && paths.edge) return paths.edge;
+  if (/(^|\b)(gauge|gage)(\b|$)/.test(hay)) return paths.gauge;
+  if (/door\s+thickness|thick\s+door|^door thickness$/.test(hay) && entityType === 'door') return 'door.door_thickness';
+  if (/(leaf activity|door activity|pair\s*\/\s*single|single\s*\/\s*pair|de pair|double egress)/.test(hay) && entityType === 'door') return 'door.leaf_activity';
+  return null;
+}
+
+function valueFromAdderLabel(fieldPath, label, code) {
+  const text = labelWithoutOptionCode(label, code);
+  const hay = `${code ?? ''} ${text}`.toLowerCase();
+  if (!fieldPath) return null;
+
+  if (/\.door_material$|\.frame_material$|\.panel_material$/.test(fieldPath)) {
+    if (/galv|a60|g60|g90|\bg\b/.test(hay)) return 'Galvannealed';
+    if (/cold\s*rolled|crs|\bc\b/.test(hay)) return 'CRS';
+    if (/stainless|304|316|\bss\b/.test(hay)) return 'Stainless';
+    if (/alum/.test(hay)) return 'Aluminum';
+  }
+
+  if (fieldPath === 'door.core_type') {
+    if (/honeycomb|\bh\b/.test(hay)) return 'Honeycomb';
+    if (/polystyrene|foam|\bhp\b/.test(hay)) return 'polystyrene';
+    if (/polyurethane|\bht\b/.test(hay)) return 'polyurethane';
+    if (/temp(?:erature)?\s*rise|\bhr\b/.test(hay)) return 'temperature rise';
+  }
+
+  if (fieldPath === 'door.edge_seam_construction') {
+    if (/seamless|tack\s*&\s*fill|tack[- ]?and[- ]?fill|\b-f\b/.test(hay)) return 'seamless tack-and-fill';
+    if (/lock[- ]?seam/.test(hay)) return 'Lockseam';
+    if (/continuous(?:ly)?[- ]?weld/.test(hay)) return 'continuous weld';
+    if (/emboss/.test(hay)) return 'embossed';
+  }
+
+  if (fieldPath === 'door.door_thickness') {
+    const m = text.match(/\b(\d+(?:[-\s]\d+\/\d+)?)\s*(?:"|in\b|inch)?/i);
+    if (m) return m[1].replace(/\s+/, '-');
+  }
+
+  if (fieldPath === 'door.leaf_activity') {
+    const codeUpper = String(code ?? '').trim().toUpperCase();
+    if (['SNGL', 'PAIR', 'DBLE'].includes(codeUpper)) return codeUpper;
+    if (/double\s+egress|\bdble\b/.test(hay)) return 'DBLE';
+    if (/\bpair\b/.test(hay)) return 'PAIR';
+    if (/\bsingle\b|\bsngl\b/.test(hay)) return 'SNGL';
+  }
+
+  return text || null;
+}
+
+export function adderSemanticConditions(entityType, paths, ext, grid, rowIndex, label, code) {
+  const fieldPath = fieldPathFromAdderContext(entityType, paths, ext, grid, rowIndex);
+  const value = valueFromAdderLabel(fieldPath, label, code);
+  if (!fieldPath || !value) return [];
+  return [{
+    fieldPath,
+    operator: 'EQ',
+    valueType: fieldPath.includes('thickness') ? 'TEXT' : 'CODE',
+    value1: value,
+    normalizedValue: String(value).toLowerCase(),
+    sourcePhrase: label,
+  }];
+}
+
+function mergeIdentityAndAdderConditions(identityConds, semanticConds, optionCond) {
+  const semanticFields = new Set(semanticConds.map((c) => c.fieldPath).filter(Boolean));
+  return [
+    ...identityConds.filter((c) => !semanticFields.has(c.fieldPath)),
+    ...semanticConds,
+    optionCond,
+  ];
 }
 
 /** Compile an option/adder list: one FIXED_ADD (or status/percent/per-foot) rule per row. */
@@ -466,11 +599,20 @@ async function compileAdderList(sb, ctx) {
     else if (token?.kind === 'next_larger') { action = 'REFERENCE_PLUS_ADD'; amount = price; }
     else if (price == null) { continue; } // no price and no recognized token -> skip noise row
 
-    // Normalize series to the governed vocabulary; skip if rejected.
-    const { conds: addConds, rejected } = aliasConds([
-      ...identityConditions(entityType, ctx.paths, ext),
-      { fieldPath: `${entityType}.option_code`, operator: 'EQ', valueType: 'CODE', value1: code, sourcePhrase: label, nullBehavior: 'IGNORE' },
-    ], ctx.aliases);
+    // Normalize series/semantic selectors to the governed vocabulary; skip if
+    // rejected. Row-level semantic selectors (e.g. Material Type -> door
+    // material) override same-field identity selectors inferred from the table
+    // title so adders do not compile contradictory conditions.
+    const semanticConds = adderSemanticConditions(entityType, ctx.paths, ext, grid, r, label, code);
+    const optionCond = { fieldPath: `${entityType}.option_code`, operator: 'EQ', valueType: 'CODE', value1: code, sourcePhrase: label, nullBehavior: 'IGNORE' };
+    const { conds: addConds, rejected } = aliasConds(
+      mergeIdentityAndAdderConditions(
+        identityConditions(entityType, ctx.paths, ext),
+        semanticConds,
+        optionCond,
+      ),
+      ctx.aliases,
+    );
     if (rejected) continue;
 
     const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {

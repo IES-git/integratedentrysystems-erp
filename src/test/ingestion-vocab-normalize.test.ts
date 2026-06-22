@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 // Pure compile-time vocabulary normalizer from the price-book worker.
-import { aliasConds } from '../../services/price-book-worker/src/compile.js';
+import { adderSemanticConditions, aliasConds } from '../../services/price-book-worker/src/compile.js';
 import {
+  fieldPaths,
   inferCanonicalSelectors,
   interpretGridCell,
   normalizeToken,
@@ -65,6 +66,54 @@ describe('ingestion vocabulary normalization (aliasConds)', () => {
   it('is a no-op when the alias map is empty', () => {
     const input = [{ fieldPath: 'door.door_series_construction', operator: 'EQ', value1: 'FEMA 361' }];
     expect(aliasConds(input, new Map()).conds).toEqual(input);
+  });
+});
+
+describe('adder semantic condition inference', () => {
+  it('turns Pioneer material-type adder rows into canonical material conditions', () => {
+    const conds = adderSemanticConditions(
+      'door',
+      fieldPaths('door'),
+      { title: 'H Series - Material Type' },
+      { rowLabels: ['G Galvannealed Material'] },
+      0,
+      'G Galvannealed Material',
+      'G',
+    );
+
+    const aliases = vocab([
+      ['door.door_material', 'Galvannealed', { canonical: 'galvannealed', targetOperator: 'EQ', status: 'alias' }],
+    ]);
+    expect(aliasConds(conds, aliases).conds).toEqual([
+      expect.objectContaining({
+        fieldPath: 'door.door_material',
+        value1: 'galvannealed',
+        normalizedValue: 'galvannealed',
+      }),
+    ]);
+  });
+
+  it('uses the row option value for core adders instead of the title-implied base core', () => {
+    const identity = inferCanonicalSelectors('door', {
+      title: 'H Series - Door Construction',
+      detected_series: 'H Series',
+    });
+    const semantic = adderSemanticConditions(
+      'door',
+      fieldPaths('door'),
+      { title: 'H Series - Door Construction', detected_series: 'H Series' },
+      { rowLabels: ['HP Polystyrene Core'] },
+      0,
+      'HP Polystyrene Core',
+      'HP',
+    );
+
+    expect(identity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fieldPath: 'door.core_type', value1: 'Honeycomb' }),
+    ]));
+    expect(semantic).toEqual([
+      expect.objectContaining({ fieldPath: 'door.core_type', value1: 'polystyrene' }),
+    ]);
   });
 });
 

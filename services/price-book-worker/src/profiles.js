@@ -7,7 +7,7 @@
 export const PRICE_BOOK_PROFILES = [
   {
     key: 'pioneer-steel-doors-frames',
-    version: '2026-06-21.4',
+    version: '2026-06-21.6',
     manufacturer: 'Pioneer Industries',
     aliases: ['pioneer', 'aadg'],
     ingestionLane: 'pdf_rule_compiler',
@@ -36,10 +36,52 @@ export const PRICE_BOOK_PROFILES = [
       ['borrowed lites', 'borrowed lite'],
       ['additional preparations', 'door preparations', 'frame preparations'],
     ],
+    catalogSeeds: [
+      {
+        title: 'H Series - Door Construction',
+        category: 'doors',
+        series: 'H Series',
+        kind: 'adder',
+        page_hint: 'PDF p. 14',
+        description: 'Core construction adders',
+      },
+      {
+        title: 'H Series - Seamless Edge',
+        category: 'doors',
+        series: 'H Series',
+        kind: 'adder',
+        page_hint: 'PDF p. 14',
+        description: 'Seamless edge adder',
+      },
+      {
+        title: 'H Series - Material Type',
+        category: 'doors',
+        series: 'H Series',
+        kind: 'adder',
+        page_hint: 'PDF p. 14',
+        description: 'Door material adders',
+      },
+      {
+        title: 'H Series - Door Thickness',
+        category: 'doors',
+        series: 'H Series',
+        kind: 'adder',
+        page_hint: 'PDF p. 14',
+        description: 'Door thickness adders',
+      },
+      {
+        title: 'H Series - Pair / Single / DE Pair',
+        category: 'doors',
+        series: 'H Series',
+        kind: 'adder',
+        page_hint: 'PDF p. 14',
+        description: 'Opening configuration adders',
+      },
+    ],
   },
   {
     key: 'ceco-steel-doors-frames',
-    version: '2026-06-21.4',
+    version: '2026-06-21.6',
     manufacturer: 'CECO Door',
     aliases: ['ceco', 'ceco door'],
     ingestionLane: 'pdf_rule_compiler',
@@ -74,7 +116,7 @@ export const PRICE_BOOK_PROFILES = [
   },
   {
     key: 'de-la-fontaine-steel-doors-frames',
-    version: '2026-06-21.4',
+    version: '2026-06-21.6',
     manufacturer: 'De La Fontaine',
     aliases: ['de la fontaine', 'delafontaine'],
     ingestionLane: 'pdf_rule_compiler',
@@ -110,7 +152,7 @@ export const PRICE_BOOK_PROFILES = [
   },
   {
     key: 'ngp-infill-2026',
-    version: '2026-06-21.4',
+    version: '2026-06-21.6',
     manufacturer: 'NGP / Anemostat Door Products',
     aliases: ['ngp', 'anemostat'],
     ingestionLane: 'ngp_normalized_workbook',
@@ -145,7 +187,7 @@ export const PRICE_BOOK_PROFILES = [
   },
   {
     key: 'hardware-normalized-master',
-    version: '2026-06-21.4',
+    version: '2026-06-21.6',
     manufacturer: 'Mixed hardware suppliers',
     aliases: ['hardware normalized ingestion master'],
     ingestionLane: 'hardware_normalized_workbook',
@@ -193,6 +235,10 @@ export function getPriceBookProfile(key) {
   return PRICE_BOOK_PROFILES.find((profile) => profile.key === key) ?? null;
 }
 
+export function getProfileCatalogSeeds(profile) {
+  return (profile?.catalogSeeds ?? []).map((seed) => ({ ...seed }));
+}
+
 function anchorTerms(anchor) {
   return Array.isArray(anchor) ? anchor : [anchor];
 }
@@ -220,12 +266,17 @@ export function buildProfileCatalogChecklist(profile) {
   const anchors = profile.sectionAnchors.map(anchorLabel).join('; ');
   const pageBands = profile.requiredPageBands.map((band) =>
     `${band.label}: physical PDF pages ${band.start}-${band.end}, at least ${band.minimumTables} priced tables/sections`).join('; ');
+  const catalogSeeds = getProfileCatalogSeeds(profile).map((seed) =>
+    `${seed.title} at ${seed.page_hint} (${seed.kind})`).join('; ');
   return [
     `KNOWN SOURCE PROFILE: ${profile.manufacturer} (${profile.key}, ${profile.version}).`,
     `Expected ingestion lane: ${profile.ingestionLane}.`,
     `Required catalog categories: ${categories || 'none'}.`,
     anchors ? `Expected sections/anchors (wording may vary): ${anchors}.` : '',
     pageBands ? `Required physical-page coverage: ${pageBands}.` : '',
+    catalogSeeds
+      ? `Known independently priced blocks that must remain separate catalog entries: ${catalogSeeds}.`
+      : '',
     profile.minimumCatalogTables > 0
       ? `Do not stop before finding at least ${profile.minimumCatalogTables} distinct priced tables unless the source truly contains fewer.`
       : '',

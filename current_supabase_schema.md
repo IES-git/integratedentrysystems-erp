@@ -1910,6 +1910,12 @@ Legacy documents may remain published for audit history, but they are not offere
 as manufacturer catalogs or selected by the pricing engine until re-ingested and
 verified.
 
+During the connected cutover, previously published documents with no governed
+profile and `source_verified = false` are moved to `archived` by
+`20260622013000_archive_unverified_price_books.sql`. This protects older deployed
+clients that do not yet filter on `source_verified`; no pricing or source rows are
+deleted.
+
 #### Seamless build-to-review flow (2026-06-21, migrations `cpq_v2_opening_spec_snapshot`, `cpq_v2_estimate_line_overrides_and_adjustment`)
 
 **Migration `cpq_v2_opening_spec_snapshot`** — added `estimate_openings.spec_snapshot JSONB NULL`. Written by `saveOpeningDraft` in `src/lib/cpq/opening-persist.ts` with the full `OpeningDraft` JSON on every spec builder save. Enables faithful round-trip editing (`loadOpeningDraft` → `SpecOpeningBuilder`) and re-pricing (`repriceSpecOpening`) without lossy reconstruction from item_fields.

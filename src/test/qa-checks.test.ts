@@ -167,7 +167,7 @@ describe('ingestion profile publication gate', () => {
   it('passes a complete fingerprinted Pioneer document', () => {
     const findings = evaluateIngestionProfileQa({
       profileKey: 'pioneer-steel-doors-frames',
-      profileVersion: '2026-06-21.4',
+      profileVersion: '2026-06-21.6',
       fileType: 'pdf',
       sourceSha256: 'ef32d45501233ff59e06311abc0dce91f310a439dd0015b61b2b13b482abcf27',
       sourcePageCount: 103,
@@ -180,7 +180,7 @@ describe('ingestion profile publication gate', () => {
   it('blocks publication when required manufacturer entities are missing', () => {
     const findings = evaluateIngestionProfileQa({
       profileKey: 'ceco-steel-doors-frames',
-      profileVersion: '2026-06-21.4',
+      profileVersion: '2026-06-21.6',
       fileType: 'pdf',
       sourceSha256: 'e491ce09add14b4ccd193a146817a6929c07120821153a9ae7aaacd22d888101',
       sourcePageCount: 167,
@@ -196,7 +196,7 @@ describe('ingestion profile publication gate', () => {
   it('blocks the raw NGP PDF from the normalized-workbook publication lane', () => {
     const findings = evaluateIngestionProfileQa({
       profileKey: 'ngp-infill-2026',
-      profileVersion: '2026-06-21.4',
+      profileVersion: '2026-06-21.6',
       fileType: 'pdf',
       sourceSha256: '9ddb400c994d7416c04a488ae2be3bd29214f4ace40f9233bfe464e78ec2d2f7',
       sourcePageCount: 88,

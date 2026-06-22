@@ -150,6 +150,8 @@ How to be exhaustive:
 2. Then page through the ENTIRE document in order. A real book has MANY tables: every door series has its own size grid (and often header/transom/louver/glass add tables), every frame series has its own grid, plus standalone hardware lists and MANY option/adder/surcharge tables (e.g. "add for fire label", "add for header", finish upcharges, oversize upcharges, prep charges).
 3. Treat each size grid, each flat price list, and each adder/surcharge table as a SEPARATE entry — never merge two printed tables into one.
    IMPORTANT: A single PDF page titled "Additional Preparations (Adders)" often contains MULTIPLE sub-sections (e.g. one section for astragals, a separate section for lock types, another for hinges, another for undercuts). These are DISTINCT adder groups — list each sub-section as its own entry. Use the section heading as the title (e.g. "H Series - Astragal Adders", "H Series - Lock Prep Adders", "H Series - Hinge Adders").
+   Small independently priced blocks beside a larger matrix count too. Examples include "Door Construction", "Material Type", "Door Thickness", "Seamless", handing/opening configuration, cutout-only charges, and N/C option lists. If a block has only a short local heading, synthesize a precise title from the parent series plus that heading (for example "H Series - Material Type").
+   A block containing N/C plus one or more priced alternatives is a pricing table and MUST be cataloged even if it has only two rows.
    Repeated headings on consecutive pages (for example "Door and Frame Preparation Charges") are NOT duplicates when the physical page differs. List every priced page/sub-table separately with its physical PDF page.
 4. Do NOT stop after the first few. Err on the side of MORE entries.
 
@@ -326,6 +328,7 @@ ${locationInstruction} Extract the COMPLETE grid for THIS table ONLY. Do NOT mer
 3. cells: every NON-BLANK value cell as { row, col, raw_value, price? } using 0-based indices into row_labels/column_labels.
    - raw_value is REQUIRED and must preserve the printed text exactly (examples: "$733", "N/C", "N/A", "CF", "Included", "Add 25%").
    - price is present only when the cell is a numeric money amount. Do not invent 0 for N/C, N/A, CF, Included, or blank cells.
+   - If a printed Width, Height, Size, or other dimension cell is vertically merged across multiple rows, repeat that merged raw_value for EVERY row it spans. This is structural evidence, not an invented value.
    - Omit truly blank/empty cells. Capture EVERY value across ALL rows and ALL columns — do not stop early or sample.
 4. column_field_hints: { col, field_key } for any column mappable to a standard field key.
 5. warnings: note anything unreadable, ambiguous, or any prices that appear to continue onto another page.

@@ -25,6 +25,19 @@ export function parsePageRange(pageHint) {
 }
 
 /**
+ * Canonical physical-page label used for catalog identity and persisted
+ * extraction evidence. Gemini may alternate between "14", "p. 14", and
+ * "PDF p. 14" across catalog rounds; those are the same source location.
+ */
+export function canonicalizePageHint(pageHint) {
+  const parsed = parsePageRange(pageHint);
+  if (!parsed) return String(pageHint ?? '').trim() || null;
+  return parsed.start === parsed.end
+    ? `PDF p. ${parsed.start}`
+    : `PDF pp. ${parsed.start}-${parsed.end}`;
+}
+
+/**
  * Copy a small page window around a table hint. The padding tolerates cover/
  * front-matter offsets and slightly imprecise catalog hints while keeping the
  * extraction model focused on one printed table instead of a 100+ page book.

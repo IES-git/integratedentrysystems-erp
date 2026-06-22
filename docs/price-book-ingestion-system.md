@@ -49,6 +49,8 @@ Use the PDF lane for Pioneer, CECO, and De La Fontaine:
 - record physical PDF page indices (cover = page 1), not section labels such as
   `R-2`, `D-4`, or `S-10`;
 - extract each table from a bounded PDF page window;
+- reconstruct vertically merged dimension cells (for example, one printed
+  height spanning several width rows) into explicit row-level size conditions;
 - retain exact source values such as `N/C`, `N/A`, `CF`, and `Included`;
 - normalize dimensions, material, gauge, core, edge construction, wall
   construction, and assembly method;
@@ -57,8 +59,18 @@ Use the PDF lane for Pioneer, CECO, and De La Fontaine:
 Each governed PDF profile also declares minimum priced-table counts by physical
 page band. This prevents a catalog that happens to mention every section name
 from passing while omitting most tables inside a long section. Enumeration is
-allowed up to 500 tables and must reach a natural no-new-tables stopping point;
-hitting the table cap or exhausting rounds blocks publication.
+allowed up to 500 tables. Catalog identity normalizes equivalent page hints such
+as `14`, `p. 14`, and `PDF p. 14` before deduplication. Enumeration must reach a
+no-new-table stopping point; for an exact governed source, a truncated no-new
+response is accepted only after the independent category, section-anchor, and
+physical-page-band profile checks already pass. Hitting the table cap,
+exhausting rounds, or failing profile coverage blocks publication.
+
+Exact-source profiles may also seed structural entries for small independently
+priced blocks that vision cataloging tends to overlook beside a large matrix.
+These seeds contain only the printed block title, physical page, category,
+series, and table kind. Prices are still extracted from the bounded source PDF
+window and remain subject to the same evidence, compiler, and QA gates.
 
 Manufacturer identity comes from `price_book_document.manufacturer_id`, not from
 embedding a vendor name in the opening spec.
@@ -208,11 +220,12 @@ Before connected ingestion can run:
 
 1. Apply `db/migrations/20260621233000_price_book_ingestion_profiles.sql`.
 2. Apply `db/migrations/20260622010000_price_book_source_verification.sql`.
-3. Deploy the updated price-book worker with its Supabase service-role and
+3. Apply `db/migrations/20260622013000_archive_unverified_price_books.sql`.
+4. Deploy the updated price-book worker with its Supabase service-role and
    Gemini credentials.
-4. Upload each source through an authenticated admin session.
-5. Process, review, and publish one immutable document revision per source.
-6. Run golden opening fixtures against the published documents.
+5. Upload each source through an authenticated admin session.
+6. Process, review, and publish one immutable document revision per source.
+7. Run golden opening fixtures against the published documents.
 
 The connected application database audited on June 21, 2026 contained legacy
 pre-change Pioneer, NGP, and hardware ingestion output. Those records are kept

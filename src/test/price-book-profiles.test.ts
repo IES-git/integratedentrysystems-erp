@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildProfileCatalogChecklist,
   evaluateCatalogProfileCoverage,
+  getProfileCatalogSeeds,
   identifyPriceBookProfile,
 } from '../../services/price-book-worker/src/profiles.js';
 
@@ -38,6 +39,22 @@ describe('governed price-book source profiles', () => {
     expect(checklist).toContain('CECO Door');
     expect(checklist).toContain('doors, frames');
     expect(checklist).toContain('legion / lp series');
+  });
+
+  it('seeds small independently priced Pioneer option blocks on the golden page', () => {
+    const profile = identifyPriceBookProfile({
+      sha256: 'ef32d45501233ff59e06311abc0dce91f310a439dd0015b61b2b13b482abcf27',
+    });
+    const seeds = getProfileCatalogSeeds(profile);
+    expect(seeds.map((seed) => seed.title)).toEqual(expect.arrayContaining([
+      'H Series - Door Construction',
+      'H Series - Material Type',
+      'H Series - Door Thickness',
+      'H Series - Seamless Edge',
+      'H Series - Pair / Single / DE Pair',
+    ]));
+    expect(seeds.every((seed) => seed.page_hint === 'PDF p. 14')).toBe(true);
+    expect(buildProfileCatalogChecklist(profile)).toContain('H Series - Material Type at PDF p. 14');
   });
 
   it('accepts source-specific series names as alternatives to generic section titles', () => {

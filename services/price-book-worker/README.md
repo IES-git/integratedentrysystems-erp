@@ -10,7 +10,13 @@ Edge Functions, against the same Supabase tables:
 - `POST /catalog { priceBookId }` — lists every pricing table in the book and
   inserts a placeholder `price_book_extractions` row + pending
   `pricing_change_proposals` row per table. Returns `202` immediately and runs
-  in the background; the app polls `price_books.ocr_status`.
+  in the background; the app polls `price_books.ocr_status`. Equivalent
+  physical-page labels (`14`, `p. 14`, `PDF p. 14`) are canonicalized before
+  table deduplication so repeated Gemini catalog rounds cannot create duplicate
+  extraction rows for the same printed table. Governed exact-source profiles
+  can also seed known small priced blocks (location and classification only,
+  never prices) so option tables beside a dominant matrix cannot be silently
+  omitted from extraction.
 - `POST /extract { extractionId }` — extracts one table's full grid and fills
   the extraction row. For PDFs, the worker uploads only a small page window
   around the cataloged table hint (with offset padding), rather than asking the
@@ -18,7 +24,9 @@ Edge Functions, against the same Supabase tables:
 - `POST /extract-all { priceBookId }` — extracts all pending tables in the
   background with bounded concurrency.
 - `POST /compile { extractionId }` / `POST /compile-all { priceBookId }` —
-  compile extracted evidence into canonical price and dependency rules.
+  compile extracted evidence into canonical price and dependency rules,
+  including deterministic propagation of vertically merged Height cells across
+  every Width row in the printed span.
 - `POST /ingest-hardware { priceBookId }` — deterministic normalized/raw
   hardware workbook ingestion. The normalized master is preflighted before the
   shared hardware catalog is replaced.
