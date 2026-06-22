@@ -9,11 +9,21 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabaseAuthStorageKey = `sb-${new URL(supabaseUrl).hostname.split('.')[0]}-auth-token`;
 
+// Avoid Web Locks aborts when the ERP is open in multiple browser tabs.
+const runWithoutCrossTabAuthLock = async <T>(
+  _name: string,
+  _acquireTimeout: number,
+  fn: () => Promise<T>,
+): Promise<T> => {
+  return await fn();
+};
+
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: true,
+    lock: runWithoutCrossTabAuthLock,
   },
 });
 
