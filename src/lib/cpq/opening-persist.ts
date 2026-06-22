@@ -135,6 +135,30 @@ export interface SaveDraftResult {
 // Snapshot persistence helpers
 // ---------------------------------------------------------------------------
 
+type SnapshotComponent = ComponentDraft & { effectiveFields: Record<string, string> };
+
+function componentSnapshot(
+  comp: ComponentDraft,
+  entityType: ComponentDraft['entityType'],
+  ctx: BuilderContext,
+): SnapshotComponent {
+  const normalized = { ...comp, entityType };
+  return {
+    ...normalized,
+    effectiveFields: resolveComponentFields(normalized, ctx.derivedByComponent[comp.id]),
+  };
+}
+
+function draftWithEffectiveSnapshot(draft: OpeningDraft, ctx: BuilderContext): OpeningDraft {
+  return {
+    ...draft,
+    doors: draft.doors.map((c) => componentSnapshot(c, 'door', ctx)),
+    frames: draft.frames.map((c) => componentSnapshot(c, 'frame', ctx)),
+    panels: draft.panels.map((c) => componentSnapshot(c, 'panel', ctx)),
+    lites: draft.lites.map((c) => componentSnapshot(c, 'specialty', ctx)),
+  } as OpeningDraft;
+}
+
 /** Creates a new estimate opening row, storing the draft spec snapshot. */
 async function createEstimateOpeningWithSnapshot(
   estimateId: string,
@@ -319,9 +343,11 @@ export async function saveOpeningDraft(
   existingOpeningId?: string | null,
   ngpCatalog?: NgpCatalog | null,
 ): Promise<SaveDraftResult> {
+  const ctx = deriveBuilderContext(draft);
+  const snapshot = draftWithEffectiveSnapshot(draft, ctx);
   let opening: EstimateOpening;
   if (existingOpeningId) {
-    opening = await updateEstimateOpeningWithSnapshot(existingOpeningId, draft.name.trim(), draft.quantity, draft);
+    opening = await updateEstimateOpeningWithSnapshot(existingOpeningId, draft.name.trim(), draft.quantity, snapshot);
     // Clear prior children for a clean replace.
     const { data: items } = await supabase.from('estimate_items').select('id').eq('opening_id', existingOpeningId);
     for (const it of items ?? []) await deleteEstimateItem(it.id as string);
@@ -330,13 +356,12 @@ export async function saveOpeningDraft(
     await supabase.from('opening_cutout').delete().eq('opening_id', existingOpeningId);
     await supabase.from('estimate_line').delete().eq('opening_id', existingOpeningId);
   } else {
-    opening = await createEstimateOpeningWithSnapshot(estimateId, draft.name.trim(), draft.quantity, draft);
+    opening = await createEstimateOpeningWithSnapshot(estimateId, draft.name.trim(), draft.quantity, snapshot);
   }
 
   // Components → estimate_items + item_fields (effective, builder-derived fields).
   // Collect draft-id → real estimate_items.id so engine lines persist a valid
   // component_id (deterministic save, plan Phase 5).
-  const ctx = deriveBuilderContext(draft);
   const componentIdMap = new Map<string, string>();
   await saveComponentItems(estimateId, opening.id, draft.doors.map((d) => ({ ...d, entityType: 'door' as const })), 0, ctx, componentIdMap);
   await saveComponentItems(estimateId, opening.id, draft.frames.map((d) => ({ ...d, entityType: 'frame' as const })), 100, ctx, componentIdMap);
@@ -419,7 +444,7 @@ export async function saveOpeningDraft(
   // Pin the price book + as-of date on the estimate and snapshot a resolution
   // revision so reprice is deterministic and the audit trail is retained.
   await pinEstimatePricing(estimateId, options);
-  await writeResolutionRevision(opening.id, estimateId, draft, options);
+  await writeResolutionRevision(opening.id, estimateId, snapshot, options);
 
   // Keep estimates.total_price in sync so the estimates list always shows a
   // current total — even before the user reaches "Save & Finish".

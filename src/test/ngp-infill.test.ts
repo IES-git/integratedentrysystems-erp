@@ -80,6 +80,32 @@ describe('ngp-infill pure logic', () => {
     expect(entities).toEqual(['glass', 'glazing_tape', 'lite_kit']);
   });
 
+  it('prefers a capacity-backed standard vision kit over security add-ons', () => {
+    const c = emptyNgpCatalog();
+    c.documentId = 'doc';
+    c.products = [
+      product({ productId: 'NGP-SSD', model: 'SSD', category: 'LITE_KIT', subcategory: 'SECURITY', productName: 'Security sliding door for a vision lite kit', doorThicknessMinIn: 0.75, fireRatingMax: 90, glassScope: 'NOT_APPLICABLE' }),
+      product({ productId: 'NGP-L-FRA100-SP', model: 'L-FRA100-SP', category: 'LITE_KIT', subcategory: 'VISION_LITE', productName: 'Low-profile special glass/door-thickness lite kit', doorThicknessMinIn: 1.375, doorThicknessMaxIn: 1.75, glassThicknessMinIn: 0.25, glassThicknessMaxIn: 1, fireRatingMax: 180, glassScope: 'SEPARATE_REQUIRED' }),
+      product({ productId: 'NGP-20T', model: '20T', category: 'GLASS', fireRatingMax: 0, glassThicknessMinIn: 0.25, glassThicknessMaxIn: 0.25 }),
+    ];
+    c.capacities = [
+      { id: 'cap-sp', priceBookDocumentId: 'doc', capacityId: 'CAP-SP', kitModel: 'L-FRA100-SP', doorThicknessIn: 1.75, glassThicknessIn: 0.25, requiredTapeModel: 'L-GT-118', profileGroup: null, allowed: true, sourcePage: null },
+    ];
+    c.tableMaps = [
+      { id: 'm-sp', priceBookDocumentId: 'doc', mapId: 'MAP-SP', ngpPriceTableId: 'PT-SP', priceTableId: 'pt-sp', model: 'L-FRA100-SP', relationship: 'BASE', multiplier: 1, condition: null, includedScope: 'KIT_ONLY', glassModel: null, tapeModel: null, entityType: 'lite_kit', sourcePage: null },
+      { id: 'm-glass', priceBookDocumentId: 'doc', mapId: 'MAP-GLASS', ngpPriceTableId: 'PT-GLASS', priceTableId: 'pt-glass', model: '20T', relationship: 'BASE', multiplier: 1, condition: null, includedScope: 'GLASS_ONLY', glassModel: '20T', tapeModel: null, entityType: 'glass', sourcePage: null },
+      { id: 'm-ssd', priceBookDocumentId: 'doc', mapId: 'MAP-SSD', ngpPriceTableId: 'PT-SSD', priceTableId: 'pt-ssd', model: 'SSD', relationship: 'BASE', multiplier: 1, condition: null, includedScope: 'SSD_BASE', glassModel: null, tapeModel: null, entityType: 'lite_kit', sourcePage: null },
+    ];
+
+    const r = resolveInfill(c, {
+      infillType: 'LITE', cutoutWidthIn: 24, cutoutHeightIn: 36, doorThicknessIn: 1.75,
+      fireRatingMinutes: 0, glassThicknessIn: 0.25, preferAssembly: false,
+    });
+
+    expect(r.kit?.model).toBe('L-FRA100-SP');
+    expect(r.issues.some((i) => i.code === 'NGP_NO_CAPACITY')).toBe(false);
+  });
+
   it('assembly mode: a single lite_kit component, no separate glass/tape', () => {
     const r = resolveInfill(catalog(), {
       infillType: 'LITE', cutoutWidthIn: 24, cutoutHeightIn: 32, doorThicknessIn: 1.75,

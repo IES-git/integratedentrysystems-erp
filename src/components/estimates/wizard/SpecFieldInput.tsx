@@ -54,16 +54,33 @@ export function SpecFieldInput({ field, value, onChange, locked, derivedValue, d
   const effectiveValue = hasOverride ? value : derived;
   const isAuto = !hasOverride && derived !== '';
 
-  const baseEnum = options ?? (isBoolean && field.enumOptions.length === 0 ? ['Yes', 'No'] : field.enumOptions);
+  const isFreeformMeasurement =
+    !dataType.includes('enum')
+    && (dataType.includes('dimension') || dataType.includes('integer') || dataType.includes('number'));
+  const allowGuidedMeasurementSelect =
+    path === 'frame.jamb_depth'
+    || path === 'opening.finished_wall_thickness_jamb_depth';
+  const baseEnum = (options && (!isFreeformMeasurement || allowGuidedMeasurementSelect)) ? options : (
+    isBoolean && field.enumOptions.length === 0
+      ? ['Yes', 'No']
+      : isFreeformMeasurement
+        ? []
+        : field.enumOptions
+  );
   // Keep the effective value selectable even if filtering excluded it.
-  const enumOptions = effectiveValue && !baseEnum.includes(effectiveValue)
+  const enumOptions = (!isFreeformMeasurement || allowGuidedMeasurementSelect) && effectiveValue && !baseEnum.includes(effectiveValue)
     ? [effectiveValue, ...baseEnum]
     : baseEnum;
 
-  const placeholder =
-    dataType.includes('dimension')
-      ? "e.g. 3-0 or 36\""
-      : field.allowedValues?.slice(0, 40) ?? '';
+  const placeholder = (() => {
+    if (!dataType.includes('dimension')) return field.allowedValues?.slice(0, 40) ?? '';
+    const pathKey = path.toLowerCase();
+    if (pathKey.includes('lite_cutout') || pathKey.includes('visible_glass')) return 'e.g. 24 x 36';
+    if (pathKey.includes('lite_location')) return 'e.g. centered, 10" from top';
+    if (pathKey.includes('glass_thickness') || pathKey.includes('kit_depth')) return 'e.g. 1/4"';
+    if (pathKey.includes('jamb_depth') || pathKey.includes('wall_thickness')) return 'e.g. 5 3/4"';
+    return "e.g. 3-0 or 36\"";
+  })();
 
   return (
     <div className="space-y-1">

@@ -124,14 +124,31 @@ export function applySizeRule(
 
 /** Compatible lite kits for the given door/rating/size, best candidate first. */
 export function filterKits(catalog: NgpCatalog, input: InfillSelectionInput): NgpProduct[] {
+  const hasCapacity = (p: NgpProduct): boolean => {
+    if (!p.model || bundled(p.glassScope)) return true;
+    return resolveTape(catalog, p.model, input.doorThicknessIn, input.glassThicknessIn ?? p.glassThicknessMinIn ?? null).matched;
+  };
+  const autoRank = (p: NgpProduct): number => {
+    const haystack = `${p.subcategory ?? ''} ${p.model ?? ''} ${p.productName ?? ''}`.toLowerCase();
+    let rank = 0;
+    if (p.subcategory !== 'VISION_LITE') rank += 100;
+    if (!hasCapacity(p)) rank += 25;
+    if (/security|ballistic|ssd|sliding door|grille/.test(haystack)) rank += 200;
+    if (/storm|hurricane|stc|sound/.test(haystack)) rank += 60;
+    if (/stainless|316ss|304/.test(haystack)) rank += 40;
+    if (/round/.test(haystack)) rank += 30;
+    if (/special|\bsp\b|-sp\b|insulated/.test(haystack)) rank += 5;
+    if (/low-profile|l-fra100|lo-pro/.test(haystack)) rank -= 10;
+    return rank;
+  };
   return catalog.products
     .filter((p) => p.category === 'LITE_KIT' && p.active)
     .filter((p) => thicknessOk(p, input.doorThicknessIn))
     .filter((p) => fireOk(p, input.fireRatingMinutes))
     .sort((a, b) => {
-      // Prefer simpler standard vision kits, then by name for stability.
-      const rank = (p: NgpProduct) => (p.subcategory === 'VISION_LITE' ? 0 : 1);
-      return rank(a) - rank(b) || String(a.model ?? '').localeCompare(String(b.model ?? ''));
+      // Prefer normal, capacity-backed vision kits; demote security/storm/STC
+      // add-ons unless explicitly selected by model.
+      return autoRank(a) - autoRank(b) || String(a.model ?? '').localeCompare(String(b.model ?? ''));
     });
 }
 
@@ -301,9 +318,13 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
       issues.push({ code: 'NGP_NO_LOUVER', severity: 'block', message: 'No compatible NGP louver for this door thickness / fire rating.' });
       return base;
     }
-    if (!input.louverModel && louver.model) auto['louverModel'] = { value: louver.model, reason: 'Only compatible louver for this door/rating' };
-    if (!input.louverModel && candidates.length > 1) {
-      issues.push({ code: 'NGP_LOUVER_CHOICE', severity: 'warn', message: `${candidates.length} compatible louvers — confirm the louver model.` });
+    if (!input.louverModel && louver.model) {
+      auto['louverModel'] = {
+        value: louver.model,
+        reason: candidates.length > 1
+          ? 'Best compatible louver default for this door/rating'
+          : 'Only compatible louver for this door/rating',
+      };
     }
     const cores = orderW != null && orderH != null ? louverCores(catalog, louver.material, orderW, orderH) : 1;
     base.louverCores = cores;
@@ -331,9 +352,13 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
     issues.push({ code: 'NGP_NO_KIT', severity: 'block', message: 'No compatible NGP lite kit for this door thickness / fire rating.' });
     return base;
   }
-  if (!input.kitModel && kit.model) auto['kitModel'] = { value: kit.model, reason: 'Only / best compatible lite kit for this door' };
-  if (!input.kitModel && kits.length > 1) {
-    issues.push({ code: 'NGP_KIT_CHOICE', severity: 'warn', message: `${kits.length} compatible lite kits — confirm the kit model.` });
+  if (!input.kitModel && kit.model) {
+    auto['kitModel'] = {
+      value: kit.model,
+      reason: kits.length > 1
+        ? 'Best compatible lite-kit default for this door'
+        : 'Only compatible lite kit for this door',
+    };
   }
 
   const kitModel = kit.model ?? '';
@@ -347,9 +372,13 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
   if (!glassScopeBundled) {
     glass = glassList.find((p) => p.model === input.glassModel) ?? glassList[0] ?? null;
     base.glass = glass;
-    if (glass && !input.glassModel && glass.model) auto['glassModel'] = { value: glass.model, reason: 'Compatible glass for this fire rating' };
-    if (!input.glassModel && glassList.length > 1) {
-      issues.push({ code: 'NGP_GLASS_CHOICE', severity: 'warn', message: `${glassList.length} compatible glass products — confirm the glass model.` });
+    if (glass && !input.glassModel && glass.model) {
+      auto['glassModel'] = {
+        value: glass.model,
+        reason: glassList.length > 1
+          ? 'Best compatible glass default for this fire rating'
+          : 'Compatible glass for this fire rating',
+      };
     }
   }
 

@@ -9,6 +9,9 @@ import {
   optionLabelsForField,
   deriveHardwareIntelligence,
   validateBuilderIntegrity,
+  defaultHardwareHand,
+  hardwareHandMatches,
+  baseFieldPaths,
   availableBaseValues,
   forcedBaseValues,
   autoFillBaseValues,
@@ -482,6 +485,21 @@ describe('deriveHardwareIntelligence', () => {
   });
 });
 
+describe('hardware hand defaults', () => {
+  it('does not default RH/LH onto universal lock variants with blank hands', () => {
+    expect(defaultHardwareHand('cylindrical_mortise_locks_and_deadbolts', [null, '', undefined], 'RH')).toBeNull();
+    expect(hardwareHandMatches(null, 'RH')).toBe(true);
+    expect(hardwareHandMatches('', 'RH')).toBe(true);
+    expect(hardwareHandMatches('HANDED', 'RH')).toBe(true);
+  });
+
+  it('defaults only when the catalog has the requested hand-specific value', () => {
+    expect(defaultHardwareHand('exit_devices', ['LH', 'RH'], 'RH')).toBe('RH');
+    expect(defaultHardwareHand('exit_devices', ['LH'], 'RH')).toBeNull();
+    expect(hardwareHandMatches('LH', 'RH')).toBe(false);
+  });
+});
+
 describe('validateBuilderIntegrity (foolproof gate)', () => {
   it('blocks a specialty door paired with the wrong frame series, then clears', () => {
     const bad = createOpeningDraft({
@@ -491,10 +509,28 @@ describe('validateBuilderIntegrity (foolproof gate)', () => {
     expect(validateBuilderIntegrity(bad).some((i) => i.code === 'SPECIALTY_FRAME_MISMATCH' && i.severity === 'block')).toBe(true);
 
     const good = createOpeningDraft({
+      openingFields: { 'opening.wall_construction': 'Masonry' },
       doors: [door({ 'door.door_series_construction': 'W50' })],
       frames: [frame({ 'frame.frame_series': 'F50' })],
     });
     expect(validateBuilderIntegrity(good).some((i) => i.severity === 'block')).toBe(false);
+  });
+
+  it('blocks frame pricing/resolution until wall construction is selected', () => {
+    const missing = createOpeningDraft({
+      doors: [door()],
+      frames: [frame()],
+    });
+    expect(validateBuilderIntegrity(missing).some((i) =>
+      i.code === 'WALL_CONSTRUCTION_REQUIRED' && i.severity === 'block',
+    )).toBe(true);
+
+    const ready = createOpeningDraft({
+      openingFields: { 'opening.wall_construction': 'Masonry' },
+      doors: [door()],
+      frames: [frame()],
+    });
+    expect(validateBuilderIntegrity(ready).some((i) => i.code === 'WALL_CONSTRUCTION_REQUIRED')).toBe(false);
   });
 });
 
@@ -531,6 +567,24 @@ describe('priceable-combination filtering (only offer values that price)', () =>
     // Unknown field path → unchanged.
     const other = makeField('DOR-099', 'door', { fieldPath: 'door.unrelated' });
     expect(priceableEnumOptions(['a', 'b'], other, comp, signatures)).toEqual(['a', 'b']);
+  });
+
+  it('ignores signature metadata when computing base-driving fields', () => {
+    expect(baseFieldPaths([
+      { __priceBookId: 'doc-ceco', 'door.door_material': 'CRS' },
+      { __priceBookId: 'doc-pioneer', 'door.door_gauge': '18' },
+    ]).sort()).toEqual(['door.door_gauge', 'door.door_material']);
+  });
+
+  it('can be filtered by selected manufacturer document before computing options', () => {
+    const mixedDocs: BaseSignature[] = [
+      { __priceBookId: 'doc-ceco', 'frame.frame_series': 'F', 'frame.frame_gauge': '18', 'frame.jamb_depth': '5.75' },
+      { __priceBookId: 'doc-pioneer', 'frame.frame_series': 'F', 'frame.frame_gauge': '18', 'frame.jamb_depth': '6 5/8' },
+    ];
+    const cecoOnly = mixedDocs.filter((sig) => sig.__priceBookId === 'doc-ceco');
+    const jamb = makeField('FRM-010', 'frame', { fieldPath: 'frame.jamb_depth', dataType: 'Dimension', enumOptions: [] });
+    expect(priceableEnumOptions(null, jamb, frame({ 'frame.frame_series': 'F', 'frame.frame_gauge': '18' }), cecoOnly))
+      .toEqual(['5.75']);
   });
 
   // Frame: F base needs a specific jamb depth (4¾/6¾/8¾) — a mandatory pick that

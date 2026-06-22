@@ -296,17 +296,17 @@ function priceComponent(
 }
 
 /**
- * Standard machined preps that Pioneer includes in the door/frame base price
- * (no separate charge): butt-hinge (450/500 incl. HW), strike (478/234), and
- * cylindrical/mortise lock prep (CYL/L/T/MST/MP/CBF/CBE). When no prep price
- * rule is published, these are treated as INCLUDED (N/C) rather than routed to
- * manual review. Special/unknown preps still require manual review.
+ * Standard machined preps that are commonly included in a door/frame base price
+ * when the hardware crosswalk resolves them and no separate prep price rule is
+ * published: butt-hinge (450/500), strike (478/234), cylindrical/mortise lock
+ * prep (CYL/L/T/MST/MP/CBF/CBE), and standard deadbolt prep (CDL/234N).
+ * Special/unknown preps still require manual review.
  */
 function isStandardIncludedPrep(code: string | null): boolean {
   if (!code) return false;
   const c = code.trim().toUpperCase();
   if (c === 'L' || c === 'T') return true;
-  return ['450', '500', '478', '234', 'CYL', 'MST', 'MP', 'CBF', 'CBE', 'HINGE', 'HINGEF'].some((p) => c.startsWith(p));
+  return ['450', '500', '478', '234', 'CYL', 'CDL', 'MST', 'MP', 'CBF', 'CBE', 'HINGE', 'HINGEF'].some((p) => c.startsWith(p));
 }
 
 /** Prices the derived Pioneer prep requirements through the rule path. */
@@ -362,18 +362,18 @@ function pricePreps(
       // No prep rule matched. Distinguish two cases instead of blindly assuming
       // either way (plan: "priced, explicitly source-included, or manual review"):
       //   • STANDARD machined preps (butt-hinge 450/500, strike 478/234,
-      //     cylindrical/mortise lock prep CYL/L/T/MST/MP) are included in the
-      //     Pioneer door/frame base by convention → emit a non-blocking INCLUDED
-      //     (N/C) line.
+      //     cylindrical/mortise lock prep CYL/L/T/MST/MP, deadbolt CDL/234N)
+      //     are included in the door/frame base by convention → emit a
+      //     non-blocking INCLUDED (N/C) line, preserving the owning price-book
+      //     document so the audit trail remains manufacturer-scoped.
       //   • Any other / special prep is NOT assumed included → manual review.
-      const legacyPioneerFallback = !comp.manufacturerId && !comp.priceBookDocumentId;
-      if (legacyPioneerFallback && isStandardIncludedPrep(comp.code)) {
+      if (isStandardIncludedPrep(comp.code)) {
         lines.push({
           lineType: 'INCLUDED', priceRuleId: null, entityType: 'prep', chargeCategory: 'prep',
           description: `${comp.label} — standard prep, included in base`, selectedOptionCode: comp.code, quantity: comp.quantity, unitOfMeasure: null,
           unitListPrice: 0, extendedListPrice: 0, discountMultiplier: null, extendedNetPrice: 0,
           sellPrice: 0, grossMargin: null, grossMarginPct: null, priceStatus: 'INCLUDED',
-          calculationExpression: 'Standard machined prep — included (N/C) in the Pioneer door/frame base price',
+          calculationExpression: 'Standard machined prep — included (N/C) in the door/frame base price',
           matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
           priceBookId: componentDocumentId(comp, options) ?? options.priceBookId, confidence: null, exceptionMessage: null,
           componentId: null, sortOrder: sort++,

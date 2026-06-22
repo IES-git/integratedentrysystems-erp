@@ -101,6 +101,16 @@ describe('completeness validation', () => {
     expect(report.issues.some((i) => i.code === 'PREP_MISSING_FOR_DEVICE')).toBe(true);
   });
 
+  it('does not warn when a plural hardware category matches a singular prep source', () => {
+    const quote = buildAuditableQuote([
+      line({ entityType: 'hardware', chargeCategory: 'cylindrical_mortise_locks_and_deadbolts', priceStatus: 'PRICED', sellPrice: 300 }),
+      line({ entityType: 'prep', chargeCategory: 'prep', description: 'Door prep CDL (deadbolt) — standard prep, included in base', priceStatus: 'INCLUDED', sellPrice: 0 }),
+      line({ entityType: 'prep', chargeCategory: 'prep', description: 'Frame prep 234N (deadbolt) — standard prep, included in base', priceStatus: 'INCLUDED', sellPrice: 0 }),
+    ]);
+    const report = validateQuoteCompleteness(quote);
+    expect(report.issues.some((i) => i.code === 'PREP_MISSING_FOR_DEVICE' || i.code === 'DEVICE_MISSING_FOR_PREP')).toBe(false);
+  });
+
   it('routes each line to the builder step that fixes it', () => {
     expect(targetForLine(line({ entityType: 'door', lineType: 'BASE' }))).toBe('doors');
     expect(targetForLine(line({ entityType: 'frame', lineType: 'BASE' }))).toBe('frame');

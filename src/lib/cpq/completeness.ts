@@ -140,7 +140,8 @@ function tokens(label: string): Set<string> {
     label
       .toLowerCase()
       .split(/[^a-z0-9]+/)
-      .filter((t) => t.length > 2 && !['and', 'the', 'with', 'door', 'frame', 'prep'].includes(t)),
+      .filter((t) => t.length > 2 && !['and', 'the', 'with', 'door', 'frame', 'prep'].includes(t))
+      .map((t) => (t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t)),
   );
 }
 

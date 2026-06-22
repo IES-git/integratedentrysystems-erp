@@ -174,6 +174,7 @@ export async function loadOptionDescriptors(): Promise<Map<string, Map<string, s
 }
 
 export interface VariantOption {
+  category: string;
   variant: HardwareVariant;
   price: HardwarePrice | null;
   productDescription: string | null;
@@ -187,8 +188,36 @@ export interface VariantOption {
  * cascading "only priceable" filtering of the door/frame/panel dropdowns so a
  * non-expert can only pick combinations that actually have a published price.
  */
-export type BaseSignature = Record<string, string>;
+export type BaseSignature = Record<string, string> & {
+  /** Source price-book document for this base-rule signature. */
+  __priceBookId?: string;
+};
 export type BaseSignatures = Record<string, BaseSignature[]>; // entity -> signatures
+
+const GUIDED_RANGE_FIELD_PATHS = new Set(['frame.jamb_depth']);
+
+function gcd(a: number, b: number): number {
+  return b === 0 ? Math.abs(a) : gcd(b, a % b);
+}
+
+function formatPlainInches(raw: string): string {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return raw.trim();
+  const whole = Math.floor(n);
+  const frac = Math.round((n - whole) * 16);
+  if (frac === 0) return String(whole);
+  const div = gcd(frac, 16);
+  return `${whole} ${frac / div}/${16 / div}`;
+}
+
+function baseSignatureValues(fieldPath: string, operator: string, value: string): string[] {
+  if (operator === 'EQ') return [value.trim()].filter(Boolean);
+  if (operator === 'IN') return value.split(/[|,]/).map((v) => v.trim()).filter(Boolean);
+  if (GUIDED_RANGE_FIELD_PATHS.has(fieldPath) && operator === 'LTE') {
+    return [formatPlainInches(value)];
+  }
+  return [];
+}
 
 /** Resolves every published, source-verified document that carries base prices. */
 async function resolveBaseDocIds(): Promise<string[]> {
@@ -231,7 +260,7 @@ export async function loadBaseSignatures(): Promise<BaseSignatures> {
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
       .from('price_rule')
-      .select('entity_type, rule_condition(field_path, operator, value_1, value_type)')
+      .select('price_book_id, entity_type, rule_condition(field_path, operator, value_1, value_type)')
       .in('price_book_id', docIds)
       .eq('action_type', 'BASE_AMOUNT')
       .eq('review_status', 'APPROVED')
@@ -246,22 +275,23 @@ export async function loadBaseSignatures(): Promise<BaseSignatures> {
     const row = r as Record<string, unknown>;
     const et = row.entity_type as string;
     if (!out[et]) continue;
-    const sig: BaseSignature = {};
+    let sigs: BaseSignature[] = [{ __priceBookId: row.price_book_id as string }];
     for (const c of (row.rule_condition as Record<string, unknown>[] | undefined) ?? []) {
       const fp = c.field_path as string | null;
       const op = c.operator as string | null;
       const v1 = c.value_1 as string | null;
       if (!fp || !v1) continue;
-      // Only discrete constraints (EQ/IN) — range conditions (width/height LTE/
-      // BETWEEN) are free-entry and matched numerically, so they're excluded by
-      // the operator filter. EQ dimension fields (e.g. jamb depth 8 3/4) ARE
-      // discrete picks and must be captured.
-      if (op !== 'EQ' && op !== 'IN') continue;
-      // Take the first listed value of an IN list as the canonical key (rules are
-      // typically single-valued EQ here).
-      sig[fp] = String(v1).split(/[|,]/)[0].trim();
+      // Only discrete constraints (EQ/IN) plus selected guided range fields
+      // (currently CECO/DLF jamb-depth LTE tiers) belong in builder signatures.
+      // Other range dimensions (width/height) stay free-entry and are matched
+      // numerically by the engine.
+      const values = baseSignatureValues(fp, op, String(v1));
+      if (values.length === 0) continue;
+      sigs = sigs.flatMap((sig) => values.map((value) => ({ ...sig, [fp]: value })));
     }
-    if (Object.keys(sig).length > 0) out[et].push(sig);
+    for (const sig of sigs) {
+      if (Object.keys(sig).some((key) => key !== '__priceBookId')) out[et].push(sig);
+    }
   }
   return out;
 }
@@ -315,6 +345,7 @@ export async function loadVariantsForCategory(category: string): Promise<Variant
     const prices = (row.hardware_price as Record<string, unknown>[] | undefined) ?? [];
     const approved = prices.find((p) => p.review_status === 'APPROVED') ?? prices[0];
     return {
+      category,
       variant: {
         id: row.id as string,
         hardwareProductId: row.hardware_product_id as string,

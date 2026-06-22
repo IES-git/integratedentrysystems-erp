@@ -7,7 +7,7 @@
  * either form resolve, and parsing dimensions to inches.
  */
 
-import { parseDoorDimension } from '@/components/pricing/dimension-utils';
+import { parseDoorDimension, parsePlainInches } from '@/components/pricing/dimension-utils';
 import { deriveBuilderContext, mergeDerived, coreUpgradeOptionCode, type DerivedMap } from './builder-logic';
 import { resolveInfill, type NgpInfillType } from './ngp-infill';
 import type { NgpCatalog } from '@/lib/ngp-catalog-api';
@@ -224,13 +224,6 @@ function buildComponent(
   };
 }
 
-/** Plain-inch parse for NGP cutout dimensions (NOT door-nominal notation). */
-function parsePlainInches(raw: string | null | undefined): number | null {
-  if (raw == null) return null;
-  const n = Number(String(raw).replace(/[^0-9.]/g, ''));
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
 /** Default door thickness (in) used when the draft has no explicit value. */
 const DEFAULT_DOOR_THICKNESS_IN = 1.75;
 
@@ -238,7 +231,7 @@ const DEFAULT_DOOR_THICKNESS_IN = 1.75;
 function doorThicknessIn(draft: OpeningDraft): number | null {
   for (const d of draft.doors) {
     for (const [path, value] of Object.entries(d.fields)) {
-      if (/thickness/i.test(path)) {
+      if (/thickness/i.test(path) && !/glass|kit_depth/i.test(path)) {
         const n = parsePlainInches(value);
         if (n != null) return n;
       }

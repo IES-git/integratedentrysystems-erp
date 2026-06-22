@@ -198,6 +198,133 @@ describe('pricing engine core', () => {
     expect(res.lines.find((l) => l.lineType === 'BASE')?.sellPrice).toBe(500);
   });
 
+  it('matches frame jamb-depth LTE conditions against mixed fractional inch values', () => {
+    const ruleSet: LoadedRuleSet = {
+      rules: [rule({
+        id: 'frame-base',
+        entityType: 'frame',
+        chargeCategory: 'base',
+        amount: 311,
+        conditions: [{
+          id: 'c1', priceRuleId: 'frame-base', conditionGroup: 0, fieldId: null,
+          fieldPath: 'frame.jamb_depth', operator: 'LTE', valueType: 'DIMENSION',
+          value1: '7.875', value2: null, unit: 'in', inclusiveMin: null, inclusiveMax: true,
+          normalizedValue: null, sourcePhrase: null, derivedFlag: false, nullBehavior: 'FAIL', createdAt: '',
+        }],
+      })],
+      dependencyRules: [],
+    };
+    const spec = baseSpec({
+      components: [{
+        id: 'f1',
+        entityType: 'frame',
+        label: 'Frame',
+        quantity: 1,
+        code: 'F',
+        fields: { 'frame.jamb_depth': '6 5/8' },
+      }],
+    });
+    const res = priceOpeningCore(spec, ruleSet, emptyCatalog, new Map(), opts);
+    expect(res.lines.find((l) => l.lineType === 'BASE')?.sellPrice).toBe(311);
+  });
+
+  it('treats standard manufacturer-scoped hardware preps as included when no prep price rule is published', () => {
+    const docId = 'doc-ceco';
+    const catalog: HardwareCatalog = {
+      ...emptyCatalog,
+      prepCrosswalk: [
+        {
+          id: 'cw-butt', hardwareCategory: 'butt_hinge', hardwareProductId: null, hardwareVariantId: null,
+          doorPrepCode: '450--', framePrepCode: '450--', templateId: null, handRequired: false, locationRequired: false,
+          additionalRequiredFields: null, quantityBasis: null, pricingBehavior: null, notes: null, createdAt: '', updatedAt: '',
+        },
+        {
+          id: 'cw-deadbolt', hardwareCategory: 'deadbolt', hardwareProductId: null, hardwareVariantId: null,
+          doorPrepCode: 'CDL', framePrepCode: '234N', templateId: null, handRequired: false, locationRequired: false,
+          additionalRequiredFields: null, quantityBasis: null, pricingBehavior: null, notes: null, createdAt: '', updatedAt: '',
+        },
+      ],
+    };
+    const variantMap = new Map<string, VariantWithPrice>([
+      ['hinge', {
+        category: 'butt_hinges',
+        subcategory: 'butt_hinge',
+        variant: { id: 'hinge', hardwareProductId: 'p-hinge', sku: 'HINGE', function: null, finish: null, size: null, hand: null, voltage: null, rating: null, material: null, optionAttributes: {}, createdAt: '', updatedAt: '' },
+        price: { id: 'hp-hinge', hardwareVariantId: 'hinge', hardwarePriceBookId: null, listPrice: 10, discountMultiplier: null, netCost: 10, uom: 'each', effectiveFrom: null, effectiveTo: null, minimumQuantity: null, sourceRowRef: null, reviewStatus: 'APPROVED', createdAt: '', updatedAt: '' },
+      }],
+      ['deadbolt', {
+        category: 'cylindrical_mortise_locks_and_deadbolts',
+        subcategory: 'deadbolt',
+        variant: { id: 'deadbolt', hardwareProductId: 'p-deadbolt', sku: 'DB', function: null, finish: null, size: null, hand: null, voltage: null, rating: null, material: null, optionAttributes: {}, createdAt: '', updatedAt: '' },
+        price: { id: 'hp-deadbolt', hardwareVariantId: 'deadbolt', hardwarePriceBookId: null, listPrice: 20, discountMultiplier: null, netCost: 20, uom: 'each', effectiveFrom: null, effectiveTo: null, minimumQuantity: null, sourceRowRef: null, reviewStatus: 'APPROVED', createdAt: '', updatedAt: '' },
+      }],
+    ]);
+    const spec = baseSpec({
+      components: [
+        { id: 'd1', entityType: 'door', label: 'Door', quantity: 1, code: null, manufacturerId: 'ceco', priceBookDocumentId: docId, fields: {} },
+        { id: 'f1', entityType: 'frame', label: 'Frame', quantity: 1, code: null, manufacturerId: 'ceco', priceBookDocumentId: docId, fields: {} },
+      ],
+      hardware: [
+        { category: 'butt_hinges', variantId: 'hinge', quantity: 3, required: true, source: 'manual' },
+        { category: 'cylindrical_mortise_locks_and_deadbolts', variantId: 'deadbolt', quantity: 1, required: true, source: 'manual' },
+      ],
+    });
+    const res = priceOpeningCore(
+      spec,
+      {
+        rules: [
+          rule({ id: 'door-base', priceBookId: docId, entityType: 'door', amount: 100, chargeCategory: 'base' }),
+          rule({ id: 'frame-base', priceBookId: docId, entityType: 'frame', amount: 100, chargeCategory: 'base' }),
+        ],
+        dependencyRules: [],
+      },
+      catalog,
+      variantMap,
+      { priceBookDocumentId: null, minConfidence: 0.5 },
+    );
+
+    const includedPrepCodes = res.lines
+      .filter((line) => line.entityType === 'prep' && line.priceStatus === 'INCLUDED')
+      .map((line) => line.selectedOptionCode)
+      .sort();
+    expect(includedPrepCodes).toEqual(['234N', '450--', '450--', 'CDL']);
+    expect(res.lines.filter((line) => line.entityType === 'prep').every((line) => line.priceBookId === docId)).toBe(true);
+    expect(res.manualQuotes.some((manual) => /Prep price/i.test(String(manual.requestedInputs)))).toBe(false);
+  });
+
+  it('still routes unknown/special preps to manual review when no prep price rule is published', () => {
+    const docId = 'doc-ceco';
+    const catalog: HardwareCatalog = {
+      ...emptyCatalog,
+      prepCrosswalk: [{
+        id: 'cw-special', hardwareCategory: 'special_hardware', hardwareProductId: null, hardwareVariantId: null,
+        doorPrepCode: 'ZZZ', framePrepCode: null, templateId: null, handRequired: false, locationRequired: false,
+        additionalRequiredFields: null, quantityBasis: null, pricingBehavior: null, notes: null, createdAt: '', updatedAt: '',
+      }],
+    };
+    const variantMap = new Map<string, VariantWithPrice>([['special', {
+      category: 'special_hardware',
+      subcategory: 'special_hardware',
+      variant: { id: 'special', hardwareProductId: 'p-special', sku: 'SPECIAL', function: null, finish: null, size: null, hand: null, voltage: null, rating: null, material: null, optionAttributes: {}, createdAt: '', updatedAt: '' },
+      price: { id: 'hp-special', hardwareVariantId: 'special', hardwarePriceBookId: null, listPrice: 20, discountMultiplier: null, netCost: 20, uom: 'each', effectiveFrom: null, effectiveTo: null, minimumQuantity: null, sourceRowRef: null, reviewStatus: 'APPROVED', createdAt: '', updatedAt: '' },
+    }]]);
+    const spec = baseSpec({
+      components: [{ id: 'd1', entityType: 'door', label: 'Door', quantity: 1, code: null, manufacturerId: 'ceco', priceBookDocumentId: docId, fields: {} }],
+      hardware: [{ category: 'special_hardware', variantId: 'special', quantity: 1, required: true, source: 'manual' }],
+    });
+    const res = priceOpeningCore(
+      spec,
+      { rules: [rule({ id: 'door-base', priceBookId: docId, entityType: 'door', amount: 100, chargeCategory: 'base' })], dependencyRules: [] },
+      catalog,
+      variantMap,
+      { priceBookDocumentId: null, minConfidence: 0.5 },
+    );
+
+    const specialPrep = res.lines.find((line) => line.entityType === 'prep' && line.selectedOptionCode === 'ZZZ');
+    expect(specialPrep?.priceStatus).toBe('INVALID');
+    expect(res.manualQuotes.some((manual) => /Prep price.*ZZZ/i.test(String(manual.requestedInputs)))).toBe(true);
+  });
+
   it('prices selected hardware net × qty and computes sell via a sell rule', () => {
     const catalog: HardwareCatalog = {
       ...emptyCatalog,

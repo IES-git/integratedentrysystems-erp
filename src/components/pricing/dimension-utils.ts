@@ -1,5 +1,66 @@
 import type { DimensionCriteria, DimensionCriteriaLeaf } from '@/types';
 
+/** Parse plain-inch mixed fractions such as `5 3/4"`, `1-3/4"` or `6 5/8`. */
+function parseMixedInches(raw: string): number | null {
+  const s = raw.replace(/"/g, '').trim();
+  const mixed = s.match(/^(\d+(?:\.\d+)?)\s*[- ]\s*(\d+)\/(\d+)$/);
+  if (mixed) {
+    const whole = parseFloat(mixed[1]);
+    const num = parseInt(mixed[2], 10);
+    const den = parseInt(mixed[3], 10);
+    if (den > 0) return whole + (num / den);
+  }
+  const fraction = s.match(/^(\d+)\/(\d+)$/);
+  if (fraction) {
+    const num = parseInt(fraction[1], 10);
+    const den = parseInt(fraction[2], 10);
+    if (den > 0) return num / den;
+  }
+  return null;
+}
+
+/**
+ * Parse a dimension that is intentionally expressed in plain inches, not
+ * compact door-nominal notation. Use this for jamb depths, door thicknesses,
+ * glass thicknesses, and NGP cutout dimensions.
+ *
+ * Examples:
+ *   "1-3/4" → 1.75
+ *   "1 3/4" → 1.75
+ *   "1/4\"" → 0.25
+ *   "5 3/4" → 5.75
+ *   "24" → 24
+ *   "2-0" → 24
+ */
+export function parsePlainInches(raw: string | number | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw > 0 ? raw : null;
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  const mixed = parseMixedInches(s);
+  if (mixed != null && mixed > 0) return mixed;
+
+  const feetHyphen = s.match(/^(\d+)-(\d{1,2})$/);
+  if (feetHyphen) {
+    const feet = parseInt(feetHyphen[1], 10);
+    const inches = parseInt(feetHyphen[2], 10);
+    if (inches < 12) return feet * 12 + inches;
+  }
+
+  const feetApostrophe = s.match(/^(\d+)'\s*-?\s*(?:(\d+(?:\.\d+)?)\s*"?)?$/);
+  if (feetApostrophe) {
+    const feet = parseInt(feetApostrophe[1], 10);
+    const inches = feetApostrophe[2] ? parseFloat(feetApostrophe[2]) : 0;
+    if (inches < 12) return feet * 12 + inches;
+  }
+
+  const numeric = s.replace(/"/g, '').trim();
+  if (/^\d+(?:\.\d+)?$/.test(numeric)) return parseFloat(numeric);
+
+  return null;
+}
+
 /**
  * Parse a human-readable dimension string into a whole-inch number.
  *
@@ -16,6 +77,9 @@ import type { DimensionCriteria, DimensionCriteriaLeaf } from '@/types';
 export function parseDimension(raw: string): number | null {
   const s = raw.trim();
   if (!s) return null;
+
+  const mixed = parseMixedInches(s);
+  if (mixed != null) return mixed;
 
   // feet-apostrophe-inches-quote: 6'8" or 6' 8"
   const feetApostrophe = s.match(/^(\d+)'\s*(?:(\d+)")?$/);
@@ -88,6 +152,11 @@ export function parseDoorDimension(raw: string | number | null | undefined): num
     const inch = apos[2] ? parseFloat(apos[2]) : 0;
     if (inch < 12) return ft * 12 + inch;
   }
+
+  // Plain-inch mixed fractions: frame jamb depths and door thicknesses such as
+  // "5 3/4", "6 5/8", "1 3/4". These are NOT feet/inches dimensions.
+  const mixed = parseMixedInches(s);
+  if (mixed != null) return mixed;
 
   // --- 1. compact nominal: "36" → 3 ft 6 in = 42", "68" → 6 ft 8 in = 80" ---
   // Only matches 2–3 digit all-numeric strings.

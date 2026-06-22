@@ -666,6 +666,35 @@ export function isHandedCategory(category: string): boolean {
   return /lock|exit|closer|lever|handle|panic|deadbolt|deadlock/i.test(category);
 }
 
+function normalizedHardwareHand(value: string | null | undefined): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
+/**
+ * Hardware catalog hand values are often blank for universal/field-reversible
+ * devices. A blank or generic HANDED value should not eliminate the variant
+ * when an opening has RH/LH context.
+ */
+export function hardwareHandMatches(actual: string | null | undefined, desired: string | null | undefined): boolean {
+  const want = normalizedHardwareHand(desired);
+  if (!want) return true;
+  const got = normalizedHardwareHand(actual);
+  if (!got || got === 'handed' || got === 'universal' || got === 'reversible' || got === 'non-handed') return true;
+  return got === want;
+}
+
+/**
+ * Default the opening/door hand onto a hardware category only when the loaded
+ * variants actually contain that same hand value. Otherwise neutral hardware
+ * such as cylindrical locks would be filtered out by an RH/LH value they never
+ * carry in the catalog.
+ */
+export function defaultHardwareHand(category: string, variantHands: Array<string | null | undefined>, hand: string | null): string | null {
+  if (!hand || !isHandedCategory(category)) return null;
+  const want = normalizedHardwareHand(hand);
+  return variantHands.some((h) => normalizedHardwareHand(h) === want) ? hand : null;
+}
+
 /** Heuristic: does a rating string denote a fire/UL rating? */
 export function isFireRating(rating: string | null | undefined): boolean {
   const r = (rating ?? '').toLowerCase();
@@ -836,6 +865,17 @@ export function validateBuilderIntegrity(draft: OpeningDraft): IntegrityIssue[] 
     });
   }
 
+  // 4. Frame construction/resolution depends on wall construction. Without it
+  // the Construction step cannot choose a compliant frame series and pricing
+  // can fall through to a missing frame base.
+  if (draft.frames.length > 0 && !openingVal(draft, PATH.opening.wallConstruction)) {
+    issues.push({
+      code: 'WALL_CONSTRUCTION_REQUIRED',
+      severity: 'block',
+      message: 'Select wall construction before choosing/pricing the frame.',
+    });
+  }
+
   return issues;
 }
 
@@ -850,7 +890,12 @@ function normVal(v: string): string {
 /** All enumerable field_paths that appear in a set of base-rule signatures. */
 export function baseFieldPaths(signatures: BaseSignature[]): string[] {
   const s = new Set<string>();
-  for (const sig of signatures) for (const k of Object.keys(sig)) s.add(k);
+  for (const sig of signatures) {
+    for (const k of Object.keys(sig)) {
+      if (k.startsWith('__')) continue;
+      s.add(k);
+    }
+  }
   return [...s];
 }
 

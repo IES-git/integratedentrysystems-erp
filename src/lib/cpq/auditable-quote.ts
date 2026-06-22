@@ -3,8 +3,8 @@
  *
  * Groups the rule engine's flat `EngineLine[]` (or persisted `estimate_line`
  * rows) into the separate-but-coordinated layers the "Example Opening" tab
- * lays out: Pioneer base + adders, Pioneer preparations (from the crosswalk),
- * actual hardware, linear accessories, keying, access control, and
+ * lays out: door/frame base + adders, manufacturer preparations (from the
+ * crosswalk), actual hardware, linear accessories, keying, access control, and
  * services/freight/tax. Each layer carries its own list/net/sell rollup, and
  * the hardware layers can be rolled up by group or as one all-hardware figure.
  *
@@ -115,9 +115,9 @@ const EXCEPTION_STATUSES: ReadonlySet<EstimateLinePriceStatus> = new Set<Estimat
 ]);
 
 const LAYER_TITLES: Record<QuoteLayerId, string> = {
-  pioneer_base: 'Pioneer base (door / frame / panel)',
-  pioneer_adders: 'Pioneer adders & options',
-  pioneer_preps: 'Pioneer preparations (crosswalk)',
+  pioneer_base: 'Door / frame / panel base',
+  pioneer_adders: 'Door / frame adders & options',
+  pioneer_preps: 'Door / frame preparations (crosswalk)',
   ngp_infill: 'NGP infill (glass / lite kits / louvers)',
   hardware: 'Actual hardware',
   linear: 'Linear accessories',
@@ -145,7 +145,7 @@ const NGP_ENTITIES: ReadonlySet<RuleEntityType> = new Set<RuleEntityType>([
   'glazing_tape',
 ]);
 
-const PIONEER_ENTITIES: ReadonlySet<RuleEntityType> = new Set<RuleEntityType>([
+const DOOR_FRAME_ENTITIES: ReadonlySet<RuleEntityType> = new Set<RuleEntityType>([
   'door',
   'frame',
   'panel',
@@ -171,7 +171,7 @@ export function classifyLayer(line: QuoteLine): QuoteLayerId {
     return 'hardware';
   }
 
-  if (entity && PIONEER_ENTITIES.has(entity)) {
+  if (entity && DOOR_FRAME_ENTITIES.has(entity)) {
     return line.lineType === 'BASE' ? 'pioneer_base' : 'pioneer_adders';
   }
 

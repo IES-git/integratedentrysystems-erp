@@ -37,7 +37,7 @@ import { validateQuoteCompleteness, type BuilderStepTarget, type CompletenessIss
 import {
   loadSpecFieldDictionary, loadOptionDescriptors, loadHardwareCategories, loadBaseSignatures,
   type SpecFieldWithPath, type VariantOption, loadVariantsForCategory, type HardwareCategoryOption,
-  type BaseSignatures,
+  type BaseSignature, type BaseSignatures,
 } from '@/lib/cpq-catalog-api';
 import {
   loadHardwareCatalog, generateHardwareRequirements, derivePrepRequirements, resolveHardwareNet,
@@ -55,10 +55,13 @@ import {
   type ManufacturerPricedEntity,
 } from '@/lib/price-rules-api';
 import { resolveInfill, type NgpInfillType, type ResolvedInfill } from '@/lib/cpq/ngp-infill';
+import { parsePlainInches } from '@/components/pricing/dimension-utils';
 import {
   deriveBuilderContext, fieldTier, allowedEnumOptions, isStepVisible,
   doorHand, isHandedCategory, isFireRating, optionLabelsForField, deriveHardwareIntelligence,
+  defaultHardwareHand, hardwareHandMatches,
   validateBuilderIntegrity, priceableEnumOptions, autoFillBaseValues,
+  baseFieldPaths,
   type BuilderContext, type OptionDescriptors, type IntegrityIssue,
 } from '@/lib/cpq/builder-logic';
 import type { EngineResult } from '@/lib/pricing';
@@ -120,9 +123,7 @@ function newComponent(entityType: RuleEntityType, label: string): ComponentDraft
 
 /** Parse a plain-inch dimension (NGP cutouts use plain inches, not door-nominal). */
 function plainInches(raw: string | null | undefined): number | null {
-  if (raw == null) return null;
-  const n = Number(String(raw).replace(/[^0-9.]/g, ''));
-  return Number.isFinite(n) && n > 0 ? n : null;
+  return parsePlainInches(raw);
 }
 
 /** Door thickness (in) from the draft's first door, default 1.75". */
@@ -155,6 +156,14 @@ function parseCutoutDims(raw: string | undefined): { w: string; h: string } {
   return { w: '', h: '' };
 }
 
+function doorCutoutDims(d: ComponentDraft, kind: 'lite' | 'louver'): { w: string; h: string } {
+  return parseCutoutDims(
+    kind === 'louver'
+      ? d.fields['door.louver_code_size']
+      : d.fields['door.lite_cutout_visible_glass_dimensions'],
+  );
+}
+
 /** Opening fire rating in minutes (0 = non-rated). */
 function draftFireMinutes(draft: OpeningDraft): number | null {
   for (const [path, value] of Object.entries(draft.openingFields)) {
@@ -183,6 +192,7 @@ const INTEGRITY_TARGET: Record<string, BuilderStepTarget> = {
   ACCESS_POWER: 'access',
   SPECIALTY_FRAME_MISMATCH: 'frame',
   DOOR_WITHOUT_FRAME: 'frame',
+  WALL_CONSTRUCTION_REQUIRED: 'classify',
 };
 
 function computeCompleteness(
@@ -406,7 +416,7 @@ export function SpecOpeningBuilder({
       const variants = variantsByCategory[h.category];
       if (!variants || variants.length === 0) continue;
       const effFinish = h.selectedFinish ?? defaultFinish ?? null;
-      const effHand = h.selectedHand ?? (isHandedCategory(h.category) ? hand : null);
+      const effHand = h.selectedHand ?? defaultHardwareHand(h.category, variants.map((v) => v.variant.hand), hand);
       const priced = filterVariants(variants, {
         function: h.selectedFunction ?? null, finish: effFinish, size: h.selectedSize ?? null,
         hand: effHand, rating: h.selectedRating ?? null,
@@ -418,7 +428,7 @@ export function SpecOpeningBuilder({
       if (pick) {
         updateHardware(h.category, {
           variantId: pick.variant.id, source: 'set_template',
-          selectedFinish: effFinish, selectedHand: effHand,
+          selectedFinish: effFinish, selectedHand: pick.variant.hand ? effHand : null,
         });
       }
     }
@@ -430,6 +440,40 @@ export function SpecOpeningBuilder({
   const seededDoorsRef = useRef<Set<string>>(new Set());
   useEffect(() => { if (!open) seededDoorsRef.current = new Set(); }, [open]);
 
+  // Resolve construction/series in the background so Review and Save never
+  // depend on the estimator having visited the Construction tab. The tab still
+  // exists to explain/override multi-candidate cases, but a single compliant
+  // construction should silently populate the manufacturer series fields that
+  // base price rules match against.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    resolveOpeningSpecFromDb(buildUserSpec(draft))
+      .then((result) => {
+        if (cancelled || result.status !== 'auto' || !result.selected) return;
+        const doorSeries = result.selected.resolved.series.door;
+        const frameSeries = result.selected.resolved.series.frame;
+        if (!doorSeries && !frameSeries) return;
+        setDraft((prev) => {
+          let changed = false;
+          const doors = doorSeries ? prev.doors.map((d) => {
+            if (d.fields['door.door_series_construction'] === doorSeries) return d;
+            changed = true;
+            return { ...d, fields: { ...d.fields, 'door.door_series_construction': doorSeries } };
+          }) : prev.doors;
+          const frames = frameSeries ? prev.frames.map((f) => {
+            if (f.fields['frame.frame_series'] === frameSeries) return f;
+            changed = true;
+            return { ...f, fields: { ...f.fields, 'frame.frame_series': frameSeries } };
+          }) : prev.frames;
+          return changed ? { ...prev, doors, frames } : prev;
+        });
+      })
+      .catch(() => { /* non-fatal: Construction tab/Review issues surface unresolved specs */ });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, draft.configurationType, draft.fireLabelRequired, draft.openingFields, draft.doors, draft.frames]);
+
   // Carry the door's glazed/louvered elevation INTO the NGP infill step: when a
   // door is set to a glass/louver elevation, auto-create a pre-filled cutout
   // (door thickness, fire rating, cutout size + glass thickness from the door's
@@ -439,12 +483,29 @@ export function SpecOpeningBuilder({
     if (!open || ngpCatalog.products.length === 0) return;
     setDraft((prev) => {
       const additions: CutoutDraft[] = [];
+      let changed = false;
       const doorsWithCutout = new Set(prev.cutouts.map((c) => c.doorId).filter(Boolean) as string[]);
+      const cutouts = prev.cutouts.map((c) => {
+        const door = c.doorId ? prev.doors.find((d) => d.id === c.doorId) : null;
+        const kind = door ? doorElevationKind(door) : null;
+        if (!door || !kind) return c;
+        const dims = doorCutoutDims(door, kind);
+        const glassThicknessIn = plainInches(door.fields['door.glass_thickness_kit_depth']);
+        const patch: Partial<CutoutDraft> = {};
+        if (dims.w && !c.cutoutWidth) patch.cutoutWidth = dims.w;
+        if (dims.h && !c.cutoutHeight) patch.cutoutHeight = dims.h;
+        if (glassThicknessIn != null && c.glassThicknessIn == null) patch.glassThicknessIn = glassThicknessIn;
+        if (c.doorThicknessIn == null) patch.doorThicknessIn = draftDoorThickness(prev);
+        if (c.fireRatingMinutes == null) patch.fireRatingMinutes = draftFireMinutes(prev);
+        if (Object.keys(patch).length === 0) return c;
+        changed = true;
+        return { ...c, ...patch };
+      });
       for (const d of prev.doors) {
         const kind = doorElevationKind(d);
         if (!kind) continue;
         if (doorsWithCutout.has(d.id) || seededDoorsRef.current.has(d.id)) continue;
-        const dims = parseCutoutDims(d.fields['door.lite_cutout_visible_glass_dimensions']);
+        const dims = doorCutoutDims(d, kind);
         additions.push(createCutoutDraft({
           doorId: d.id,
           infillType: kind === 'louver' ? 'LOUVER' : 'LITE',
@@ -456,8 +517,8 @@ export function SpecOpeningBuilder({
         }));
         seededDoorsRef.current.add(d.id);
       }
-      if (additions.length === 0) return prev;
-      return { ...prev, cutouts: [...prev.cutouts, ...additions] };
+      if (additions.length === 0 && !changed) return prev;
+      return { ...prev, cutouts: [...cutouts, ...additions] };
     });
   }, [open, ngpCatalog, draft.doors]);
 
@@ -466,19 +527,56 @@ export function SpecOpeningBuilder({
   // so a non-expert always lands on a combination that actually has a price.
   useEffect(() => {
     if (!open) return;
-    const sigFor = (e: RuleEntityType) => (e === 'frame' ? baseSignatures.frame : e === 'panel' ? baseSignatures.panel : baseSignatures.door);
+    const sigFor = (e: RuleEntityType, c: ComponentDraft) => {
+      const all = e === 'frame' ? baseSignatures.frame : e === 'panel' ? baseSignatures.panel : baseSignatures.door;
+      return c.priceBookDocumentId ? all.filter((sig) => sig.__priceBookId === c.priceBookDocumentId) : all;
+    };
     if (baseSignatures.door.length === 0 && baseSignatures.frame.length === 0) return;
     setDraft((prev) => {
       let changed = false;
+      const derivedContext = deriveBuilderContext(prev);
+      const doorGauge = prev.doors[0]?.fields['door.door_gauge'] ?? '';
+      const doorMaterial = prev.doors[0]?.fields['door.door_material'] ?? '';
       const apply = (list: ComponentDraft[], entity: RuleEntityType) => list.map((c) => {
-        const forced = autoFillBaseValues({ ...c, entityType: entity }, sigFor(entity));
+        const forced = autoFillBaseValues({ ...c, entityType: entity }, sigFor(entity, c));
+        const derived = derivedContext.derivedByComponent[c.id] ?? {};
+        let fields = c.fields;
+        let componentChanged = false;
+        if (entity === 'frame' && prev.doors.length > 0) {
+          const next = { ...fields };
+          if (doorGauge && next['frame.frame_gauge'] && next['frame.frame_gauge'] !== doorGauge) {
+            delete next['frame.frame_gauge'];
+            componentChanged = true;
+          }
+          if (doorMaterial && next['frame.frame_material'] && next['frame.frame_material'] !== doorMaterial) {
+            delete next['frame.frame_material'];
+            componentChanged = true;
+          }
+          if (componentChanged) fields = next;
+        }
         const add: Record<string, string> = {};
         for (const [fp, v] of Object.entries(forced)) {
-          if (!c.fields[fp]) add[fp] = v;
+          // Frame gauge/material should inherit from the selected door spec
+          // when available. Never let base-rule defaults silently replace that
+          // with a different valid price row (e.g. CECO F 14ga CRS instead of
+          // the 18ga galvannealed frame implied by an 18ga galvannealed door).
+          if (
+            entity === 'frame'
+            && (
+              fp === 'frame.frame_gauge'
+              || fp === 'frame.frame_material'
+              || fp === 'frame.jamb_depth'
+            )
+          ) continue;
+          if (derived[fp]?.value) continue;
+          if (!fields[fp]) add[fp] = v;
         }
-        if (Object.keys(add).length === 0) return c;
+        if (Object.keys(add).length > 0) {
+          componentChanged = true;
+        }
+        if (!componentChanged) return c;
         changed = true;
-        return { ...c, fields: { ...c.fields, ...add } };
+        return { ...c, fields: { ...fields, ...add } };
       });
       const doors = apply(prev.doors, 'door');
       const frames = apply(prev.frames, 'frame');
@@ -579,9 +677,20 @@ export function SpecOpeningBuilder({
 
   // Add an individual hardware category by hand (independent of any set template).
   const addHardware = (category: string) =>
-    setDraft((prev) => prev.hardware.some((h) => h.category === category)
-      ? prev
-      : { ...prev, hardware: [...prev.hardware, { category, variantId: null, quantity: 1, required: false, source: 'manual' }] });
+    setDraft((prev) => {
+      if (prev.hardware.some((h) => h.category === category)) {
+        return {
+          ...prev,
+          hardware: prev.hardware.map((h) => h.category === category
+            ? { ...h, quantity: h.quantity > 0 ? h.quantity : 1, source: 'manual' }
+            : h),
+        };
+      }
+      return {
+        ...prev,
+        hardware: [...prev.hardware, { category, variantId: null, quantity: 1, required: false, source: 'manual' }],
+      };
+    });
 
   const removeHardware = (category: string) =>
     setDraft((prev) => ({ ...prev, hardware: prev.hardware.filter((h) => h.category !== category) }));
@@ -1063,7 +1172,7 @@ interface ComponentCardProps {
   draft: OpeningDraft;
   ctx: BuilderContext;
   descriptors: OptionDescriptors | null;
-  signatures: BaseSignatures[keyof BaseSignatures];
+  signatures: BaseSignature[];
   manufacturerCatalogs: ManufacturerCatalogOption[];
   onRemoveComponent: (entity: RuleEntityType, id: string) => void;
   onUpdateComponentField: (entity: RuleEntityType, id: string, path: string, value: string) => void;
@@ -1087,17 +1196,31 @@ function ComponentCard({
   const availableManufacturers = pricedEntity
     ? manufacturerCatalogs.filter((m) => !!m.documentIds[pricedEntity])
     : [];
+  const signaturesForComponent = comp.priceBookDocumentId
+    ? signatures.filter((sig) => sig.__priceBookId === comp.priceBookDocumentId)
+    : signatures;
 
-  const renderField = (f: SpecFieldWithPath) => (
-    <SpecFieldInput key={f.id} field={f}
-      value={f.fieldPath ? comp.fields[f.fieldPath] ?? '' : ''}
-      onChange={(path, value) => onUpdateComponentField(entity, comp.id, path, value)}
-      derivedValue={f.fieldPath ? derived[f.fieldPath]?.value ?? null : null}
-      derivedReason={f.fieldPath ? derived[f.fieldPath]?.reason ?? null : null}
-      // Only offer values that keep a priceable base reachable (cascading).
-      options={priceableEnumOptions(allowedEnumOptions(f, draft, ctx, comp), f, comp, signatures)}
-      optionLabels={optionLabelsForField(f, descriptors)} />
-  );
+  const renderField = (f: SpecFieldWithPath) => {
+    const dataType = (f.dataType ?? '').toLowerCase();
+    const isFreeformMeasurement =
+      !dataType.includes('enum')
+      && (dataType.includes('dimension') || dataType.includes('integer') || dataType.includes('number'));
+    const isBaseDrivingField = !!f.fieldPath && baseFieldPaths(signaturesForComponent).includes(f.fieldPath);
+    const allowed = allowedEnumOptions(f, draft, ctx, comp);
+    const options = isFreeformMeasurement && !isBaseDrivingField
+      ? null
+      : priceableEnumOptions(allowed, f, comp, signaturesForComponent);
+    return (
+      <SpecFieldInput key={f.id} field={f}
+        value={f.fieldPath ? comp.fields[f.fieldPath] ?? '' : ''}
+        onChange={(path, value) => onUpdateComponentField(entity, comp.id, path, value)}
+        derivedValue={f.fieldPath ? derived[f.fieldPath]?.value ?? null : null}
+        derivedReason={f.fieldPath ? derived[f.fieldPath]?.reason ?? null : null}
+        // Only offer values that keep a priceable base reachable (cascading).
+        options={options}
+        optionLabels={optionLabelsForField(f, descriptors)} />
+    );
+  };
 
   const byCategory = (list: SpecFieldWithPath[]) => {
     const cats = [...new Set(list.map((f) => f.category).filter(Boolean))] as string[];
@@ -1449,7 +1572,9 @@ function variantNet(v: VariantOption): number {
 function matchesCriteria(v: VariantOption, c: Partial<HwCriteria>): boolean {
   return HW_AXES.every((axis) => {
     const want = c[axis];
-    return !want || (v.variant[axis] ?? '') === want;
+    if (!want) return true;
+    if (axis === 'hand') return hardwareHandMatches(v.variant.hand, want);
+    return (v.variant[axis] ?? '') === want;
   });
 }
 
@@ -1467,11 +1592,21 @@ function isAccessorySubcategory(sub: string | null): boolean {
   return ACCESSORY_SUBCATEGORIES.some((a) => s === a || s.includes(a));
 }
 
+function hardwareSubcategoryPriority(v: VariantOption): number {
+  if (v.category !== 'cylindrical_mortise_locks_and_deadbolts') return 0;
+  const sub = (v.subcategory ?? '').trim().toLowerCase();
+  if (sub === 'cylindrical_lock') return 0;
+  if (sub === 'mortise_lock') return 1;
+  if (sub === 'deadbolt') return 2;
+  if (sub === 'multipoint_lock') return 3;
+  return 4;
+}
+
 /**
  * Variants matching the criteria, with the fire-rating gate applied (when an
  * opening is labeled and both rated/unrated exist, keep only rated), then
  * accessory subcategories demoted below real devices, sorted with priced
- * variants first then cheapest net.
+ * variants first, default device-subcategory preference, then cheapest net.
  */
 function filterVariants(variants: VariantOption[], criteria: Partial<HwCriteria>, fireLabeled: boolean): VariantOption[] {
   let out = variants.filter((v) => matchesCriteria(v, criteria));
@@ -1484,13 +1619,16 @@ function filterVariants(variants: VariantOption[], criteria: Partial<HwCriteria>
   const realDevices = out.filter((v) => !isAccessorySubcategory(v.subcategory));
   if (realDevices.length > 0 && realDevices.length < out.length) out = realDevices;
   return [...out].sort((a, b) =>
-    (Number(hasVariantPrice(b)) - Number(hasVariantPrice(a))) || (variantNet(a) - variantNet(b)));
+    (Number(hasVariantPrice(b)) - Number(hasVariantPrice(a))) ||
+    (hardwareSubcategoryPriority(a) - hardwareSubcategoryPriority(b)) ||
+    (variantNet(a) - variantNet(b)));
 }
 
 function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCategories, onUpdateHardware, onAddHardware, onRemoveHardware, onPatch }: StepContentProps) {
   const defaultFinish = draft.hardwareFinishDefault;
   const hand = doorHand(draft);
   const fireLabeled = draft.fireLabelRequired;
+  const visibleHardware = draft.hardware.filter((h) => h.required || h.source === 'manual' || !!h.variantId);
   const allFinishes = [...new Set(
     Object.values(variantsByCategory).flat().map((v) => v.variant.finish).filter((x): x is string => !!x),
   )].sort();
@@ -1538,20 +1676,20 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
       {/* Always allow adding individual hardware, regardless of set templates. */}
       <AddHardwareControl
         categories={hardwareCategories}
-        existing={new Set(draft.hardware.map((h) => h.category))}
+        existing={new Set(visibleHardware.map((h) => h.category))}
         onAdd={onAddHardware}
       />
 
-      {draft.hardware.length === 0 && (
+      {visibleHardware.length === 0 && (
         <p className="text-sm text-muted-foreground italic">
           No hardware yet. Use “Add hardware” above to pick items (hinges, locks, closers, seals, …).
         </p>
       )}
-      {draft.hardware.map((h) => {
+      {visibleHardware.map((h) => {
         const variants = variantsByCategory[h.category] ?? [];
         const handed = isHandedCategory(h.category);
         const effFinish = h.selectedFinish ?? defaultFinish ?? null;
-        const effHand = h.selectedHand ?? (handed ? hand : null);
+        const effHand = h.selectedHand ?? defaultHardwareHand(h.category, variants.map((v) => v.variant.hand), hand);
         const criteria: HwCriteria = {
           function: h.selectedFunction ?? null, finish: effFinish, size: h.selectedSize ?? null,
           hand: effHand, rating: h.selectedRating ?? null,
@@ -1812,11 +1950,15 @@ function ConstructionStep({ draft, onUpdateComponentField }: StepContentProps) {
   };
 
   const currentDoorSeries = draft.doors[0]?.fields['door.door_series_construction'] ?? null;
+  const currentFrameSeries = draft.frames[0]?.fields['frame.frame_series'] ?? null;
 
   // Auto-apply the single compliant construction.
   useEffect(() => {
     if (result?.status === 'auto' && result.selected) {
-      if (currentDoorSeries !== result.selected.resolved.series.door) applyCandidate(result.selected);
+      if (
+        currentDoorSeries !== result.selected.resolved.series.door
+        || currentFrameSeries !== result.selected.resolved.series.frame
+      ) applyCandidate(result.selected);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result]);
