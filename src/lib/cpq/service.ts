@@ -304,10 +304,11 @@ export async function assertEstimateBuildable(estimateId: string): Promise<void>
   // items that have no resolved price and would produce a $0 quote line.
   const { data: blockingLines, error: lineErr } = await supabase
     .from('estimate_line')
-    .select('description, price_status')
+    .select('description, price_status, manual_sell_price')
     .eq('estimate_id', estimateId)
     .in('price_status', ['INVALID', 'CONTACT_FACTORY', 'EXTERNAL_PENDING'])
     .is('included_or_suppressed_by', null)
+    .is('manual_sell_price', null)
     .neq('line_type', 'INCLUDED')
     .limit(5);
 

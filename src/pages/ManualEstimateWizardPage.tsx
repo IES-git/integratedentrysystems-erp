@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, PenLine, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { WizardSteps, type WizardStep } from '@/components/estimates/wizard/WizardSteps';
@@ -50,13 +50,23 @@ function mapCompanyRow(row: any): Company {
 
 export default function ManualEstimateWizardPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { estimateId: routeEstimateId } = useParams<{ estimateId?: string }>();
   const [searchParams] = useSearchParams();
   const { toast } = useToast();
 
   // When ?id is present we are editing an existing estimate's openings
-  const existingId = searchParams.get('id');
-  const startStepParam = parseInt(searchParams.get('step') ?? '0', 10);
-  const initialStep = Number.isFinite(startStepParam) && startStepParam > 0 ? startStepParam : 0;
+  const existingId = searchParams.get('id') ?? routeEstimateId ?? null;
+  const explicitStepParam = searchParams.get('step');
+  const parsedStepParam = explicitStepParam !== null ? parseInt(explicitStepParam, 10) : NaN;
+  const inferredStep = existingId
+    ? location.pathname.endsWith('/review')
+      ? 2
+      : 1
+    : 0;
+  const initialStep =
+    Number.isFinite(parsedStepParam) && parsedStepParam >= 0 ? parsedStepParam : inferredStep;
+  const isEditingEstimate = Boolean(existingId);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -235,7 +245,12 @@ export default function ManualEstimateWizardPage() {
         companyId: noCustomer ? null : selectedCustomerId,
         totalPrice,
       });
-      toast({ title: 'Estimate saved', description: 'Your estimate has been saved.' });
+      toast({
+        title: isEditingEstimate ? 'Estimate updated' : 'Estimate saved',
+        description: isEditingEstimate
+          ? 'Your estimate changes have been saved.'
+          : 'Your estimate has been saved.',
+      });
       navigate('/app/estimates');
     } catch (err) {
       toast({
@@ -253,7 +268,7 @@ export default function ManualEstimateWizardPage() {
       <div className="flex h-full items-center justify-center">
         <div className="flex flex-col items-center gap-4 text-muted-foreground">
           <Loader2 className="h-8 w-8 animate-spin" />
-          <p className="text-sm">{existingId ? 'Loading estimate…' : 'Loading…'}</p>
+          <p className="text-sm">{isEditingEstimate ? 'Loading estimate...' : 'Loading...'}</p>
         </div>
       </div>
     );
@@ -297,10 +312,12 @@ export default function ManualEstimateWizardPage() {
               </div>
               <div>
                 <h1 className="font-display text-xl sm:text-2xl lg:text-3xl tracking-wide">
-                  {existingId ? 'Manage Openings' : 'Create Estimate'}
+                  {isEditingEstimate ? 'Edit Estimate' : 'Create Estimate'}
                 </h1>
                 <p className="text-sm text-muted-foreground">
-                  {existingId ? 'Add or edit openings for this estimate' : 'Enter line items manually'}
+                  {isEditingEstimate
+                    ? 'Update customer, openings, pricing, and review before saving.'
+                    : 'Enter line items manually'}
                 </p>
               </div>
             </div>
@@ -325,10 +342,10 @@ export default function ManualEstimateWizardPage() {
             <OpeningsStep
               estimateId={estimateId ?? existingId}
               createEstimate={!existingId ? createEstimate : undefined}
-              onBack={existingId ? () => navigate('/app/estimates') : handlePrevStep}
-              backLabel={existingId ? 'Back to Estimates' : 'Back to Customer'}
+              onBack={isEditingEstimate ? () => navigate('/app/estimates') : handlePrevStep}
+              backLabel={isEditingEstimate ? 'Back to Estimates' : 'Back to Customer'}
               onFinish={handleAdvanceToReview}
-              finishLabel={saving ? 'Saving…' : 'Review & Pricing →'}
+              finishLabel={saving ? 'Saving...' : 'Review & Pricing'}
               finishLoading={saving}
               autoEditOpening={pendingEditOpening}
               autoEditStep={pendingEditStep}
@@ -342,6 +359,15 @@ export default function ManualEstimateWizardPage() {
               onBack={() => setCurrentStepIndex(1)}
               onFinish={handleFinish}
               finishLoading={saving}
+              finishLabel={
+                isEditingEstimate
+                  ? saving
+                    ? 'Updating...'
+                    : 'Update Estimate'
+                  : saving
+                    ? 'Saving...'
+                    : 'Save & Finish'
+              }
               onEditOpening={(opening, target) => {
                 setPendingEditOpening(opening);
                 setPendingEditStep(target ?? null);

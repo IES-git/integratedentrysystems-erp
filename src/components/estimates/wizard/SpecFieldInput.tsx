@@ -57,10 +57,12 @@ export function SpecFieldInput({ field, value, onChange, locked, derivedValue, d
   const isFreeformMeasurement =
     !dataType.includes('enum')
     && (dataType.includes('dimension') || dataType.includes('integer') || dataType.includes('number'));
-  const allowGuidedMeasurementSelect =
+  // Dimension fields where we surface the standard chart depths as typeahead
+  // suggestions but still allow a freeform custom value (e.g. "5 3/4").
+  const isGuidedMeasurement =
     path === 'frame.jamb_depth'
     || path === 'opening.finished_wall_thickness_jamb_depth';
-  const baseEnum = (options && (!isFreeformMeasurement || allowGuidedMeasurementSelect)) ? options : (
+  const baseEnum = (options && !isFreeformMeasurement) ? options : (
     isBoolean && field.enumOptions.length === 0
       ? ['Yes', 'No']
       : isFreeformMeasurement
@@ -68,9 +70,13 @@ export function SpecFieldInput({ field, value, onChange, locked, derivedValue, d
         : field.enumOptions
   );
   // Keep the effective value selectable even if filtering excluded it.
-  const enumOptions = (!isFreeformMeasurement || allowGuidedMeasurementSelect) && effectiveValue && !baseEnum.includes(effectiveValue)
+  const enumOptions = !isFreeformMeasurement && effectiveValue && !baseEnum.includes(effectiveValue)
     ? [effectiveValue, ...baseEnum]
     : baseEnum;
+  // Guided dimension suggestions (chart depths) shown in a datalist so the input
+  // stays freeform.
+  const measurementSuggestions = isGuidedMeasurement && options && options.length > 0 ? options : null;
+  const suggestionsId = measurementSuggestions ? `${path}-suggestions` : undefined;
 
   const placeholder = (() => {
     if (!dataType.includes('dimension')) return field.allowedValues?.slice(0, 40) ?? '';
@@ -117,13 +123,23 @@ export function SpecFieldInput({ field, value, onChange, locked, derivedValue, d
           </SelectContent>
         </Select>
       ) : (
-        <Input
-          value={effectiveValue}
-          onChange={(e) => onChange(path, e.target.value)}
-          placeholder={isAuto ? '' : placeholder}
-          className="h-8 text-sm"
-          readOnly={locked}
-        />
+        <>
+          <Input
+            value={effectiveValue}
+            onChange={(e) => onChange(path, e.target.value)}
+            placeholder={isAuto ? '' : placeholder}
+            className="h-8 text-sm"
+            readOnly={locked}
+            list={suggestionsId}
+          />
+          {measurementSuggestions && (
+            <datalist id={suggestionsId}>
+              {measurementSuggestions.map((opt) => (
+                <option key={opt} value={opt} />
+              ))}
+            </datalist>
+          )}
+        </>
       )}
     </div>
   );

@@ -199,10 +199,32 @@ export interface EstimateOpeningWithItems extends EstimateOpening {
   hardware: EstimateItem[];
 }
 
+/**
+ * Quick-reference summary of an estimate's primary opening spec, derived from
+ * estimate_openings.spec_snapshot for the Estimates list view. All fields are
+ * pre-formatted display strings; any may be null when the snapshot lacks them.
+ */
+export interface EstimateSpecSummary {
+  /** Door descriptor, e.g. "C · 18ga · Galvannealed · Steel Stiffened". */
+  door: string | null;
+  /** Frame descriptor, e.g. "F · 3S · Galvannealed · 5 3/4\" jamb". */
+  frame: string | null;
+  /** Nominal size, e.g. "3'0\" × 7'0\"". */
+  size: string | null;
+  /** Configuration, e.g. "Single" / "Pair". */
+  config: string | null;
+  /** Wall construction, e.g. "Masonry". */
+  wall: string | null;
+  /** True when the opening requires a fire label. */
+  fireLabeled: boolean;
+}
+
 export interface EstimateWithItems extends Estimate {
-  items: Pick<EstimateItem, 'id' | 'canonicalCode' | 'itemLabel'>[];
+  items: Pick<EstimateItem, 'id' | 'canonicalCode' | 'itemLabel' | 'itemType' | 'subcategory'>[];
   createdByUserName?: string | null;
   openingsCount?: number;
+  /** Spec-driven quick-reference summary (null for legacy / un-spec'd estimates). */
+  specSummary?: EstimateSpecSummary | null;
 }
 
 export interface FieldValueOption {
@@ -375,6 +397,7 @@ export interface Template {
   audience: TemplateAudience;
   description: string;
   matchingRulesJson: string | null;
+  displayConfigJson: string | null;
   createdByUserId: string;
   createdAt: string;
   updatedAt: string;
@@ -398,6 +421,59 @@ export interface TemplateField {
 export type QuoteStatus = 'draft' | 'sent' | 'approved' | 'rejected' | 'converted';
 export type QuoteType = 'customer' | 'manufacturer' | 'both';
 
+export type QuoteDisplayDetailLevel = 'summary' | 'standard' | 'detailed';
+
+export type QuoteDisplayBlockId =
+  | 'project'
+  | 'summary'
+  | 'scope'
+  | 'openings'
+  | 'lineItems'
+  | 'totals'
+  | 'terms'
+  | 'notes'
+  | 'delivery'
+  | 'custom';
+
+export interface QuoteDisplayBlock {
+  id: QuoteDisplayBlockId;
+  title: string;
+  enabled: boolean;
+  sortOrder: number;
+  detailLevel: QuoteDisplayDetailLevel;
+}
+
+export interface QuoteLineDisplayOverride {
+  displayKey: string;
+  label?: string;
+  hidden?: boolean;
+  section?: string;
+}
+
+export interface QuoteAudienceDisplayConfig {
+  audience: TemplateAudience;
+  templateName?: string | null;
+  blocks: QuoteDisplayBlock[];
+  lineOverrides: QuoteLineDisplayOverride[];
+  showProductCodes: boolean;
+  showQuantities: boolean;
+  showUnitPrices: boolean;
+  showLineTotals: boolean;
+  showUnitCosts: boolean;
+  showSpecFields: boolean;
+  groupCustomerLineItems: boolean;
+  summaryText: string;
+  scopeText: string;
+  termsText: string;
+  customText: string;
+}
+
+export interface QuoteDisplayConfig {
+  version: 1;
+  customer: QuoteAudienceDisplayConfig;
+  manufacturer: QuoteAudienceDisplayConfig;
+}
+
 export interface Quote {
   id: string;
   estimateId: string;
@@ -416,6 +492,7 @@ export interface Quote {
   sentAt: string | null;
   /** Primary recipient email address the quote was last sent to. */
   sentToEmail: string | null;
+  displayConfigJson: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -440,6 +517,7 @@ export interface QuoteItem {
   id: string;
   quoteId: string;
   estimateItemId: string | null;
+  displayKey: string | null;
   itemLabel: string;
   canonicalCode: string | null;
   quantity: number;

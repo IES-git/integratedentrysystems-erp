@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Upload, FileText, Loader2, CheckCircle2, AlertCircle, ArrowLeft, Trash2, Sparkles, RefreshCw, Eye } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -94,8 +95,10 @@ function splitDimension(label: string): { width: string; height: string } {
 }
 
 export default function PriceBookIngestPage() {
+  const navigate = useNavigate();
   const { toast } = useToast();
   const { user } = useAuth();
+  const backToPricing = () => navigate('/app/pricing');
 
   const [books, setBooks] = useState<PriceBook[]>([]);
   const [manufacturers, setManufacturers] = useState<Company[]>([]);
@@ -975,7 +978,7 @@ export default function PriceBookIngestPage() {
     return (
       <HardwareCatalogReviewPanel
         book={hardwareReviewBook}
-        onClose={() => setHardwareReviewBook(null)}
+        onClose={backToPricing}
         onChanged={() => void loadList()}
       />
     );
@@ -986,7 +989,7 @@ export default function PriceBookIngestPage() {
       <RuleReviewPanel
         book={reviewBook}
         extraction={ruleReviewExt}
-        onClose={() => setRuleReviewExt(null)}
+        onClose={backToPricing}
         onChanged={async () => {
           const list = await reloadBookExtractions(reviewBook);
           const fresh = list?.find((e) => e.id === ruleReviewExt.id);
@@ -1007,7 +1010,7 @@ export default function PriceBookIngestPage() {
     return (
       <div className="container mx-auto max-w-6xl space-y-6 p-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={() => setViewExtraction(null)}>
+          <Button variant="ghost" size="icon" onClick={backToPricing}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div className="flex-1">
@@ -1080,7 +1083,7 @@ export default function PriceBookIngestPage() {
     return (
       <div className="container mx-auto max-w-4xl space-y-6 p-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={closeHardware}><ArrowLeft className="h-4 w-4" /></Button>
+          <Button variant="ghost" size="icon" onClick={backToPricing}><ArrowLeft className="h-4 w-4" /></Button>
           <div>
             <h1 className="text-2xl font-bold">Map hardware: {extraction.title ?? 'Untitled'}</h1>
             <p className="text-sm text-muted-foreground">{reviewBook.name} · flat price list — one price per item</p>
@@ -1190,7 +1193,7 @@ export default function PriceBookIngestPage() {
       <div className="container mx-auto max-w-5xl space-y-6 p-6">
         {/* Header */}
         <div className="flex items-start gap-3">
-          <Button variant="ghost" size="icon" onClick={closeAdder} className="mt-0.5"><ArrowLeft className="h-4 w-4" /></Button>
+          <Button variant="ghost" size="icon" onClick={backToPricing} className="mt-0.5"><ArrowLeft className="h-4 w-4" /></Button>
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-bold truncate">Map adders: {extraction.title ?? 'Untitled'}</h1>
             <p className="text-sm text-muted-foreground">{reviewBook.name} · surcharges stacked on top of a base price</p>
@@ -1443,7 +1446,7 @@ export default function PriceBookIngestPage() {
     return (
       <div className="container mx-auto max-w-6xl space-y-6 p-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={() => setExtraction(null)}>
+          <Button variant="ghost" size="icon" onClick={backToPricing}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div>
@@ -1801,7 +1804,7 @@ export default function PriceBookIngestPage() {
     return (
       <div className="container mx-auto max-w-5xl space-y-6 p-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={() => { setReviewBook(null); setBookExtractions([]); setViewExtraction(null); }}>
+          <Button variant="ghost" size="icon" onClick={backToPricing}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div>
@@ -2053,11 +2056,16 @@ export default function PriceBookIngestPage() {
   // ---------------------------------------------------------------- List view
   return (
     <div className="container mx-auto max-w-5xl space-y-6 p-6">
-      <div>
-        <h1 className="text-2xl font-bold">Price Book Ingestion</h1>
-        <p className="text-sm text-muted-foreground">
-          Upload a manufacturer price list (PDF, image, Excel, or CSV). The system extracts the price grid for you to review and approve into a pricing table.
-        </p>
+      <div className="flex items-start gap-3">
+        <Button variant="ghost" size="icon" onClick={backToPricing} className="h-8 w-8 shrink-0">
+          <ArrowLeft className="h-4 w-4" />
+        </Button>
+        <div>
+          <h1 className="text-2xl font-bold">Price Book Ingestion</h1>
+          <p className="text-sm text-muted-foreground">
+            Upload a manufacturer price list (PDF, image, Excel, or CSV). The system extracts the price grid for you to review and approve into a pricing table.
+          </p>
+        </div>
       </div>
 
       <Card>

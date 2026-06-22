@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileCheck, Search, MoreHorizontal, Plus, Send, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { Edit3, FileCheck, Search, MoreHorizontal, Plus, Send, CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -23,7 +23,7 @@ import {
 import { SelectEstimateModal } from '@/components/quotes/SelectEstimateModal';
 import { listQuotesWithItems } from '@/lib/quotes-api';
 import { supabase } from '@/lib/supabase';
-import type { QuoteWithItems, QuoteStatus, Company } from '@/types';
+import type { QuoteType, QuoteWithItems, QuoteStatus, Company } from '@/types';
 
 export default function QuotesPage() {
   const navigate = useNavigate();
@@ -99,7 +99,7 @@ export default function QuotesPage() {
     );
   };
 
-  const getQuoteTypeBadge = (quoteType: Quote['quoteType']) => {
+  const getQuoteTypeBadge = (quoteType: QuoteType) => {
     const config = {
       customer: { label: 'Customer', className: 'bg-blue-100 text-blue-700 border-blue-200' },
       manufacturer: { label: 'Manufacturer', className: 'bg-purple-100 text-purple-700 border-purple-200' },
@@ -280,8 +280,12 @@ export default function QuotesPage() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
-                            <DropdownMenuItem asChild>
-                              <a href={`/app/quotes/${quote.id}`}>View Details</a>
+                            <DropdownMenuItem onClick={() => navigate(`/app/quotes/${quote.id}`)}>
+                              View Details
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => navigate(`/app/quotes/${quote.id}/edit`)}>
+                              <Edit3 className="mr-2 h-4 w-4" />
+                              Edit Quote
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem>Clone Quote</DropdownMenuItem>

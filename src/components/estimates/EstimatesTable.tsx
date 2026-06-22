@@ -1,8 +1,14 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2, Copy, Loader2, Layers, DoorOpen } from 'lucide-react';
+import { FileText, MoreHorizontal, ArrowUpDown, ArrowUp, ArrowDown, FileOutput, User, Factory, Users, Pencil, Trash2, Copy, Loader2, Layers, DoorOpen, RectangleHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import {
   Table,
   TableBody,
@@ -35,6 +41,59 @@ import type { EstimateWithItems, Company } from '@/types';
 
 type SortKey = 'companyId' | 'totalPrice' | 'createdAt';
 type SortDirection = 'asc' | 'desc';
+
+type EstimateLineItem = EstimateWithItems['items'][number];
+
+const DOOR_ITEM_TYPES = new Set(['door', 'doors']);
+const FRAME_ITEM_TYPES = new Set(['frame', 'frames']);
+const GENERIC_LABELS = new Set(['door', 'frame']);
+
+/**
+ * Picks the most descriptive text for a door/frame: the human label when it
+ * carries detail (e.g. "HM - Polystyrene"), otherwise the canonical code
+ * (e.g. "CH") so generic "Door"/"Frame" labels still distinguish estimates.
+ */
+function describeDoorFrame(item: EstimateLineItem): string {
+  const label = item.itemLabel?.trim();
+  const code = item.canonicalCode?.trim();
+  if (label && !GENERIC_LABELS.has(label.toLowerCase())) return label;
+  return code || label || '—';
+}
+
+/** Groups an estimate's items into door / frame summaries plus everything else. */
+function summarizeItems(items: EstimateLineItem[]) {
+  const doors: string[] = [];
+  const frames: string[] = [];
+  const others: string[] = [];
+  const seenDoors = new Set<string>();
+  const seenFrames = new Set<string>();
+  const seenOthers = new Set<string>();
+
+  for (const item of items) {
+    const type = item.itemType?.toLowerCase() ?? '';
+    if (DOOR_ITEM_TYPES.has(type)) {
+      const value = describeDoorFrame(item);
+      if (!seenDoors.has(value)) {
+        seenDoors.add(value);
+        doors.push(value);
+      }
+    } else if (FRAME_ITEM_TYPES.has(type)) {
+      const value = describeDoorFrame(item);
+      if (!seenFrames.has(value)) {
+        seenFrames.add(value);
+        frames.push(value);
+      }
+    } else {
+      const value = item.itemLabel?.trim() || item.canonicalCode?.trim() || '';
+      if (value && !seenOthers.has(value)) {
+        seenOthers.add(value);
+        others.push(value);
+      }
+    }
+  }
+
+  return { doors, frames, others };
+}
 
 interface EstimatesTableProps {
   estimates: EstimateWithItems[];
@@ -74,11 +133,15 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
   };
 
   const handleEditEstimate = (estimateId: string) => {
-    navigate(`/app/estimates/wizard?id=${estimateId}`);
+    navigate(`/app/estimates/${estimateId}/edit`);
   };
 
-  const handleManageOpenings = (estimateId: string) => {
-    navigate(`/app/estimates/create?id=${estimateId}&step=1`);
+  const handleReviewEstimate = (estimateId: string) => {
+    navigate(`/app/estimates/${estimateId}/review`);
+  };
+
+  const handleReviewSourceItems = (estimateId: string) => {
+    navigate(`/app/estimates/wizard?id=${estimateId}`);
   };
 
   const handleDuplicate = async (estimate: EstimateWithItems) => {
@@ -226,12 +289,16 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
           </TableHeader>
           <TableBody>
             {sortedEstimates.map((estimate) => {
-              // Unique canonical codes only — items can share the same code
-              const itemCodes = [
-                ...new Set(
-                  estimate.items.map((i) => i.canonicalCode).filter(Boolean)
-                ),
-              ];
+              const spec = estimate.specSummary ?? null;
+              const specMeta = spec
+                ? [spec.config, spec.size, spec.wall, spec.fireLabeled ? 'Labeled' : null].filter(
+                    (p): p is string => Boolean(p)
+                  )
+                : [];
+              const { doors, frames, others } = summarizeItems(estimate.items);
+              const hasPrimary = doors.length > 0 || frames.length > 0;
+              const visibleOthers = others.slice(0, 3);
+              const hiddenOthers = others.slice(3);
 
               return (
                 <TableRow key={estimate.id} className="h-10">
@@ -250,20 +317,88 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                     </div>
                   </TableCell>
                   <TableCell className="py-1.5">
-                    {itemCodes.length > 0 ? (
-                      <div className="flex flex-wrap gap-1">
-                        {itemCodes.map((code) => (
-                          <Badge
-                            key={code}
-                            variant="secondary"
-                            className="h-5 rounded px-1.5 font-mono text-[10px]"
-                          >
-                            {code}
-                          </Badge>
-                        ))}
+                    {spec ? (
+                      <div className="flex max-w-[300px] flex-col gap-1">
+                        {spec.door && (
+                          <div className="flex items-start gap-1.5 text-xs leading-tight">
+                            <DoorOpen className="mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="font-medium text-foreground">{spec.door}</span>
+                          </div>
+                        )}
+                        {spec.frame && (
+                          <div className="flex items-start gap-1.5 text-xs leading-tight">
+                            <RectangleHorizontal className="mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="font-medium text-foreground">{spec.frame}</span>
+                          </div>
+                        )}
+                        {specMeta.length > 0 && (
+                          <span className="text-[11px] leading-tight text-muted-foreground">
+                            {specMeta.join(' · ')}
+                          </span>
+                        )}
+                        {!spec.door && !spec.frame && specMeta.length === 0 && (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </div>
-                    ) : (
+                    ) : estimate.items.length === 0 ? (
                       <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <div className="flex max-w-[280px] flex-col gap-1">
+                        {doors.length > 0 && (
+                          <div className="flex items-start gap-1.5 text-xs leading-tight">
+                            <DoorOpen className="mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="font-medium text-foreground">
+                              {doors.join(', ')}
+                            </span>
+                          </div>
+                        )}
+                        {frames.length > 0 && (
+                          <div className="flex items-start gap-1.5 text-xs leading-tight">
+                            <RectangleHorizontal className="mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            <span className="font-medium text-foreground">
+                              {frames.join(', ')}
+                            </span>
+                          </div>
+                        )}
+                        {others.length > 0 && (
+                          <div className="flex flex-wrap items-center gap-1">
+                            {visibleOthers.map((value) => (
+                              <Badge
+                                key={value}
+                                variant="secondary"
+                                className="h-5 max-w-[160px] truncate rounded px-1.5 text-[10px] font-normal"
+                                title={value}
+                              >
+                                {value}
+                              </Badge>
+                            ))}
+                            {hiddenOthers.length > 0 && (
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Badge
+                                      variant="outline"
+                                      className="h-5 cursor-default rounded px-1.5 text-[10px] font-normal text-muted-foreground"
+                                    >
+                                      +{hiddenOthers.length}
+                                    </Badge>
+                                  </TooltipTrigger>
+                                  <TooltipContent className="max-w-[240px]">
+                                    <div className="flex flex-col gap-0.5 text-xs">
+                                      {hiddenOthers.map((value) => (
+                                        <span key={value}>{value}</span>
+                                      ))}
+                                    </div>
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            )}
+                          </div>
+                        )}
+                        {!hasPrimary && others.length === 0 && (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </div>
                     )}
                   </TableCell>
                   <TableCell className="py-1.5">
@@ -329,12 +464,18 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                           <>
                             <DropdownMenuItem onClick={() => handleEditEstimate(estimate.id)}>
                               <Pencil className="mr-2 h-4 w-4" />
-                              Edit/Review
+                              Edit Estimate
                             </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => handleManageOpenings(estimate.id)}>
+                            <DropdownMenuItem onClick={() => handleReviewEstimate(estimate.id)}>
                               <DoorOpen className="mr-2 h-4 w-4" />
-                              Manage Openings
+                              Review Pricing
                             </DropdownMenuItem>
+                            {estimate.source !== 'manual' && (
+                              <DropdownMenuItem onClick={() => handleReviewSourceItems(estimate.id)}>
+                                <FileText className="mr-2 h-4 w-4" />
+                                Review Source Items
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuItem
                               onClick={() => handleDuplicate(estimate)}
                               disabled={isDuplicatingId === estimate.id}

@@ -52,6 +52,10 @@ export interface EngineLine {
   exceptionMessage: string | null;
   componentId: string | null;
   sortOrder: number;
+  /** User-entered sell price for an otherwise unresolved line. */
+  manualSellPrice?: number | null;
+  /** True when manualSellPrice should be treated as the effective sell price. */
+  isManualOverride?: boolean | null;
 }
 
 export interface EngineManualQuote {
@@ -77,6 +81,29 @@ export interface EngineResult {
   dependencyResults: DependencyOutcome[];
   warnings: string[];
   totals: EngineTotals;
+}
+
+/**
+ * Stable-enough key for matching live-builder manual prices back to the same
+ * engine line after a re-price/save. It intentionally uses engine/audit fields
+ * rather than database ids because new openings do not have estimate_line ids
+ * until after the final persist.
+ */
+export function engineLineOverrideKey(line: Pick<EngineLine,
+  'componentId' | 'entityType' | 'lineType' | 'priceRuleId' | 'chargeCategory' |
+  'selectedOptionCode' | 'priceStatus' | 'description' | 'sortOrder'
+>): string {
+  return [
+    line.componentId ?? '',
+    line.entityType ?? '',
+    line.lineType,
+    line.priceRuleId ?? '',
+    line.chargeCategory ?? '',
+    line.selectedOptionCode ?? '',
+    line.priceStatus,
+    line.sortOrder,
+    line.description.trim().toLowerCase().replace(/\s+/g, ' '),
+  ].join('|');
 }
 
 export interface DependencyOutcome {

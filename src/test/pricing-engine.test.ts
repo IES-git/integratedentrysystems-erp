@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { priceOpeningCore } from '@/lib/pricing/engine';
+import { engineLineOverrideKey } from '@/lib/pricing/engine-types';
 import type { LoadedPriceRule, LoadedRuleSet } from '@/lib/pricing/engine-types';
 import type { HardwareCatalog, VariantWithPrice } from '@/lib/pricing/loader';
 import type { NormalizedOpeningSpec } from '@/lib/pricing/spec';
@@ -178,6 +179,25 @@ describe('pricing engine core', () => {
     const res = priceOpeningCore(baseSpec(), { rules: [], dependencyRules: [] }, emptyCatalog, new Map(), opts);
     expect(res.lines.some((l) => l.priceStatus === 'INVALID')).toBe(true);
     expect(res.manualQuotes.some((m) => m.reason === 'MISSING_PRICE')).toBe(true);
+  });
+
+  it('applies manual sell prices to missing-price engine lines', () => {
+    const firstPass = priceOpeningCore(baseSpec(), { rules: [], dependencyRules: [] }, emptyCatalog, new Map(), opts);
+    const missing = firstPass.lines.find((l) => l.priceStatus === 'INVALID');
+    expect(missing).toBeTruthy();
+
+    const res = priceOpeningCore(baseSpec(), { rules: [], dependencyRules: [] }, emptyCatalog, new Map(), {
+      ...opts,
+      manualSellPriceByLineKey: { [engineLineOverrideKey(missing!)]: 475 },
+    });
+
+    const manualLine = res.lines.find((l) => l.manualSellPrice === 475);
+    expect(manualLine?.priceStatus).toBe('PRICED');
+    expect(manualLine?.sellPrice).toBe(475);
+    expect(manualLine?.isManualOverride).toBe(true);
+    expect(res.totals.exceptionCount).toBe(0);
+    expect(res.totals.sellTotal).toBe(475);
+    expect(res.manualQuotes).toHaveLength(0);
   });
 
   it('evaluates a BETWEEN condition against a dimension field', () => {

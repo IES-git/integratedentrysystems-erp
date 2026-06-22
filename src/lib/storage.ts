@@ -444,6 +444,7 @@ export function initializeDemoData(): void {
       audience: 'customer',
       description: 'Professional customer-facing quote with pricing and specifications',
       matchingRulesJson: JSON.stringify({ includesPricing: true, includesSpecs: true }),
+      displayConfigJson: null,
       createdByUserId: userId,
     });
 
@@ -452,6 +453,7 @@ export function initializeDemoData(): void {
       audience: 'manufacturer',
       description: 'Comprehensive request for quote with all technical specifications',
       matchingRulesJson: JSON.stringify({ detailed: true, technical: true }),
+      displayConfigJson: null,
       createdByUserId: userId,
     });
 
@@ -460,6 +462,7 @@ export function initializeDemoData(): void {
       audience: 'customer',
       description: 'Simplified quote format for fast turnaround projects',
       matchingRulesJson: JSON.stringify({ simplified: true }),
+      displayConfigJson: null,
       createdByUserId: userId,
     });
   }

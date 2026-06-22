@@ -1,5 +1,13 @@
 import { Document, Page, Text, View, StyleSheet, Image } from '@react-pdf/renderer';
-import type { Quote, QuoteItem, ItemField, Company } from '@/types';
+import {
+  createDefaultAudienceDisplayConfig,
+  getEnabledBlocks,
+  getLineDisplayKey,
+  getLineDisplayLabel,
+  hasHiddenDisplayLines,
+  isLineVisible,
+} from '@/lib/quote-display';
+import type { Quote, QuoteItem, ItemField, Company, QuoteAudienceDisplayConfig } from '@/types';
 import iesLogo from '@/assets/ies-logo.png';
 
 const styles = StyleSheet.create({
@@ -194,6 +202,12 @@ const styles = StyleSheet.create({
     padding: 8,
     fontStyle: 'italic',
   },
+  hiddenNotice: {
+    marginTop: -6,
+    marginBottom: 12,
+    fontSize: 7.5,
+    color: '#6b7280',
+  },
   // ── Totals ──────────────────────────────────────────────────────────────────
   totalsSection: {
     flexDirection: 'row',
@@ -313,6 +327,25 @@ const styles = StyleSheet.create({
     fontSize: 8.5,
     color: '#374151',
   },
+  customSection: {
+    marginBottom: 16,
+    padding: 10,
+    border: '0.5pt solid #e5e7eb',
+    borderRadius: 3,
+  },
+  customLabel: {
+    fontSize: 7,
+    fontFamily: 'Helvetica-Bold',
+    color: '#374151',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  customText: {
+    fontSize: 8.5,
+    color: '#374151',
+    lineHeight: 1.45,
+  },
 });
 
 const fmt = (amount: number, currency = 'USD') =>
@@ -326,13 +359,21 @@ interface ManufacturerQuotePdfProps {
   quote: Quote;
   items: ManufacturerQuoteItem[];
   company: Company | null;
+  displayConfig?: QuoteAudienceDisplayConfig | null;
 }
 
 export function ManufacturerQuotePdf({
   quote,
   items,
   company,
+  displayConfig,
 }: ManufacturerQuotePdfProps) {
+  const config = displayConfig ?? createDefaultAudienceDisplayConfig('manufacturer');
+  const enabledBlocks = getEnabledBlocks(config);
+  const visibleItems = items.filter((item) => isLineVisible(item, config));
+  const hiddenLines = hasHiddenDisplayLines(items, config);
+  const visibleCostTotal = visibleItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
+  const allCostTotal = items.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
   const rfqNumber = `RFQ-${quote.id.slice(-8).toUpperCase()}`;
   const rfqDate = new Date(quote.createdAt).toLocaleDateString('en-US', {
     year: 'numeric',
@@ -371,125 +412,226 @@ export function ManufacturerQuotePdf({
           </View>
         </View>
 
-        {/* ── Project Info ── */}
-        <View style={styles.infoSection}>
-          <View style={styles.infoBlock}>
-            <Text style={styles.infoLabel}>Ship To</Text>
-            {company && <Text style={styles.infoValue}>{company.name}</Text>}
-            {shipToLines.map((line, i) => (
-              <Text key={i} style={styles.infoLine}>{line}</Text>
-            ))}
-          </View>
-          <View style={styles.infoBlock}>
-            <Text style={styles.infoLabel}>Issued By</Text>
-            <Text style={styles.infoValue}>Integrated Entry Systems</Text>
-            <Text style={styles.infoLine}>Commercial Door &amp; Hardware</Text>
-            <Text style={styles.infoLine}>procurement@ies-access.com</Text>
-          </View>
-          <View style={styles.infoBlock}>
-            <Text style={styles.infoLabel}>Quote Info</Text>
-            <Text style={styles.infoLine}>RFQ: {rfqNumber}</Text>
-            <Text style={styles.infoLine}>Date: {rfqDate}</Text>
-            <Text style={styles.infoLine}>Items: {items.length}</Text>
-          </View>
-        </View>
-
-        {/* ── Items ── */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionHeaderText}>Line Items — Full Technical Specifications</Text>
-          <Text style={styles.sectionHeaderRight}>{items.length} item{items.length !== 1 ? 's' : ''}</Text>
-        </View>
-
-        {items.map((item, idx) => (
-          <View key={item.id} style={styles.itemBlock} wrap={false}>
-            {/* Item header row */}
-            <View style={styles.itemHeader}>
-              <View style={styles.itemHeaderLeft}>
-                <Text style={styles.itemLabel}>
-                  {idx + 1}. {item.itemLabel}
-                </Text>
-                {item.canonicalCode && (
-                  <Text style={styles.itemCode}>Item Code: {item.canonicalCode}</Text>
-                )}
+        {enabledBlocks.map((block) => {
+          if (block.id === 'project') {
+            return (
+              <View key={block.id} style={styles.infoSection}>
+                <View style={styles.infoBlock}>
+                  <Text style={styles.infoLabel}>Ship To</Text>
+                  {company && <Text style={styles.infoValue}>{company.name}</Text>}
+                  {shipToLines.map((line, i) => (
+                    <Text key={i} style={styles.infoLine}>{line}</Text>
+                  ))}
+                </View>
+                <View style={styles.infoBlock}>
+                  <Text style={styles.infoLabel}>Issued By</Text>
+                  <Text style={styles.infoValue}>Integrated Entry Systems</Text>
+                  <Text style={styles.infoLine}>Commercial Door &amp; Hardware</Text>
+                  <Text style={styles.infoLine}>procurement@ies-access.com</Text>
+                </View>
+                <View style={styles.infoBlock}>
+                  <Text style={styles.infoLabel}>Quote Info</Text>
+                  <Text style={styles.infoLine}>RFQ: {rfqNumber}</Text>
+                  <Text style={styles.infoLine}>Date: {rfqDate}</Text>
+                  <Text style={styles.infoLine}>Items: {visibleItems.length}</Text>
+                </View>
               </View>
-              <View style={styles.itemHeaderRight}>
-                <View style={styles.itemMeta}>
-                  <Text style={styles.itemMetaLabel}>Qty</Text>
-                  <Text style={styles.itemMetaValue}>{item.quantity}</Text>
-                </View>
-                <View style={styles.itemMeta}>
-                  <Text style={styles.itemMetaLabel}>Unit Cost</Text>
-                  <Text style={styles.itemMetaValue}>{fmt(item.unitCost, quote.currency)}</Text>
-                </View>
-                <View style={styles.itemMeta}>
-                  <Text style={styles.itemMetaLabel}>Line Total</Text>
-                  <Text style={styles.itemMetaValue}>
-                    {fmt(item.quantity * item.unitCost, quote.currency)}
+            );
+          }
+
+          if (block.id === 'openings') {
+            const isSummary = block.detailLevel === 'summary';
+            const isDetailed = block.detailLevel === 'detailed';
+            const showProductCodes = isDetailed || (!isSummary && config.showProductCodes);
+            const showCosts = isDetailed && config.showUnitCosts;
+
+            return (
+              <View key={block.id}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionHeaderText}>{block.title}</Text>
+                  <Text style={styles.sectionHeaderRight}>
+                    {visibleItems.length} item{visibleItems.length !== 1 ? 's' : ''}
                   </Text>
                 </View>
-              </View>
-            </View>
-
-            {/* Spec grid */}
-            {item.fields.length > 0 ? (
-              <View style={styles.specGrid}>
-                {item.fields.map((field) => (
-                  <View key={field.id} style={styles.specCell}>
-                    <Text style={styles.specKey}>{field.fieldLabel}</Text>
-                    <Text style={styles.specValue}>{field.fieldValue}</Text>
+                {visibleItems.map((item, idx) => (
+                  <View key={getLineDisplayKey(item)} style={idx % 2 === 0 ? styles.totalRow : [styles.totalRow, { backgroundColor: '#f9fafb' }]}>
+                    <Text style={styles.totalLabel}>
+                      {idx + 1}. {getLineDisplayLabel(item, config)}
+                      {showProductCodes && item.canonicalCode ? ` · ${item.canonicalCode}` : ''}
+                    </Text>
+                    {(config.showQuantities || showCosts) && (
+                      <Text style={styles.totalValue}>
+                        Qty {item.quantity}
+                        {showCosts ? ` · ${fmt(item.quantity * item.unitCost, quote.currency)}` : ''}
+                      </Text>
+                    )}
                   </View>
                 ))}
+                {hiddenLines && (
+                  <Text style={styles.hiddenNotice}>
+                    Some source lines are intentionally omitted from this display version.
+                  </Text>
+                )}
               </View>
-            ) : (
-              <Text style={styles.noSpecsText}>No additional specifications recorded.</Text>
-            )}
-          </View>
-        ))}
+            );
+          }
 
-        {/* ── Totals ── */}
-        <View style={styles.totalsSection}>
-          <View style={styles.totalsBox}>
-            <View style={styles.totalsHeader}>
-              <Text style={styles.totalsHeaderText}>Cost Summary</Text>
-            </View>
-            {items.map((item) => (
-              <View key={item.id} style={styles.totalRow}>
-                <Text style={styles.totalLabel} numberOfLines={1}>
-                  {item.itemLabel} (×{item.quantity})
-                </Text>
-                <Text style={styles.totalValue}>
-                  {fmt(item.quantity * item.unitCost, quote.currency)}
-                </Text>
+          if (block.id === 'lineItems') {
+            const isSummary = block.detailLevel === 'summary';
+            const isDetailed = block.detailLevel === 'detailed';
+            const showProductCodes = isDetailed || (!isSummary && config.showProductCodes);
+            const showQuantities = config.showQuantities;
+            const showUnitCosts = isDetailed || (!isSummary && config.showUnitCosts);
+            const showUnitPrices = isDetailed ? config.showUnitPrices : !isSummary && config.showUnitPrices;
+            const showLineTotals = config.showLineTotals;
+            const showSpecFields = isDetailed || (!isSummary && config.showSpecFields);
+
+            return (
+              <View key={block.id}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionHeaderText}>{block.title}</Text>
+                  <Text style={styles.sectionHeaderRight}>
+                    {visibleItems.length} item{visibleItems.length !== 1 ? 's' : ''}
+                  </Text>
+                </View>
+
+                {visibleItems.map((item, idx) => {
+                  const displayLabel = getLineDisplayLabel(item, config);
+                  return (
+                    <View key={getLineDisplayKey(item)} style={styles.itemBlock} wrap={false}>
+                      <View style={styles.itemHeader}>
+                        <View style={styles.itemHeaderLeft}>
+                          <Text style={styles.itemLabel}>
+                            {idx + 1}. {displayLabel}
+                          </Text>
+                          {showProductCodes && item.canonicalCode && (
+                            <Text style={styles.itemCode}>Item Code: {item.canonicalCode}</Text>
+                          )}
+                        </View>
+                        <View style={styles.itemHeaderRight}>
+                          {showQuantities && (
+                            <View style={styles.itemMeta}>
+                              <Text style={styles.itemMetaLabel}>Qty</Text>
+                              <Text style={styles.itemMetaValue}>{item.quantity}</Text>
+                            </View>
+                          )}
+                          {showUnitCosts && (
+                            <View style={styles.itemMeta}>
+                              <Text style={styles.itemMetaLabel}>Unit Cost</Text>
+                              <Text style={styles.itemMetaValue}>{fmt(item.unitCost, quote.currency)}</Text>
+                            </View>
+                          )}
+                          {showUnitPrices && (
+                            <View style={styles.itemMeta}>
+                              <Text style={styles.itemMetaLabel}>Sell</Text>
+                              <Text style={styles.itemMetaValue}>{fmt(item.unitPrice, quote.currency)}</Text>
+                            </View>
+                          )}
+                          {showLineTotals && (
+                            <View style={styles.itemMeta}>
+                              <Text style={styles.itemMetaLabel}>Line Total</Text>
+                              <Text style={styles.itemMetaValue}>
+                                {fmt(item.quantity * (showUnitCosts ? item.unitCost : item.unitPrice), quote.currency)}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+
+                      {showSpecFields ? (
+                        item.fields.length > 0 ? (
+                          <View style={styles.specGrid}>
+                            {item.fields.map((field) => (
+                              <View key={field.id} style={styles.specCell}>
+                                <Text style={styles.specKey}>{field.fieldLabel}</Text>
+                                <Text style={styles.specValue}>{field.fieldValue}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        ) : (
+                          <Text style={styles.noSpecsText}>No additional specifications recorded.</Text>
+                        )
+                      ) : null}
+                    </View>
+                  );
+                })}
+
+                {hiddenLines && (
+                  <Text style={styles.hiddenNotice}>
+                    Some source lines are intentionally omitted from this display version.
+                  </Text>
+                )}
               </View>
-            ))}
-            <View style={styles.grandTotalRow}>
-              <Text style={styles.grandTotalLabel}>TOTAL COST</Text>
-              <Text style={styles.grandTotalValue}>{fmt(quote.subtotal, quote.currency)}</Text>
-            </View>
-          </View>
-        </View>
+            );
+          }
 
-        {/* ── Notes ── */}
-        {quote.notes && (
-          <View style={styles.notesSection}>
-            <Text style={styles.notesLabel}>Notes &amp; Special Requirements</Text>
-            <Text style={styles.notesText}>{quote.notes}</Text>
-          </View>
-        )}
+          if (block.id === 'totals') {
+            return (
+              <View key={block.id} style={styles.totalsSection}>
+                <View style={styles.totalsBox}>
+                  <View style={styles.totalsHeader}>
+                    <Text style={styles.totalsHeaderText}>{block.title}</Text>
+                  </View>
+                  {visibleItems.map((item) => (
+                    <View key={getLineDisplayKey(item)} style={styles.totalRow}>
+                      <Text style={styles.totalLabel}>
+                        {getLineDisplayLabel(item, config)} (×{item.quantity})
+                      </Text>
+                      <Text style={styles.totalValue}>
+                        {fmt(item.quantity * (config.showUnitCosts ? item.unitCost : item.unitPrice), quote.currency)}
+                      </Text>
+                    </View>
+                  ))}
+                  <View style={styles.grandTotalRow}>
+                    <Text style={styles.grandTotalLabel}>
+                      {config.showUnitCosts ? 'TOTAL COST' : 'TOTAL'}
+                    </Text>
+                    <Text style={styles.grandTotalValue}>
+                      {fmt(config.showUnitCosts ? (hiddenLines ? allCostTotal : visibleCostTotal) : quote.total, quote.currency)}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            );
+          }
 
-        {/* ── Delivery ── */}
-        <View style={styles.deliverySection}>
-          <View style={styles.deliveryItem}>
-            <Text style={styles.deliveryLabel}>Delivery Requirements</Text>
-            <Text style={styles.deliveryValue}>
-              Please confirm lead times and availability before acceptance.
-            </Text>
-          </View>
-          <View style={styles.deliveryItem}>
-            <Text style={styles.deliveryLabel}>Response Required By</Text>
-            <Text style={styles.deliveryValue}>Within 5 business days of receipt</Text>
-          </View>
-        </View>
+          if (block.id === 'notes' && quote.notes) {
+            return (
+              <View key={block.id} style={styles.notesSection}>
+                <Text style={styles.notesLabel}>{block.title}</Text>
+                <Text style={styles.notesText}>{quote.notes}</Text>
+              </View>
+            );
+          }
+
+          if (block.id === 'delivery') {
+            return (
+              <View key={block.id} style={styles.deliverySection}>
+                <View style={styles.deliveryItem}>
+                  <Text style={styles.deliveryLabel}>{block.title}</Text>
+                  <Text style={styles.deliveryValue}>
+                    {config.termsText || 'Please confirm lead times and availability before acceptance.'}
+                  </Text>
+                </View>
+                <View style={styles.deliveryItem}>
+                  <Text style={styles.deliveryLabel}>Response Required By</Text>
+                  <Text style={styles.deliveryValue}>Within 5 business days of receipt</Text>
+                </View>
+              </View>
+            );
+          }
+
+          if (block.id === 'custom' && config.customText.trim()) {
+            return (
+              <View key={block.id} style={styles.customSection}>
+                <Text style={styles.customLabel}>{block.title}</Text>
+                <Text style={styles.customText}>{config.customText}</Text>
+              </View>
+            );
+          }
+
+          return null;
+        })}
 
         {/* ── Footer ── */}
         <View style={styles.footer} fixed>

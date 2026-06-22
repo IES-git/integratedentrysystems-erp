@@ -28,14 +28,19 @@ import QuoteBuilderPage from "@/pages/QuoteBuilderPage";
 import QuoteDetailPage from "@/pages/QuoteDetailPage";
 import OrdersPage from "@/pages/OrdersPage";
 import TemplatesPage from "@/pages/TemplatesPage";
+import TemplateDetailPage from "@/pages/TemplateDetailPage";
 import AdminUsersPage from "@/pages/AdminUsersPage";
 import AdminIntegrationsPage from "@/pages/AdminIntegrationsPage";
 import ItemManagementPage from "@/pages/ItemManagementPage";
 import ItemManagementProgressivePage from "@/pages/ItemManagementProgressivePage";
+import PricingHubPage from "@/pages/PricingHubPage";
 import PricingPage from "@/pages/PricingPage";
+import PricingDefaultsPage from "@/pages/PricingDefaultsPage";
+import PricingRuleTableDetailPage from "@/pages/PricingRuleTableDetailPage";
 import PriceBookIngestPage from "@/pages/PriceBookIngestPage";
 import QaDashboardPage from "@/pages/QaDashboardPage";
 import CompatibilityRulesPage from "@/pages/CompatibilityRulesPage";
+import HelpGuidePage from "@/pages/HelpGuidePage";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -69,6 +74,8 @@ const App = () => (
                   <Route path="estimates" element={<EstimatesListPage />} />
                   <Route path="estimates/new" element={<EstimateUploadPage />} />
                   <Route path="estimates/create" element={<ManualEstimateWizardPage />} />
+                  <Route path="estimates/:estimateId/edit" element={<ManualEstimateWizardPage />} />
+                  <Route path="estimates/:estimateId/review" element={<ManualEstimateWizardPage />} />
                   <Route path="estimates/wizard" element={<EstimateWizardPage />} />
                   <Route path="estimates/openings/new" element={<NewOpeningPage />} />
                   <Route path="estimates/:estimateId/openings/new" element={<NewOpeningPage />} />
@@ -77,9 +84,12 @@ const App = () => (
                   <Route path="quotes" element={<QuotesPage />} />
                   <Route path="quotes/wizard" element={<QuoteWizardPage />} />
                   <Route path="quotes/new" element={<QuoteBuilderPage />} />
+                  <Route path="quotes/:id/edit" element={<QuoteBuilderPage />} />
                   <Route path="quotes/:id" element={<QuoteDetailPage />} />
                   <Route path="orders" element={<OrdersPage />} />
                   <Route path="templates" element={<TemplatesPage />} />
+                  <Route path="templates/:id" element={<TemplateDetailPage />} />
+                  <Route path="help" element={<HelpGuidePage />} />
 
                   {/* Admin + Ops — accessible to admin and ops only */}
                   <Route
@@ -92,6 +102,58 @@ const App = () => (
                   />
                   <Route
                     path="pricing"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingHubPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/defaults"
+                    element={<RoleGuard roles={['admin']}><PricingDefaultsPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/table/:tableId"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/engine/:priceTableId"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingRuleTableDetailPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/doors"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/doors/:seriesValue"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/doors/:seriesValue/table/:tableId"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/frames"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/frames/:seriesValue"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/frames/:seriesValue/table/:tableId"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/lites_louvers_glass"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/lites_louvers_glass/table/:tableId"
+                    element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
+                  />
+                  <Route
+                    path="pricing/tables/lites_louvers_glass/:itemCode"
                     element={<RoleGuard roles={['admin', 'ops']}><PricingPage /></RoleGuard>}
                   />
                   <Route

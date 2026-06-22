@@ -33,6 +33,11 @@ export interface EstimateLineWithOverride extends EstimateLine {
   isManualOverride?: boolean | null;
 }
 
+function hasManualLinePrice(line: EstimateLine): boolean {
+  return (line as EstimateLineWithOverride).manualSellPrice !== null &&
+    (line as EstimateLineWithOverride).manualSellPrice !== undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Per-opening engine subtotal
 // ---------------------------------------------------------------------------
@@ -139,7 +144,7 @@ export function countEstimateMissingPrices(
     const lines = linesByOpening.get(opening.id) ?? [];
     if (lines.length > 0) {
       count += lines.filter(
-        (l) => l.priceStatus != null && EXCEPTION_STATUSES.has(l.priceStatus as EstimateLinePriceStatus),
+        (l) => !hasManualLinePrice(l) && l.priceStatus != null && EXCEPTION_STATUSES.has(l.priceStatus as EstimateLinePriceStatus),
       ).length;
     } else {
       count += [...opening.items, ...(opening.hardware ?? [])].filter(

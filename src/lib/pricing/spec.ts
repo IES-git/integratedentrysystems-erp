@@ -127,6 +127,11 @@ export interface EngineOptions {
    * FK instead of null. Supplied by the deterministic save flow (Phase 5).
    */
   componentIdMap?: Map<string, string>;
+  /**
+   * Live-builder manual sell prices keyed by engineLineOverrideKey(line).
+   * Applied after pricing so an explicit estimator price resolves that line.
+   */
+  manualSellPriceByLineKey?: Record<string, number | null | undefined>;
 }
 
 /**

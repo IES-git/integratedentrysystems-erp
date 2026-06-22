@@ -1,12 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { pdf } from '@react-pdf/renderer';
+import { pdf, PDFViewer } from '@react-pdf/renderer';
 import {
   ArrowLeft,
   Building2,
   Calendar,
   CheckCircle,
   Download,
+  Edit3,
+  Eye,
   FileText,
   Loader2,
   Mail,
@@ -28,6 +30,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   Table,
   TableBody,
@@ -47,6 +50,11 @@ import { getCompany, listContacts } from '@/lib/companies-api';
 import { getEstimateWithItems, getEstimateFileUrl } from '@/lib/estimates-api';
 import { generateQuoteSummary } from '@/lib/gemini-api';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
+import {
+  createDefaultQuoteDisplayConfig,
+  getBlock,
+  parseQuoteDisplayConfigJson,
+} from '@/lib/quote-display';
 import type { Company, Contact, Estimate, HardwareSubcategory, ItemField, Quote, QuoteItem, QuoteStatus, QuoteType } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -194,6 +202,9 @@ export default function QuoteDetailPage() {
   // PDF download states
   const [isDownloadingCustomer, setIsDownloadingCustomer] = useState(false);
   const [isDownloadingManufacturer, setIsDownloadingManufacturer] = useState(false);
+  const [previewType, setPreviewType] = useState<'customer' | 'manufacturer' | null>(null);
+  const [previewAiSummary, setPreviewAiSummary] = useState<string | null>(null);
+  const [isGeneratingPreviewSummary, setIsGeneratingPreviewSummary] = useState(false);
 
   // Email send state
   const [showSendDialog, setShowSendDialog] = useState(false);
@@ -204,6 +215,15 @@ export default function QuoteDetailPage() {
   const [estimateFileUrl, setEstimateFileUrl] = useState<string | null>(null);
   const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [isLoadingEstimate, setIsLoadingEstimate] = useState(false);
+
+  const displayConfig = useMemo(
+    () =>
+      quote
+        ? parseQuoteDisplayConfigJson(quote.displayConfigJson) ??
+          createDefaultQuoteDisplayConfig(null, quote.quoteType)
+        : createDefaultQuoteDisplayConfig(null, 'customer'),
+    [quote],
+  );
 
   useEffect(() => {
     if (!id) return;
@@ -262,17 +282,19 @@ export default function QuoteDetailPage() {
 
     let aiSummary: string | null = null;
     try {
-      aiSummary = await generateQuoteSummary({
-        companyName: company?.name ?? null,
-        items: items.map((i) => ({
-          label: i.itemLabel,
-          quantity: i.quantity,
-          lineTotal: i.lineTotal,
-        })),
-        total: quote.total,
-        currency: quote.currency,
-        notes: quote.notes,
-      });
+      if (getBlock(displayConfig.customer, 'summary').enabled) {
+        aiSummary = await generateQuoteSummary({
+          companyName: company?.name ?? null,
+          items: items.map((i) => ({
+            label: i.itemLabel,
+            quantity: i.quantity,
+            lineTotal: i.lineTotal,
+          })),
+          total: quote.total,
+          currency: quote.currency,
+          notes: quote.notes,
+        });
+      }
     } catch {
       // AI summary is optional — skip silently
     }
@@ -284,26 +306,32 @@ export default function QuoteDetailPage() {
         company={company}
         primaryContact={primaryContact}
         aiSummary={aiSummary}
+        displayConfig={displayConfig.customer}
       />
     ).toBlob();
 
     const name = company?.name ?? 'Customer';
     const date = new Date().toISOString().slice(0, 10);
     return { blob, fileName: `Quote-${name.replace(/\s+/g, '-')}-${date}.pdf` };
-  }, [quote, items, company, contacts]);
+  }, [quote, items, company, contacts, displayConfig.customer]);
 
   const buildManufacturerPdfBlob = useCallback(async (): Promise<{ blob: Blob; fileName: string }> => {
     if (!quote) throw new Error('Quote not loaded');
 
     const mfrItems: ManufacturerQuoteItem[] = items.map((i) => ({ ...i, fields: i.fields }));
     const blob = await pdf(
-      <ManufacturerQuotePdf quote={quote} items={mfrItems} company={company} />
+      <ManufacturerQuotePdf
+        quote={quote}
+        items={mfrItems}
+        company={company}
+        displayConfig={displayConfig.manufacturer}
+      />
     ).toBlob();
 
     const name = company?.name ?? 'Manufacturer';
     const date = new Date().toISOString().slice(0, 10);
     return { blob, fileName: `RFQ-${name.replace(/\s+/g, '-')}-${date}.pdf` };
-  }, [quote, items, company]);
+  }, [quote, items, company, displayConfig.manufacturer]);
 
   // ── PDF downloads ──────────────────────────────────────────────────────────
 
@@ -344,6 +372,33 @@ export default function QuoteDetailPage() {
   const handleDownloadBoth = useCallback(async () => {
     await Promise.all([handleDownloadCustomer(), handleDownloadManufacturer()]);
   }, [handleDownloadCustomer, handleDownloadManufacturer]);
+
+  const handlePreviewCustomer = useCallback(async () => {
+    if (!quote) return;
+    setPreviewAiSummary(null);
+    setPreviewType('customer');
+    setIsGeneratingPreviewSummary(true);
+    try {
+      if (getBlock(displayConfig.customer, 'summary').enabled) {
+        const summary = await generateQuoteSummary({
+          companyName: company?.name ?? null,
+          items: items.map((i) => ({
+            label: i.itemLabel,
+            quantity: i.quantity,
+            lineTotal: i.lineTotal,
+          })),
+          total: quote.total,
+          currency: quote.currency,
+          notes: quote.notes,
+        });
+        setPreviewAiSummary(summary);
+      }
+    } catch {
+      setPreviewAiSummary(null);
+    } finally {
+      setIsGeneratingPreviewSummary(false);
+    }
+  }, [quote, displayConfig.customer, company, items]);
 
   // ── Email send ─────────────────────────────────────────────────────────────
 
@@ -469,11 +524,88 @@ export default function QuoteDetailPage() {
   const isBusy = isDownloadingCustomer || isDownloadingManufacturer || isSendingEmail;
   // "Send to Customer" is relevant on any quote with a customer PDF, regardless of status
   const canSendToCustomer = showCustomerPdf;
+  const primaryContact = contacts.find((c) => c.isPrimary) ?? contacts[0] ?? null;
+  const manufacturerPreviewItems: ManufacturerQuoteItem[] = items.map((i) => ({
+    ...i,
+    fields: i.fields,
+  }));
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto">
+      <Dialog open={previewType !== null} onOpenChange={(open) => !open && setPreviewType(null)}>
+        <DialogContent className="max-w-5xl w-[95vw] h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
+          <DialogHeader className="px-6 py-4 border-b shrink-0">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Eye className="h-4 w-4" />
+              {previewType === 'customer' ? 'Customer Quote Preview' : 'Manufacturer RFQ Preview'}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="flex-1 min-h-0">
+            {previewType !== null && (
+              <PDFViewer width="100%" height="100%" showToolbar>
+                {previewType === 'customer' ? (
+                  <CustomerQuotePdf
+                    quote={quote}
+                    items={items}
+                    company={company}
+                    primaryContact={primaryContact}
+                    aiSummary={previewAiSummary}
+                    displayConfig={displayConfig.customer}
+                  />
+                ) : (
+                  <ManufacturerQuotePdf
+                    quote={quote}
+                    items={manufacturerPreviewItems}
+                    company={company}
+                    displayConfig={displayConfig.manufacturer}
+                  />
+                )}
+              </PDFViewer>
+            )}
+          </div>
+
+          <div className="px-6 py-4 border-t shrink-0 flex items-center justify-between gap-3 bg-background">
+            {previewType === 'customer' && isGeneratingPreviewSummary && (
+              <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Generating AI summary...
+              </p>
+            )}
+            {previewType === 'customer' && !isGeneratingPreviewSummary && (
+              <p className="text-xs text-muted-foreground">
+                {previewAiSummary ? 'AI summary included.' : 'AI summary unavailable.'}
+              </p>
+            )}
+            {previewType === 'manufacturer' && (
+              <p className="text-xs text-muted-foreground">
+                Internal use only; not for customer distribution.
+              </p>
+            )}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <Button variant="outline" onClick={() => setPreviewType(null)}>
+                Close
+              </Button>
+              <Button
+                onClick={previewType === 'customer' ? handleDownloadCustomer : handleDownloadManufacturer}
+                disabled={
+                  previewType === 'customer' ? isDownloadingCustomer : isDownloadingManufacturer
+                }
+              >
+                {(previewType === 'customer' ? isDownloadingCustomer : isDownloadingManufacturer) ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="mr-2 h-4 w-4" />
+                )}
+                Download PDF
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Header */}
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
@@ -500,6 +632,46 @@ export default function QuoteDetailPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => navigate(`/app/quotes/${quote.id}/edit`)}
+            className="gap-2"
+          >
+            <Edit3 className="h-4 w-4" />
+            Edit Quote
+          </Button>
+
+          {showCustomerPdf && showManufacturerPdf ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline">
+                  <Eye className="mr-2 h-4 w-4" />
+                  Preview
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={handlePreviewCustomer}>
+                  <Eye className="mr-2 h-4 w-4" />
+                  Customer Quote
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setPreviewType('manufacturer')}>
+                  <Eye className="mr-2 h-4 w-4" />
+                  Manufacturer RFQ
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : showCustomerPdf ? (
+            <Button variant="outline" onClick={handlePreviewCustomer}>
+              <Eye className="mr-2 h-4 w-4" />
+              Preview Quote
+            </Button>
+          ) : (
+            <Button variant="outline" onClick={() => setPreviewType('manufacturer')}>
+              <Eye className="mr-2 h-4 w-4" />
+              Preview RFQ
+            </Button>
+          )}
+
           {/* Send to Customer */}
           {canSendToCustomer && (
             <Button

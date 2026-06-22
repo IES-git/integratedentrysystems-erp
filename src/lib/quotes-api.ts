@@ -3,8 +3,17 @@
  */
 
 import { supabase } from './supabase';
-import type { Quote, QuoteItem, QuoteWithItems, QuoteStatus, QuoteType } from '@/types';
+import type { Quote, QuoteItem, QuoteWithItems, QuoteStatus, QuoteType, HardwareSubcategory } from '@/types';
 import type { EstimateItem, ItemField } from '@/types';
+
+let supportsQuoteDisplayConfig = true;
+let supportsQuoteItemDisplayKey = true;
+
+function isMissingColumnError(error: unknown, columnName: string): boolean {
+  const maybeError = error as { code?: string; message?: string; details?: string };
+  const text = `${maybeError?.message ?? ''} ${maybeError?.details ?? ''}`.toLowerCase();
+  return maybeError?.code === 'PGRST204' && text.includes(columnName.toLowerCase());
+}
 
 // ---------------------------------------------------------------------------
 // Email sending
@@ -57,6 +66,7 @@ export async function sendQuoteEmail(
 
 export interface CreateQuoteItemInput {
   estimateItemId: string | null;
+  displayKey?: string | null;
   itemLabel: string;
   canonicalCode?: string | null;
   quantity: number;
@@ -76,7 +86,18 @@ export interface CreateQuoteInput {
   total: number;
   currency?: string;
   notes?: string | null;
+  displayConfigJson?: string | null;
   items: CreateQuoteItemInput[];
+}
+
+export interface UpdateQuoteInput {
+  status?: QuoteStatus;
+  notes?: string | null;
+  markupMultiplier?: number;
+  subtotal?: number;
+  total?: number;
+  displayConfigJson?: string | null;
+  items?: CreateQuoteItemInput[];
 }
 
 // ---------------------------------------------------------------------------
@@ -88,9 +109,7 @@ export interface CreateQuoteInput {
  * If item insertion fails the quote row is rolled back.
  */
 export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
-  const { data: quoteRow, error: quoteError } = await supabase
-    .from('quotes')
-    .insert({
+  const quoteInsert: Record<string, unknown> = {
       estimate_id: input.estimateId,
       company_id: input.companyId ?? null,
       created_by_user_id: input.createdByUserId,
@@ -102,19 +121,36 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
       notes: input.notes ?? null,
       status: 'draft',
       priced_as_of: new Date().toISOString(),
-    })
+  };
+
+  if (supportsQuoteDisplayConfig) {
+    quoteInsert.display_config_json = input.displayConfigJson ?? null;
+  }
+
+  let { data: quoteRow, error: quoteError } = await supabase
+    .from('quotes')
+    .insert(quoteInsert)
     .select()
     .single();
+
+  if (quoteError && isMissingColumnError(quoteError, 'display_config_json')) {
+    supportsQuoteDisplayConfig = false;
+    delete quoteInsert.display_config_json;
+    const retry = await supabase.from('quotes').insert(quoteInsert).select().single();
+    quoteRow = retry.data;
+    quoteError = retry.error;
+  }
 
   if (quoteError || !quoteRow) {
     throw new Error(`Failed to create quote: ${quoteError?.message}`);
   }
 
   if (input.items.length > 0) {
-    const { error: itemsError } = await supabase.from('quote_items').insert(
+    const buildQuoteItemRows = (includeDisplayKey: boolean) =>
       input.items.map((item, idx) => ({
         quote_id: quoteRow.id,
         estimate_item_id: item.estimateItemId ?? null,
+        ...(includeDisplayKey ? { display_key: item.displayKey ?? null } : {}),
         item_label: item.itemLabel,
         canonical_code: item.canonicalCode ?? null,
         quantity: item.quantity,
@@ -122,8 +158,17 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
         unit_price: item.unitPrice,
         line_total: item.lineTotal,
         sort_order: item.sortOrder ?? idx,
-      }))
-    );
+      }));
+
+    let { error: itemsError } = await supabase
+      .from('quote_items')
+      .insert(buildQuoteItemRows(supportsQuoteItemDisplayKey));
+
+    if (itemsError && isMissingColumnError(itemsError, 'display_key')) {
+      supportsQuoteItemDisplayKey = false;
+      const retry = await supabase.from('quote_items').insert(buildQuoteItemRows(false));
+      itemsError = retry.error;
+    }
 
     if (itemsError) {
       // Attempt rollback
@@ -162,7 +207,7 @@ export async function getQuote(id: string): Promise<Quote | null> {
  */
 export async function getQuoteWithItems(id: string): Promise<{
   quote: Quote;
-  items: (QuoteItem & { fields: ItemField[]; parentItemId: string | null; subcategory: string | null })[];
+  items: (QuoteItem & { fields: ItemField[]; parentItemId: string | null; subcategory: HardwareSubcategory | null })[];
 } | null> {
   const { data: quoteRow, error: quoteError } = await supabase
     .from('quotes')
@@ -192,7 +237,7 @@ export async function getQuoteWithItems(id: string): Promise<{
     .filter(Boolean) as string[];
 
   let fieldsByEstimateItemId: Record<string, ItemField[]> = {};
-  let estimateItemMetaById: Record<string, { parentItemId: string | null; subcategory: string | null }> = {};
+  let estimateItemMetaById: Record<string, { parentItemId: string | null; subcategory: HardwareSubcategory | null }> = {};
 
   if (estimateItemIds.length > 0) {
     const [fieldRes, metaRes] = await Promise.all([
@@ -220,7 +265,7 @@ export async function getQuoteWithItems(id: string): Promise<{
     for (const r of metaRes.data ?? []) {
       estimateItemMetaById[r.id] = {
         parentItemId: r.parent_item_id ?? null,
-        subcategory: r.subcategory ?? null,
+        subcategory: (r.subcategory as HardwareSubcategory | null) ?? null,
       };
     }
   }
@@ -314,24 +359,108 @@ export async function updateQuoteStatus(
 /** Update editable quote fields (notes, status, totals). */
 export async function updateQuote(
   id: string,
-  updates: Partial<Pick<Quote, 'status' | 'notes' | 'subtotal' | 'total'>>
+  updates: UpdateQuoteInput
 ): Promise<Quote> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const row: Record<string, any> = {};
   if (updates.status !== undefined) row.status = updates.status;
   if (updates.notes !== undefined) row.notes = updates.notes;
+  if (updates.markupMultiplier !== undefined) row.markup_multiplier = updates.markupMultiplier;
   if (updates.subtotal !== undefined) row.subtotal = updates.subtotal;
   if (updates.total !== undefined) row.total = updates.total;
+  if (updates.displayConfigJson !== undefined && supportsQuoteDisplayConfig) {
+    row.display_config_json = updates.displayConfigJson;
+  }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('quotes')
     .update(row)
     .eq('id', id)
     .select()
     .single();
 
+  if (error && isMissingColumnError(error, 'display_config_json')) {
+    supportsQuoteDisplayConfig = false;
+    delete row.display_config_json;
+    const retry = await supabase.from('quotes').update(row).eq('id', id).select().single();
+    data = retry.data;
+    error = retry.error;
+  }
+
   if (error) throw new Error(`Failed to update quote: ${error.message}`);
   return mapQuoteRow(data);
+}
+
+/** Update a quote and replace its line items with the current builder output. */
+export async function updateQuoteWithItems(
+  id: string,
+  updates: UpdateQuoteInput & { items: CreateQuoteItemInput[] }
+): Promise<Quote> {
+  const { data: existingRows, error: existingError } = await supabase
+    .from('quote_items')
+    .select('id')
+    .eq('quote_id', id);
+
+  if (existingError) {
+    throw new Error(`Failed to fetch existing quote items: ${existingError.message}`);
+  }
+
+  const updatedQuote = await updateQuote(id, updates);
+  const existingItemIds = (existingRows ?? []).map((row) => row.id as string);
+  let insertedItemIds: string[] = [];
+
+  if (updates.items.length > 0) {
+    const buildQuoteItemRows = (includeDisplayKey: boolean) =>
+      updates.items.map((item, idx) => ({
+        quote_id: id,
+        estimate_item_id: item.estimateItemId ?? null,
+        ...(includeDisplayKey ? { display_key: item.displayKey ?? null } : {}),
+        item_label: item.itemLabel,
+        canonical_code: item.canonicalCode ?? null,
+        quantity: item.quantity,
+        unit_cost: item.unitCost,
+        unit_price: item.unitPrice,
+        line_total: item.lineTotal,
+        sort_order: item.sortOrder ?? idx,
+      }));
+
+    let { data: insertedRows, error: itemsError } = await supabase
+      .from('quote_items')
+      .insert(buildQuoteItemRows(supportsQuoteItemDisplayKey))
+      .select('id');
+
+    if (itemsError && isMissingColumnError(itemsError, 'display_key')) {
+      supportsQuoteItemDisplayKey = false;
+      const retry = await supabase
+        .from('quote_items')
+        .insert(buildQuoteItemRows(false))
+        .select('id');
+      insertedRows = retry.data;
+      itemsError = retry.error;
+    }
+
+    if (itemsError) {
+      throw new Error(`Failed to update quote items: ${itemsError.message}`);
+    }
+
+    insertedItemIds = (insertedRows ?? []).map((row) => row.id as string);
+  }
+
+  if (existingItemIds.length > 0) {
+    const { error: deleteError } = await supabase
+      .from('quote_items')
+      .delete()
+      .in('id', existingItemIds);
+
+    if (deleteError) {
+      if (insertedItemIds.length > 0) {
+        await supabase.from('quote_items').delete().in('id', insertedItemIds);
+      }
+      throw new Error(`Failed to remove old quote items: ${deleteError.message}`);
+    }
+  }
+
+  return updatedQuote;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +494,7 @@ function mapQuoteRow(row: any): Quote {
     pricedAsOf: row.priced_as_of ?? null,
     sentAt: row.sent_at ?? null,
     sentToEmail: row.sent_to_email ?? null,
+    displayConfigJson: row.display_config_json ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -376,6 +506,7 @@ function mapQuoteItemRow(row: any): QuoteItem {
     id: row.id,
     quoteId: row.quote_id,
     estimateItemId: row.estimate_item_id,
+    displayKey: row.display_key ?? null,
     itemLabel: row.item_label,
     canonicalCode: row.canonical_code,
     quantity: row.quantity,

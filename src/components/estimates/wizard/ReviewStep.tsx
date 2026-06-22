@@ -93,6 +93,7 @@ interface ReviewStepProps {
   onBack: () => void;
   onFinish: () => void | Promise<void>;
   finishLoading?: boolean;
+  finishLabel?: string;
   /**
    * Called when the user clicks "Edit configuration" for an opening, or a
    * completeness "Fix" button. `target` deep-links the builder to the step that
@@ -462,9 +463,9 @@ function EngineOpeningCard({
             <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform shrink-0', !expanded && '-rotate-90')} />
             <div className="flex-1 min-w-0">
               <span className="font-semibold text-sm">{opening.name}</span>
-              {completeness.exceptionCount > 0 && (
+              {quote.exceptionCount > 0 && (
                 <Badge variant="destructive" className="ml-2 text-[10px] py-0 px-1">
-                  {completeness.exceptionCount} exception{completeness.exceptionCount !== 1 ? 's' : ''}
+                  {quote.exceptionCount} exception{quote.exceptionCount !== 1 ? 's' : ''}
                 </Badge>
               )}
               {hasOverrides && (
@@ -566,7 +567,14 @@ function EngineOpeningCard({
 // ReviewStep
 // ---------------------------------------------------------------------------
 
-export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false, onEditOpening }: ReviewStepProps) {
+export function ReviewStep({
+  estimateId,
+  onBack,
+  onFinish,
+  finishLoading = false,
+  finishLabel = 'Save & Finish',
+  onEditOpening,
+}: ReviewStepProps) {
   const [openings, setOpenings] = useState<EstimateOpeningWithItems[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1020,7 +1028,7 @@ export function ReviewStep({ estimateId, onBack, onFinish, finishLoading = false
           title={hasBlockingViolations ? 'Resolve configuration errors / pricing exceptions before saving' : undefined}
         >
           {finishLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          Save & Finish
+          {finishLabel}
         </Button>
       </div>
     </div>

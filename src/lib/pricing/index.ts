@@ -8,6 +8,7 @@
 export * from './spec';
 export * from './engine-types';
 export {
+  applyManualSellPriceOverrides,
   priceOpening,
   priceOpeningCore,
   persistEngineResult,

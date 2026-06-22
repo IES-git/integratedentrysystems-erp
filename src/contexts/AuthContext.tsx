@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { User } from '@/types';
-import { supabase } from '@/lib/supabase';
+import { createSupabaseAccessTokenClient, supabase, supabaseAuthStorageKey } from '@/lib/supabase';
 import { initializeDemoData } from '@/lib/storage';
 
 interface AuthContextType {
@@ -14,39 +14,110 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const AUTH_BOOT_TIMEOUT_MS = 6000;
+const PROFILE_FETCH_TIMEOUT_MS = 8000;
+const SESSION_EXPIRY_GRACE_MS = 30_000;
+
+type StoredSupabaseSession = {
+  access_token?: string;
+  expires_at?: number;
+  user?: {
+    id?: string;
+  };
+};
+
+function readStoredSupabaseSession(): StoredSupabaseSession | null {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const rawSession = window.localStorage.getItem(supabaseAuthStorageKey);
+    if (!rawSession) return null;
+
+    const session = JSON.parse(rawSession) as StoredSupabaseSession;
+    if (!session.access_token || !session.user?.id) return null;
+
+    if (session.expires_at && session.expires_at * 1000 <= Date.now() + SESSION_EXPIRY_GRACE_MS) {
+      return null;
+    }
+
+    return session;
+  } catch (error) {
+    console.warn('Unable to read stored Supabase session.', error);
+    return null;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error(`${label} timed out`));
+    }, timeoutMs);
+
+    promise
+      .then((value) => resolve(value))
+      .catch((error) => reject(error))
+      .finally(() => window.clearTimeout(timeoutId));
+  });
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    let isMounted = true;
     initializeDemoData();
 
-    // Fast, reliable initial session check (reads from localStorage synchronously).
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        fetchUserProfile(session.user.id);
-      } else {
+    const finishLoading = () => {
+      if (isMounted) {
         setIsLoading(false);
       }
-    });
+    };
 
-    // Listen for auth state changes (logout, session expiry, token refresh).
-    // SIGNED_IN is intentionally NOT handled here — fetchUserProfile() makes
-    // a Supabase data request and calling it inside onAuthStateChange causes a
-    // deadlock in the Supabase auth library (the auth lock is held during the
-    // event callback). login() calls fetchUserProfile() directly instead, after
-    // signInWithPassword() fully completes and releases the lock.
+    const bootstrapAuth = async () => {
+      const storedSession = readStoredSupabaseSession();
+      if (storedSession?.user?.id && storedSession.access_token) {
+        await fetchUserProfile(storedSession.user.id, 0, storedSession.access_token);
+        return;
+      }
+
+      try {
+        const {
+          data: { session },
+        } = await withTimeout(supabase.auth.getSession(), AUTH_BOOT_TIMEOUT_MS, 'Initial auth session check');
+
+        if (!isMounted) return;
+
+        if (session?.user) {
+          await fetchUserProfile(session.user.id, 0, session.access_token);
+        } else {
+          setUser(null);
+          finishLoading();
+        }
+      } catch (error) {
+        console.warn('Initial auth check failed; showing login instead of blocking on loading.', error);
+        if (isMounted) {
+          setUser(null);
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void bootstrapAuth();
+
+    // Keep this listener synchronous. Supabase invokes auth-state callbacks
+    // while its auth lock can be held, so profile/data reads are deferred.
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log('Auth state changed:', event, !!session);
-
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_OUT') {
         setUser(null);
         setIsLoading(false);
       } else if (event === 'TOKEN_REFRESHED') {
         if (session?.user) {
-          await fetchUserProfile(session.user.id);
+          window.setTimeout(() => {
+            void fetchUserProfile(session.user.id, 0, session.access_token);
+          }, 0);
         } else {
           setUser(null);
           setIsLoading(false);
@@ -54,26 +125,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
-  const fetchUserProfile = async (userId: string, retryCount = 0): Promise<boolean> => {
+  const fetchUserProfile = async (
+    userId: string,
+    retryCount = 0,
+    accessToken?: string,
+  ): Promise<boolean> => {
     try {
-      console.log(`Fetching profile for user ${userId} (attempt ${retryCount + 1})`);
-      const result = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', userId)
-        .single();
-
-      console.log('Profile query result:', { data: !!result.data, error: result.error });
+      const profileClient = accessToken ? createSupabaseAccessTokenClient(accessToken) : supabase;
+      const result = await withTimeout(
+        profileClient
+          .from('users')
+          .select('*')
+          .eq('id', userId)
+          .single(),
+        PROFILE_FETCH_TIMEOUT_MS,
+        'User profile fetch',
+      );
 
       if (result.error) {
         console.error('Profile fetch error:', result.error);
         if (result.error.code === 'PGRST116' && retryCount < 5) {
-          console.log(`Profile not found yet, retrying in ${(retryCount + 1) * 300}ms...`);
           await new Promise(resolve => setTimeout(resolve, (retryCount + 1) * 300));
-          return await fetchUserProfile(userId, retryCount + 1);
+          return await fetchUserProfile(userId, retryCount + 1, accessToken);
         }
         throw result.error;
       }
@@ -87,7 +166,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return false;
         }
 
-        console.log('Profile loaded successfully:', result.data.email);
         const userProfile: User = {
           id: result.data.id,
           name: `${result.data.first_name} ${result.data.last_name}`,
@@ -100,7 +178,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           createdAt: result.data.created_at,
         };
 
-        console.log('Setting user profile');
         setUser(userProfile);
         return true;
       } else {
@@ -113,14 +190,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       return false;
     } finally {
-      console.log('Setting isLoading to false');
       setIsLoading(false);
     }
   };
 
   const login = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
     try {
-      console.log('Logging in...');
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -132,13 +207,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (data.user) {
-        console.log('Auth successful, fetching profile...');
-        // Fetch profile directly here (after signInWithPassword fully completes)
-        // rather than from onAuthStateChange to avoid a deadlock in the Supabase
-        // auth library (the auth lock is held while dispatching events).
-        const success = await fetchUserProfile(data.user.id);
+        // Use the returned access token for the profile read so the query does
+        // not need to reacquire Supabase Auth's cross-tab lock during login.
+        const success = await fetchUserProfile(data.user.id, 0, data.session?.access_token);
         if (success) {
-          console.log('Login successful, user profile loaded');
           return { success: true };
         } else {
           // fetchUserProfile already signed out if the account is inactive

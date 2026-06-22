@@ -1,5 +1,11 @@
 import { Document, Page, Text, View, StyleSheet, Font, Image } from '@react-pdf/renderer';
-import type { Quote, QuoteItem, Company, Contact } from '@/types';
+import {
+  buildCustomerDisplayRows,
+  createDefaultAudienceDisplayConfig,
+  getEnabledBlocks,
+  hasHiddenDisplayLines,
+} from '@/lib/quote-display';
+import type { Quote, QuoteItem, Company, Contact, QuoteAudienceDisplayConfig } from '@/types';
 import iesLogo from '@/assets/ies-logo.png';
 
 Font.register({
@@ -250,6 +256,31 @@ const styles = StyleSheet.create({
     color: '#1e3a5f',
     lineHeight: 1.6,
   },
+  scopeSection: {
+    marginBottom: 18,
+    padding: 12,
+    backgroundColor: '#f9fafb',
+    borderRadius: 3,
+    borderLeft: '3pt solid #374151',
+  },
+  scopeLabel: {
+    fontSize: 7.5,
+    fontFamily: 'Helvetica-Bold',
+    color: '#374151',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  scopeText: {
+    fontSize: 8.5,
+    color: '#374151',
+    lineHeight: 1.45,
+  },
+  tableNotice: {
+    marginTop: 6,
+    fontSize: 7.5,
+    color: '#6b7280',
+  },
 });
 
 const fmt = (amount: number, currency = 'USD') =>
@@ -261,6 +292,7 @@ interface CustomerQuotePdfProps {
   company: Company | null;
   primaryContact?: Contact | null;
   aiSummary?: string | null;
+  displayConfig?: QuoteAudienceDisplayConfig | null;
 }
 
 export function CustomerQuotePdf({
@@ -269,7 +301,12 @@ export function CustomerQuotePdf({
   company,
   primaryContact,
   aiSummary,
+  displayConfig,
 }: CustomerQuotePdfProps) {
+  const config = displayConfig ?? createDefaultAudienceDisplayConfig('customer');
+  const enabledBlocks = getEnabledBlocks(config);
+  const displayRows = buildCustomerDisplayRows(items, config);
+  const hiddenLines = hasHiddenDisplayLines(items, config);
   const quoteNumber = `Q-${quote.id.slice(-8).toUpperCase()}`;
   const quoteDate = new Date(quote.createdAt).toLocaleDateString('en-US', {
     year: 'numeric',
@@ -290,6 +327,8 @@ export function CustomerQuotePdf({
   const contactEmail = primaryContact?.email ?? null;
 
   const paymentTerms = company?.settings?.paymentTerms ?? 'Net 30';
+  const overviewText = config.summaryText.trim() || aiSummary || '';
+  const termsText = config.termsText.trim() || paymentTerms;
 
   return (
     <Document
@@ -310,100 +349,170 @@ export function CustomerQuotePdf({
           </View>
         </View>
 
-        {/* ── Bill To ── */}
-        <View style={styles.addressSection}>
-          <View style={styles.addressBlock}>
-            <Text style={styles.addressLabel}>Bill To</Text>
-            {company && <Text style={styles.addressCompany}>{company.name}</Text>}
-            {contactName && <Text style={styles.addressLine}>{contactName}</Text>}
-            {contactEmail && <Text style={styles.addressLine}>{contactEmail}</Text>}
-            {billingLines.map((line, i) => (
-              <Text key={i} style={styles.addressLine}>{line}</Text>
-            ))}
-          </View>
-          <View style={styles.addressBlock}>
-            <Text style={styles.addressLabel}>From</Text>
-            <Text style={styles.addressCompany}>Integrated Entry Systems</Text>
-            <Text style={styles.addressLine}>Commercial Door &amp; Hardware</Text>
-            <Text style={styles.addressLine}>solutions@ies-access.com</Text>
-          </View>
-        </View>
-
-        {/* ── AI Summary ── */}
-        {aiSummary && (
-          <View style={styles.summarySection}>
-            <Text style={styles.summaryLabel}>Quote Overview</Text>
-            <Text style={styles.summaryText}>{aiSummary}</Text>
-          </View>
-        )}
-
-        {/* ── Line Items Table ── */}
-        <View style={styles.table}>
-          <View style={styles.tableHeader}>
-            <View style={[styles.colDescription]}>
-              <Text style={styles.tableHeaderCell}>Description</Text>
-            </View>
-            <View style={[styles.colQty]}>
-              <Text style={[styles.tableHeaderCell, { textAlign: 'center' }]}>Qty</Text>
-            </View>
-            <View style={[styles.colUnitPrice]}>
-              <Text style={[styles.tableHeaderCell, { textAlign: 'right' }]}>Unit Price</Text>
-            </View>
-            <View style={[styles.colTotal]}>
-              <Text style={[styles.tableHeaderCell, { textAlign: 'right' }]}>Total</Text>
-            </View>
-          </View>
-          {items.map((item, idx) => (
-            <View key={item.id} style={idx % 2 === 0 ? styles.tableRow : styles.tableRowAlt}>
-              <View style={styles.colDescription}>
-                <Text style={styles.cellTextBold}>{item.itemLabel}</Text>
+        {enabledBlocks.map((block) => {
+          if (block.id === 'project') {
+            return (
+              <View key={block.id} style={styles.addressSection}>
+                <View style={styles.addressBlock}>
+                  <Text style={styles.addressLabel}>Bill To</Text>
+                  {company && <Text style={styles.addressCompany}>{company.name}</Text>}
+                  {contactName && <Text style={styles.addressLine}>{contactName}</Text>}
+                  {contactEmail && <Text style={styles.addressLine}>{contactEmail}</Text>}
+                  {billingLines.map((line, i) => (
+                    <Text key={i} style={styles.addressLine}>{line}</Text>
+                  ))}
+                </View>
+                <View style={styles.addressBlock}>
+                  <Text style={styles.addressLabel}>From</Text>
+                  <Text style={styles.addressCompany}>Integrated Entry Systems</Text>
+                  <Text style={styles.addressLine}>Commercial Door &amp; Hardware</Text>
+                  <Text style={styles.addressLine}>solutions@ies-access.com</Text>
+                </View>
               </View>
-              <View style={styles.colQty}>
-                <Text style={[styles.cellText, { textAlign: 'center' }]}>{item.quantity}</Text>
-              </View>
-              <View style={styles.colUnitPrice}>
-                <Text style={[styles.cellText, { textAlign: 'right' }]}>
-                  {fmt(item.unitPrice, quote.currency)}
-                </Text>
-              </View>
-              <View style={styles.colTotal}>
-                <Text style={[styles.cellTextBold, { textAlign: 'right' }]}>
-                  {fmt(item.lineTotal, quote.currency)}
-                </Text>
-              </View>
-            </View>
-          ))}
-        </View>
+            );
+          }
 
-        {/* ── Totals ── */}
-        <View style={styles.totalsSection}>
-          <View style={styles.totalsBox}>
-            <View style={styles.totalRow}>
-              <Text style={styles.totalLabel}>Subtotal</Text>
-              <Text style={styles.totalValue}>{fmt(quote.subtotal, quote.currency)}</Text>
-            </View>
-            <View style={styles.grandTotalRow}>
-              <Text style={styles.grandTotalLabel}>TOTAL</Text>
-              <Text style={styles.grandTotalValue}>{fmt(quote.total, quote.currency)}</Text>
-            </View>
-          </View>
-        </View>
+          if (block.id === 'summary' && overviewText) {
+            return (
+              <View key={block.id} style={styles.summarySection}>
+                <Text style={styles.summaryLabel}>{block.title}</Text>
+                <Text style={styles.summaryText}>{overviewText}</Text>
+              </View>
+            );
+          }
 
-        {/* ── Payment Terms ── */}
-        {paymentTerms && (
-          <View style={styles.paymentTermsSection}>
-            <Text style={styles.paymentTermsLabel}>Payment Terms:</Text>
-            <Text style={styles.paymentTermsValue}>{paymentTerms}</Text>
-          </View>
-        )}
+          if (block.id === 'scope' && config.scopeText.trim()) {
+            return (
+              <View key={block.id} style={styles.scopeSection}>
+                <Text style={styles.scopeLabel}>{block.title}</Text>
+                <Text style={styles.scopeText}>{config.scopeText}</Text>
+              </View>
+            );
+          }
 
-        {/* ── Notes ── */}
-        {quote.notes && (
-          <View style={styles.notesSection}>
-            <Text style={styles.notesLabel}>Notes</Text>
-            <Text style={styles.notesText}>{quote.notes}</Text>
-          </View>
-        )}
+          if (block.id === 'lineItems') {
+            const isSummary = block.detailLevel === 'summary';
+            const isDetailed = block.detailLevel === 'detailed';
+            const showProductCodes = isDetailed || (!isSummary && config.showProductCodes);
+            const showUnitPrices = isDetailed || (!isSummary && config.showUnitPrices);
+            const showQuantities = !isSummary && config.showQuantities;
+            const showLineTotals = config.showLineTotals;
+
+            return (
+              <View key={block.id} style={styles.table}>
+                <View style={styles.tableHeader}>
+                  <View style={[styles.colDescription]}>
+                    <Text style={styles.tableHeaderCell}>Description</Text>
+                  </View>
+                  {showQuantities && (
+                    <View style={[styles.colQty]}>
+                      <Text style={[styles.tableHeaderCell, { textAlign: 'center' }]}>
+                        {isSummary ? 'Items' : 'Qty'}
+                      </Text>
+                    </View>
+                  )}
+                  {showUnitPrices && (
+                    <View style={[styles.colUnitPrice]}>
+                      <Text style={[styles.tableHeaderCell, { textAlign: 'right' }]}>Unit Price</Text>
+                    </View>
+                  )}
+                  {showLineTotals && (
+                    <View style={[styles.colTotal]}>
+                      <Text style={[styles.tableHeaderCell, { textAlign: 'right' }]}>Total</Text>
+                    </View>
+                  )}
+                </View>
+                {displayRows.map((item, idx) => (
+                  <View key={item.id} style={idx % 2 === 0 ? styles.tableRow : styles.tableRowAlt}>
+                    <View style={styles.colDescription}>
+                      <Text style={styles.cellTextBold}>{item.label}</Text>
+                      {showProductCodes && item.canonicalCode && (
+                        <Text style={styles.cellText}>Item Code: {item.canonicalCode}</Text>
+                      )}
+                      {isDetailed && item.sourceItemCount > 1 && (
+                        <Text style={styles.cellText}>
+                          Includes {item.sourceItemCount} priced source line items.
+                        </Text>
+                      )}
+                    </View>
+                    {showQuantities && (
+                      <View style={styles.colQty}>
+                        <Text style={[styles.cellText, { textAlign: 'center' }]}>
+                          {item.sourceItemCount > 1 ? item.sourceItemCount : item.quantity}
+                        </Text>
+                      </View>
+                    )}
+                    {showUnitPrices && (
+                      <View style={styles.colUnitPrice}>
+                        <Text style={[styles.cellText, { textAlign: 'right' }]}>
+                          {fmt(item.unitPrice, quote.currency)}
+                        </Text>
+                      </View>
+                    )}
+                    {showLineTotals && (
+                      <View style={styles.colTotal}>
+                        <Text style={[styles.cellTextBold, { textAlign: 'right' }]}>
+                          {fmt(item.lineTotal, quote.currency)}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                ))}
+                {hiddenLines && (
+                  <Text style={styles.tableNotice}>
+                    Total reflects the complete quoted scope, including items not itemized above.
+                  </Text>
+                )}
+              </View>
+            );
+          }
+
+          if (block.id === 'totals') {
+            return (
+              <View key={block.id} style={styles.totalsSection}>
+                <View style={styles.totalsBox}>
+                  <View style={styles.totalRow}>
+                    <Text style={styles.totalLabel}>Subtotal</Text>
+                    <Text style={styles.totalValue}>{fmt(quote.subtotal, quote.currency)}</Text>
+                  </View>
+                  <View style={styles.grandTotalRow}>
+                    <Text style={styles.grandTotalLabel}>TOTAL</Text>
+                    <Text style={styles.grandTotalValue}>{fmt(quote.total, quote.currency)}</Text>
+                  </View>
+                </View>
+              </View>
+            );
+          }
+
+          if (block.id === 'terms' && termsText) {
+            return (
+              <View key={block.id} style={styles.paymentTermsSection}>
+                <Text style={styles.paymentTermsLabel}>{block.title}:</Text>
+                <Text style={styles.paymentTermsValue}>{termsText}</Text>
+              </View>
+            );
+          }
+
+          if (block.id === 'notes' && quote.notes) {
+            return (
+              <View key={block.id} style={styles.notesSection}>
+                <Text style={styles.notesLabel}>{block.title}</Text>
+                <Text style={styles.notesText}>{quote.notes}</Text>
+              </View>
+            );
+          }
+
+          if (block.id === 'custom' && config.customText.trim()) {
+            return (
+              <View key={block.id} style={styles.scopeSection}>
+                <Text style={styles.scopeLabel}>{block.title}</Text>
+                <Text style={styles.scopeText}>{config.customText}</Text>
+              </View>
+            );
+          }
+
+          return null;
+        })}
 
         {/* ── Footer ── */}
         <View style={styles.footer} fixed>

@@ -27,6 +27,10 @@ import type {
   HardwareSubcategory,
   OpeningTemplateType,
 } from '@/types';
+import {
+  buildEstimateSpecSummary,
+  type OpeningSnapshotRow,
+} from '@/lib/cpq/estimate-spec-summary';
 
 // ---------------------------------------------------------------------------
 // Upload & Process
@@ -225,10 +229,10 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
       .order('created_at', { ascending: false }),
     supabase
       .from('estimate_items')
-      .select('id, estimate_id, canonical_code, item_label'),
+      .select('id, estimate_id, canonical_code, item_label, item_type, subcategory'),
     supabase
       .from('estimate_openings')
-      .select('id, estimate_id'),
+      .select('id, estimate_id, sort_order, spec_snapshot'),
   ]);
 
   if (estimatesRes.error)
@@ -254,7 +258,10 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
   }
 
   // Group items by estimate_id for O(1) lookup
-  const itemsByEstimate = new Map<string, { id: string; canonicalCode: string; itemLabel: string }[]>();
+  const itemsByEstimate = new Map<
+    string,
+    EstimateWithItems['items']
+  >();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const item of (itemsRes.data || []) as any[]) {
     const list = itemsByEstimate.get(item.estimate_id) ?? [];
@@ -262,18 +269,30 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
       id: item.id,
       canonicalCode: item.canonical_code ?? '',
       itemLabel: item.item_label ?? '',
+      itemType: item.item_type ?? null,
+      subcategory: item.subcategory ?? null,
     });
     itemsByEstimate.set(item.estimate_id, list);
   }
 
-  // Count openings per estimate
+  // Count openings per estimate and collect their spec snapshots (for the
+  // spec-driven quick-reference summary shown in the list).
   const openingsCountByEstimate = new Map<string, number>();
+  const snapshotsByEstimate = new Map<string, OpeningSnapshotRow[]>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const opening of (openingsRes.data || []) as any[]) {
     openingsCountByEstimate.set(
       opening.estimate_id,
       (openingsCountByEstimate.get(opening.estimate_id) ?? 0) + 1
     );
+    if (opening.spec_snapshot) {
+      const list = snapshotsByEstimate.get(opening.estimate_id) ?? [];
+      list.push({
+        sortOrder: (opening.sort_order as number) ?? 0,
+        snapshot: opening.spec_snapshot,
+      });
+      snapshotsByEstimate.set(opening.estimate_id, list);
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -282,6 +301,7 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
     items: itemsByEstimate.get(row.id) ?? [],
     createdByUserName: userNameMap.get(row.uploaded_by_user_id) ?? null,
     openingsCount: openingsCountByEstimate.get(row.id) ?? 0,
+    specSummary: buildEstimateSpecSummary(snapshotsByEstimate.get(row.id) ?? []),
   }));
 }
 

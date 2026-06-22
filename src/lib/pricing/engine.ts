@@ -39,6 +39,7 @@ import type {
   EngineResult,
   LoadedPriceRule,
 } from './engine-types';
+import { engineLineOverrideKey } from './engine-types';
 import { evaluateConditions } from './conditions';
 import { resolveAction, type ActionContext } from './actions';
 import { loadHardwareCatalog, loadRuleSet, loadNgpScopedRuleSet, loadVariantsWithPrices, type HardwareCatalog, type LoadedRuleSet } from './loader';
@@ -59,6 +60,87 @@ const EXCEPTION_STATUSES: EstimateLinePriceStatus[] = ['INVALID', 'CONTACT_FACTO
 
 function isException(status: EstimateLinePriceStatus): boolean {
   return EXCEPTION_STATUSES.includes(status);
+}
+
+function manualOverrideValue(
+  line: EngineLine,
+  overrides?: Record<string, number | null | undefined>,
+): number | null {
+  if (!overrides) return null;
+  const raw = overrides[engineLineOverrideKey(line)];
+  if (raw === null || raw === undefined) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
+}
+
+function recalcTotals(lines: EngineLine[], manualQuoteCount: number): EngineResult['totals'] {
+  return {
+    listTotal: lines.reduce((s, l) => s + (l.extendedListPrice ?? 0), 0),
+    netTotal: lines.reduce((s, l) => s + (l.extendedNetPrice ?? 0), 0),
+    sellTotal: lines.reduce((s, l) => s + (l.sellPrice ?? 0), 0),
+    exceptionCount: lines.filter((l) => isException(l.priceStatus)).length,
+    manualQuoteCount,
+  };
+}
+
+function manualQuoteResolvedByLine(quote: EngineManualQuote, line: EngineLine): boolean {
+  if (!line.isManualOverride) return false;
+  if (quote.priceRuleId) return line.priceRuleId === quote.priceRuleId && line.componentId === quote.componentId;
+  if (quote.componentId) return line.componentId === quote.componentId;
+
+  const normalize = (s: string | null | undefined) =>
+    (s ?? '').trim().toLowerCase().replace(/[_\W]+/g, ' ').replace(/\s+/g, ' ');
+  const requested = normalize(quote.requestedInputs);
+  if (!requested) return false;
+  const description = normalize(line.description);
+  const exception = normalize(line.exceptionMessage);
+  const category = normalize(line.chargeCategory);
+  return requested.includes(description) ||
+    description.includes(requested) ||
+    exception.includes(requested) ||
+    (!!category && requested.includes(category));
+}
+
+/** Applies user-entered manual sell prices to matching engine lines. */
+export function applyManualSellPriceOverrides(
+  result: EngineResult,
+  overrides?: Record<string, number | null | undefined>,
+): EngineResult {
+  if (!overrides || Object.keys(overrides).length === 0) return result;
+
+  let changed = false;
+  const lines = result.lines.map((line) => {
+    const manualSellPrice = manualOverrideValue(line, overrides);
+    if (manualSellPrice === null) return line;
+
+    changed = true;
+    const grossMargin = line.extendedNetPrice != null ? manualSellPrice - line.extendedNetPrice : null;
+    return {
+      ...line,
+      sellPrice: manualSellPrice,
+      grossMargin,
+      grossMarginPct: grossMargin != null && manualSellPrice > 0 ? (grossMargin / manualSellPrice) * 100 : null,
+      priceStatus: 'PRICED' as EstimateLinePriceStatus,
+      manualSellPrice,
+      isManualOverride: true,
+      calculationExpression: line.calculationExpression
+        ? `${line.calculationExpression}; manual sell ${fmtUsd(manualSellPrice)}`
+        : `Manual sell ${fmtUsd(manualSellPrice)}`,
+    };
+  });
+
+  if (!changed) return result;
+
+  const manualQuotes = result.manualQuotes.filter(
+    (quote) => !lines.some((line) => manualQuoteResolvedByLine(quote, line)),
+  );
+
+  return {
+    ...result,
+    lines,
+    manualQuotes,
+    totals: recalcTotals(lines, manualQuotes.length),
+  };
 }
 
 /** Resolves the numeric quantity-basis value for a rule from the spec. */
@@ -861,13 +943,13 @@ export function priceOpeningCore(
   const sellTotal = lines.reduce((s, l) => s + (l.sellPrice ?? 0), 0);
   const exceptionCount = lines.filter((l) => isException(l.priceStatus)).length;
 
-  return {
+  return applyManualSellPriceOverrides({
     lines,
     manualQuotes,
     dependencyResults,
     warnings,
     totals: { listTotal, netTotal, sellTotal, exceptionCount, manualQuoteCount: manualQuotes.length },
-  };
+  }, options.manualSellPriceByLineKey);
 }
 
 /**
@@ -1029,6 +1111,8 @@ export async function persistEngineResult(
     confidence: l.confidence,
     exception_message: l.exceptionMessage,
     sort_order: l.sortOrder,
+    manual_sell_price: l.manualSellPrice ?? null,
+    is_manual_override: l.isManualOverride === true,
   }));
 
   if (rows.length > 0) {

@@ -145,6 +145,11 @@ function LineRow({ line, showMargin }: { line: QuoteLine; showMargin: boolean })
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="font-medium">{line.description}</span>
           <StatusBadge status={line.priceStatus} />
+          {line.isManualOverride && (
+            <Badge variant="secondary" className="text-[10px] py-0 px-1 text-amber-700 bg-amber-50 border-amber-200">
+              manual price
+            </Badge>
+          )}
           {line.selectedOptionCode && (
             <Badge variant="outline" className="text-[10px] py-0 px-1 font-mono">{line.selectedOptionCode}</Badge>
           )}
@@ -157,8 +162,11 @@ function LineRow({ line, showMargin }: { line: QuoteLine; showMargin: boolean })
             <span className="opacity-60">matched:</span> {formatMatchedConditions(line.matchedConditions)}
           </div>
         )}
-        {line.exceptionMessage && (
+        {line.exceptionMessage && !line.isManualOverride && (
           <div className="text-destructive mt-0.5">{line.exceptionMessage}</div>
+        )}
+        {line.exceptionMessage && line.isManualOverride && (
+          <div className="text-muted-foreground mt-0.5">Resolved manually: {line.exceptionMessage}</div>
         )}
         <div className="flex items-center gap-2 mt-0.5 text-[10px] text-muted-foreground">
           {line.sourcePage && (

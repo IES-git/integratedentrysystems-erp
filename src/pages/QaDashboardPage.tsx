@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, AlertTriangle, Info, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { AlertCircle, AlertTriangle, ArrowLeft, Info, Loader2, RefreshCw, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -45,6 +46,7 @@ function groupByBook(rows: QaSummaryRow[]): BookGroup[] {
 }
 
 export default function QaDashboardPage() {
+  const navigate = useNavigate();
   const [summary, setSummary] = useState<QaSummaryRow[]>([]);
   const [openErrors, setOpenErrors] = useState<QaIssue[]>([]);
   const [loading, setLoading] = useState(true);
@@ -91,12 +93,17 @@ export default function QaDashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-display text-2xl">Price Book QA</h1>
-          <p className="text-sm text-muted-foreground">
-            Ingestion and data-quality findings. Resolve blocking issues before publishing a price book.
-          </p>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <Button variant="ghost" size="icon" onClick={() => navigate('/app/pricing')} className="h-8 w-8 shrink-0">
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <h1 className="font-display text-2xl">Price Book QA</h1>
+            <p className="text-sm text-muted-foreground">
+              Ingestion and data-quality findings. Resolve blocking issues before publishing a price book.
+            </p>
+          </div>
         </div>
         <Button variant="outline" onClick={() => void load()} disabled={loading}>
           <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />

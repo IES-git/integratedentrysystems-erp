@@ -2,11 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   buildAuditableQuote,
   buildAuditableQuoteFromEngine,
+  buildAuditableQuoteFromEstimateLines,
   classifyLayer,
   type QuoteLine,
 } from '@/lib/cpq/auditable-quote';
 import { targetForLine, validateQuoteCompleteness } from '@/lib/cpq/completeness';
 import { priceExampleOpening } from '@/lib/cpq/example-opening';
+import type { EstimateLine } from '@/types';
 
 function line(p: Partial<QuoteLine>): QuoteLine {
   return {
@@ -32,6 +34,43 @@ function line(p: Partial<QuoteLine>): QuoteLine {
     priceBookId: null,
     confidence: null,
     exceptionMessage: null,
+    ...p,
+  };
+}
+
+function estimateLine(p: Partial<EstimateLine>): EstimateLine {
+  return {
+    id: 'line-1',
+    estimateId: 'estimate-1',
+    openingId: 'opening-1',
+    componentId: null,
+    entityType: 'door',
+    lineType: 'WARNING',
+    priceRuleId: null,
+    chargeCategory: 'base',
+    description: 'Door: no base price matched',
+    selectedOptionCode: null,
+    quantity: 1,
+    unitOfMeasure: 'each',
+    unitListPrice: null,
+    extendedListPrice: null,
+    discountMultiplier: null,
+    extendedNetPrice: null,
+    sellPrice: null,
+    grossMargin: null,
+    grossMarginPct: null,
+    priceStatus: 'INVALID',
+    calculationExpression: 'No matching base price rule',
+    matchedConditions: null,
+    includedOrSuppressedBy: null,
+    sourcePage: null,
+    sourceRegionId: null,
+    priceBookId: null,
+    confidence: null,
+    reviewStatus: null,
+    exceptionMessage: 'No base price rule matched.',
+    sortOrder: 0,
+    createdAt: '',
     ...p,
   };
 }
@@ -143,6 +182,17 @@ describe('completeness validation', () => {
       line({ entityType: 'prep', chargeCategory: 'prep', description: 'Door prep CYL (cylindrical_lock)', priceStatus: 'PRICED', sellPrice: 22 }),
     ]);
     const report = validateQuoteCompleteness(quote);
+    expect(report.canFinalize).toBe(true);
+  });
+
+  it('treats persisted manual sell prices as resolved pricing', () => {
+    const quote = buildAuditableQuoteFromEstimateLines([
+      estimateLine({ manualSellPrice: 475, isManualOverride: true }),
+    ]);
+    const report = validateQuoteCompleteness(quote, { skipReconciliation: true });
+
+    expect(quote.sellTotal).toBe(475);
+    expect(quote.exceptionCount).toBe(0);
     expect(report.canFinalize).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft, Boxes, Layers, DollarSign, FileSpreadsheet, ShieldCheck, ClipboardCheck, LucideIcon } from 'lucide-react';
+import { LayoutDashboard, Users, Factory, FileText, FileCheck, Package, FileCode2, Settings, LogOut, Sun, Moon, Monitor, PanelLeftClose, PanelLeft, Boxes, Layers, DollarSign, ShieldCheck, LucideIcon, CircleHelp } from 'lucide-react';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from '@/components/ui/sidebar';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -38,15 +38,21 @@ const navigation = [
     href: '/app/quotes',
     icon: FileCheck
   },
-  {
-    title: 'Orders',
-    href: '/app/orders',
-    icon: Package
-  },
+  // Temporarily hidden from the menu (pages still exist):
+  // {
+  //   title: 'Orders',
+  //   href: '/app/orders',
+  //   icon: Package
+  // },
   {
     title: 'Templates',
     href: '/app/templates',
     icon: FileCode2
+  },
+  {
+    title: 'Help Guide',
+    href: '/app/help',
+    icon: CircleHelp
   }
 ];
 
@@ -61,36 +67,27 @@ const adminNavigation: { title: string; href: string; icon: LucideIcon }[] = [
     href: '/app/pricing',
     icon: DollarSign
   },
-  {
-    title: 'Price Book Ingestion',
-    href: '/app/pricing/ingest',
-    icon: FileSpreadsheet
-  },
-  {
-    title: 'Price Book QA',
-    href: '/app/pricing/qa',
-    icon: ClipboardCheck
-  },
-  {
-    title: 'Items',
-    href: '/app/items',
-    icon: Boxes
-  },
-  {
-    title: 'Item Fields',
-    href: '/app/item-management',
-    icon: Layers
-  },
-  {
-    title: 'Compatibility Rules',
-    href: '/app/admin/compatibility-rules',
-    icon: ShieldCheck
-  },
-  {
-    title: 'Integrations',
-    href: '/app/admin/settings/integrations',
-    icon: Settings
-  }
+  // Temporarily hidden from the menu (pages still exist):
+  // {
+  //   title: 'Items',
+  //   href: '/app/items',
+  //   icon: Boxes
+  // },
+  // {
+  //   title: 'Item Fields',
+  //   href: '/app/item-management',
+  //   icon: Layers
+  // },
+  // {
+  //   title: 'Compatibility Rules',
+  //   href: '/app/admin/compatibility-rules',
+  //   icon: ShieldCheck
+  // },
+  // {
+  //   title: 'Integrations',
+  //   href: '/app/admin/settings/integrations',
+  //   icon: Settings
+  // }
 ];
 
 export function AppSidebar() {

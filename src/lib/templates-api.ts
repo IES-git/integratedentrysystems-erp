@@ -5,6 +5,14 @@
 import { supabase } from './supabase';
 import type { Template, TemplateField, TemplateAudience, FieldVisibility } from '@/types';
 
+let supportsTemplateDisplayConfig = true;
+
+function isMissingColumnError(error: unknown, columnName: string): boolean {
+  const maybeError = error as { code?: string; message?: string; details?: string };
+  const text = `${maybeError?.message ?? ''} ${maybeError?.details ?? ''}`.toLowerCase();
+  return maybeError?.code === 'PGRST204' && text.includes(columnName.toLowerCase());
+}
+
 // ---------------------------------------------------------------------------
 // Input types
 // ---------------------------------------------------------------------------
@@ -14,6 +22,7 @@ export interface CreateTemplateInput {
   audience: TemplateAudience;
   description?: string;
   matchingRulesJson?: string | null;
+  displayConfigJson?: string | null;
   createdByUserId: string;
 }
 
@@ -22,6 +31,7 @@ export interface UpdateTemplateInput {
   audience?: TemplateAudience;
   description?: string;
   matchingRulesJson?: string | null;
+  displayConfigJson?: string | null;
 }
 
 export interface CreateTemplateFieldInput {
@@ -96,17 +106,31 @@ export async function getTemplateWithFields(id: string): Promise<{
 
 /** Create a new template. */
 export async function createTemplate(input: CreateTemplateInput): Promise<Template> {
-  const { data, error } = await supabase
+  const row: Record<string, unknown> = {
+    name: input.name,
+    audience: input.audience,
+    description: input.description ?? '',
+    matching_rules_json: input.matchingRulesJson ?? null,
+    created_by_user_id: input.createdByUserId,
+  };
+
+  if (supportsTemplateDisplayConfig) {
+    row.display_config_json = input.displayConfigJson ?? null;
+  }
+
+  let { data, error } = await supabase
     .from('templates')
-    .insert({
-      name: input.name,
-      audience: input.audience,
-      description: input.description ?? '',
-      matching_rules_json: input.matchingRulesJson ?? null,
-      created_by_user_id: input.createdByUserId,
-    })
+    .insert(row)
     .select()
     .single();
+
+  if (error && isMissingColumnError(error, 'display_config_json')) {
+    supportsTemplateDisplayConfig = false;
+    delete row.display_config_json;
+    const retry = await supabase.from('templates').insert(row).select().single();
+    data = retry.data;
+    error = retry.error;
+  }
 
   if (error) throw new Error(`Failed to create template: ${error.message}`);
   return mapTemplateRow(data);
@@ -123,13 +147,24 @@ export async function updateTemplate(
   if (updates.audience !== undefined) row.audience = updates.audience;
   if (updates.description !== undefined) row.description = updates.description;
   if (updates.matchingRulesJson !== undefined) row.matching_rules_json = updates.matchingRulesJson;
+  if (updates.displayConfigJson !== undefined && supportsTemplateDisplayConfig) {
+    row.display_config_json = updates.displayConfigJson;
+  }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('templates')
     .update(row)
     .eq('id', id)
     .select()
     .single();
+
+  if (error && isMissingColumnError(error, 'display_config_json')) {
+    supportsTemplateDisplayConfig = false;
+    delete row.display_config_json;
+    const retry = await supabase.from('templates').update(row).eq('id', id).select().single();
+    data = retry.data;
+    error = retry.error;
+  }
 
   if (error) throw new Error(`Failed to update template: ${error.message}`);
   return mapTemplateRow(data);
@@ -197,6 +232,7 @@ function mapTemplateRow(row: any): Template {
     audience: row.audience as TemplateAudience,
     description: row.description ?? '',
     matchingRulesJson: row.matching_rules_json,
+    displayConfigJson: row.display_config_json ?? null,
     createdByUserId: row.created_by_user_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

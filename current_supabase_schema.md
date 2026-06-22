@@ -567,6 +567,7 @@ Quote records generated from estimates, supporting customer-facing and manufactu
 - `priced_as_of` (TIMESTAMPTZ, nullable) - Pins the catalog snapshot this quote was priced against, for reproducibility/audit (CPQ Phase 0). NULL for quotes created before this column existed.
 - `sent_at` (TIMESTAMPTZ, nullable) - Timestamp of the first successful email delivery. NULL means never sent.
 - `sent_to_email` (TEXT, nullable) - Primary recipient email address the quote was last sent to.
+- `display_config_json` (TEXT, nullable) - Per-quote presentation configuration copied from the selected template; controls PDF blocks, visibility, labels, grouping, and detail level without changing pricing.
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
 
@@ -623,6 +624,7 @@ Line items belonging to a quote, storing both original cost and marked-up price 
 - `id` (UUID, PRIMARY KEY) - Default gen_random_uuid()
 - `quote_id` (UUID, NOT NULL) - FK to quotes.id, CASCADE on delete
 - `estimate_item_id` (UUID, nullable) - FK to estimate_items.id, SET NULL on delete
+- `display_key` (TEXT, nullable) - Stable presentation key for hide/rename/group display overrides, independent from the generated quote_items.id.
 - `item_label` (TEXT, NOT NULL) - Item description/label
 - `canonical_code` (TEXT, nullable) - Standardized product code / SKU
 - `quantity` (INTEGER, NOT NULL, DEFAULT 1) - Item quantity
@@ -636,6 +638,7 @@ Line items belonging to a quote, storing both original cost and marked-up price 
 - `idx_quote_items_quote_id` on quote_id
 - `idx_quote_items_estimate_item_id` on estimate_item_id
 - `idx_quote_items_sort_order` on (quote_id, sort_order)
+- `idx_quote_items_display_key` on (quote_id, display_key)
 
 **RLS Policies:**
 - ✅ Row Level Security is ENABLED
@@ -654,6 +657,7 @@ Quote document templates defining the format and audience for customer or manufa
 - `audience` (TEXT, NOT NULL) - `'customer'` or `'manufacturer'` (CHECK constraint)
 - `description` (TEXT, NOT NULL, DEFAULT '') - Human-readable description
 - `matching_rules_json` (TEXT, nullable) - JSON blob of AI matching hints/rules
+- `display_config_json` (TEXT, nullable) - Default presentation configuration for quote documents created from this template.
 - `created_by_user_id` (UUID, NOT NULL) - FK to users.id, RESTRICT on delete
 - `created_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Creation timestamp
 - `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW()) - Last update timestamp
@@ -1938,6 +1942,9 @@ Replaced the 59 orphaned per-variant `linear_hardware_rule` rows (their `hardwar
 
 #### Hardware sell rule default markup (2026-06-21, migration `cpq_v2_hardware_sell_rule_default_2x`)
 Replaced the placeholder global `hardware_sell_rule` (markup ×1.0 → sell=net → 0% GM on every quote) with a single global **net × 2.0 (~50% GM)** rule ("Standard 2x markup", `cost_basis='net'`, `priority=1`). The Hardware Normalized Ingestion Master workbook carries no reliable sell signal (only 17 of 494 price rows have both net and a source sell, and those ratios are per-foot-vs-full-length noise), so markup is a business-policy default rather than workbook-derived. Tune later by inserting higher-priority rows with a non-null `category` (and/or `customer_class`/`company_id`); `computeSell` picks the lowest `priority` match. SQL: `db/migrations/20260621231500_cpq_v2_hardware_sell_rule_default_2x.sql`.
+
+#### Quote display configuration (2026-06-22, migration `quote_display_configuration`)
+Added a presentation/display layer for generated quote documents (pricing stays on `quotes`/`quote_items`; this only controls what is shown). Added `templates.display_config_json TEXT` (default presentation config for documents created from the template), `quotes.display_config_json TEXT` (per-quote copy of that config), and `quote_items.display_key TEXT` (stable presentation key for hide/rename/group overrides, distinct from the row PK) with index `idx_quote_items_display_key` on `(quote_id, display_key)`. All additions are `IF NOT EXISTS` / idempotent. SQL: `db/migrations/20260622090000_quote_display_configuration.sql`.
 
 ---
 

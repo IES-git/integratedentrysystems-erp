@@ -46,6 +46,8 @@ export interface QuoteLine {
   priceBookId: string | null;
   confidence: number | null;
   exceptionMessage: string | null;
+  manualSellPrice?: number | null;
+  isManualOverride?: boolean | null;
 }
 
 export type QuoteLayerId =
@@ -306,13 +308,33 @@ function sum(lines: QuoteLine[], pick: (l: QuoteLine) => number | null): number 
   return lines.reduce((s, l) => s + (pick(l) ?? 0), 0);
 }
 
+function withManualSellPrice(line: QuoteLine): QuoteLine {
+  const manualSellPrice = line.manualSellPrice ?? null;
+  if (manualSellPrice === null) return line;
+
+  const grossMargin = line.extendedNetPrice != null ? manualSellPrice - line.extendedNetPrice : null;
+  return {
+    ...line,
+    sellPrice: manualSellPrice,
+    grossMargin,
+    grossMarginPct: grossMargin != null && manualSellPrice > 0 ? (grossMargin / manualSellPrice) * 100 : null,
+    priceStatus: 'PRICED',
+    isManualOverride: true,
+    calculationExpression: /manual sell/i.test(line.calculationExpression)
+      ? line.calculationExpression
+      : line.calculationExpression
+      ? `${line.calculationExpression}; manual sell ${money(manualSellPrice)}`
+      : `Manual sell ${money(manualSellPrice)}`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Adapters
 // ---------------------------------------------------------------------------
 
 /** Adapts a live `EngineLine` (Phase 3) to the auditable `QuoteLine` shape. */
 export function fromEngineLine(line: EngineLine): QuoteLine {
-  return {
+  return withManualSellPrice({
     componentId: line.componentId,
     entityType: line.entityType,
     lineType: line.lineType,
@@ -335,12 +357,14 @@ export function fromEngineLine(line: EngineLine): QuoteLine {
     priceBookId: line.priceBookId,
     confidence: line.confidence,
     exceptionMessage: line.exceptionMessage,
-  };
+    manualSellPrice: line.manualSellPrice ?? null,
+    isManualOverride: line.isManualOverride ?? null,
+  });
 }
 
 /** Adapts a persisted `estimate_line` row to the auditable `QuoteLine` shape. */
 export function fromEstimateLine(line: EstimateLine): QuoteLine {
-  return {
+  return withManualSellPrice({
     componentId: line.componentId,
     entityType: line.entityType,
     lineType: line.lineType,
@@ -363,7 +387,9 @@ export function fromEstimateLine(line: EstimateLine): QuoteLine {
     priceBookId: line.priceBookId,
     confidence: line.confidence,
     exceptionMessage: line.exceptionMessage,
-  };
+    manualSellPrice: line.manualSellPrice ?? null,
+    isManualOverride: line.isManualOverride ?? null,
+  });
 }
 
 export function buildAuditableQuoteFromEngine(lines: EngineLine[]): AuditableQuote {

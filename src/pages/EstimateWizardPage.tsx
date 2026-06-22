@@ -617,7 +617,7 @@ export default function EstimateWizardPage() {
 
   const handleManageOpenings = () => {
     if (!currentEstimate) return;
-    navigate(`/app/estimates/create?id=${currentEstimate.id}&step=1`);
+    navigate(`/app/estimates/${currentEstimate.id}/edit`);
   };
 
   // Loading state

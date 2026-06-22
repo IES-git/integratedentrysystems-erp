@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Loader2, AlertCircle, DoorOpen, Square, LayoutPanelLeft, GlassWater,
   Wrench, KeyRound, ShieldCheck, ClipboardList, Plus, Trash2, CheckCircle2, Layers,
-  ChevronDown, ChevronRight, ArrowLeft, Wand2,
+  ChevronDown, ChevronRight, ArrowLeft, Wand2, DollarSign,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -64,7 +64,8 @@ import {
   baseFieldPaths,
   type BuilderContext, type OptionDescriptors, type IntegrityIssue,
 } from '@/lib/cpq/builder-logic';
-import type { EngineResult } from '@/lib/pricing';
+import { applyManualSellPriceOverrides, engineLineOverrideKey } from '@/lib/pricing';
+import type { EngineLine, EngineResult } from '@/lib/pricing';
 import type {
   OpeningConfigurationType, RuleEntityType, SpecFieldEntity, SpecFieldMapping, EstimateOpening,
   UserOpeningSpec, ResolutionResult, ResolutionCandidate,
@@ -105,8 +106,54 @@ const CONFIG_OPTIONS: { value: OpeningConfigurationType; label: string }[] = [
   { value: 'specialty', label: 'Specialty assembly' },
 ];
 
+const MANUAL_PRICE_STATUSES = new Set(['INVALID', 'CONTACT_FACTORY', 'EXTERNAL_PENDING']);
+
+function isManualPriceCandidate(line: EngineLine): boolean {
+  return line.lineType !== 'INCLUDED' &&
+    !line.includedOrSuppressedBy &&
+    MANUAL_PRICE_STATUSES.has(line.priceStatus);
+}
+
 let localSeq = 0;
 const nextId = () => `c${Date.now()}_${localSeq++}`;
+
+// ---------------------------------------------------------------------------
+// In-progress draft persistence (survives a page refresh, not navigation away).
+//
+// The builder draft lives in React state, so a hard refresh would normally wipe
+// a half-built opening. We mirror it into sessionStorage (per opening + estimate)
+// so a refresh restores it, and we clear it on the explicit exits — Cancel,
+// Back, and a successful Save — so leaving the page does NOT bring the draft back.
+// sessionStorage (not localStorage) also means closing the tab discards it.
+// ---------------------------------------------------------------------------
+function draftStorageKey(editingOpeningId: string | null | undefined, estimateId: string | null): string {
+  return `spec-opening-draft:${editingOpeningId ?? 'new'}:${estimateId ?? 'new'}`;
+}
+
+function loadPersistedDraft(key: string): OpeningDraft | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as OpeningDraft) : null;
+  } catch {
+    return null;
+  }
+}
+
+function savePersistedDraft(key: string, draft: OpeningDraft): void {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(draft));
+  } catch {
+    /* non-fatal: persistence is best-effort */
+  }
+}
+
+function clearPersistedDraft(key: string): void {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    /* non-fatal */
+  }
+}
 
 function newComponent(entityType: RuleEntityType, label: string): ComponentDraft {
   return {
@@ -269,6 +316,13 @@ export function SpecOpeningBuilder({
   mode = 'dialog',
 }: SpecOpeningBuilderProps) {
   const [step, setStep] = useState<StepId>('classify');
+  // Scrollable step-content area; reset to top on every step change.
+  const contentScrollRef = useRef<HTMLDivElement>(null);
+  // sessionStorage key for restoring a half-built draft after a refresh.
+  const persistKey = useMemo(() => draftStorageKey(editingOpeningId, estimateId), [editingOpeningId, estimateId]);
+  // Skip the first persist after (re)opening so restoring a draft (or seeding the
+  // default) doesn't immediately overwrite what's in storage with a stale value.
+  const skipNextPersistRef = useRef(true);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -284,6 +338,7 @@ export function SpecOpeningBuilder({
   const [ngpCatalog, setNgpCatalog] = useState<NgpCatalog>(() => emptyNgpCatalog());
   const [variantsByCategory, setVariantsByCategory] = useState<Record<string, VariantOption[]>>({});
   const [engineResult, setEngineResult] = useState<EngineResult | null>(null);
+  const [manualSellPriceByLineKey, setManualSellPriceByLineKey] = useState<Record<string, number>>({});
   const [pricing, setPricing] = useState(false);
   // Explicit opt-in to finish an opening that still has pricing exceptions
   // (routes those lines to the manual-quote queue instead of a silent zero).
@@ -295,15 +350,28 @@ export function SpecOpeningBuilder({
     setStep(initialStep ?? 'classify');
     setError(null);
     setEngineResult(null);
+    setManualSellPriceByLineKey({});
     setAckManualQuote(false);
+    // The upcoming setDraft (restore or default) must not be persisted back over
+    // a good stored copy on this same render pass.
+    skipNextPersistRef.current = true;
 
-    // Default draft — overridden below for edit mode.
-    setDraft(createOpeningDraft({
-      name: editingName ?? `Opening ${openingCount + 1}`,
-      quantity: editingQuantity ?? 1,
-      doors: [newComponent('door', 'Door')],
-      frames: [newComponent('frame', 'Frame')],
-    }));
+    // Restore an in-progress draft if the page was refreshed mid-build. Because
+    // the stored copy is cleared on Cancel/Back/Save, a value here means the user
+    // reloaded without finishing — so we prefer it over both the default and the
+    // saved DB snapshot.
+    const persisted = loadPersistedDraft(persistKey);
+    if (persisted) {
+      setDraft(persisted);
+    } else {
+      // Default draft — overridden below for edit mode.
+      setDraft(createOpeningDraft({
+        name: editingName ?? `Opening ${openingCount + 1}`,
+        quantity: editingQuantity ?? 1,
+        doors: [newComponent('door', 'Door')],
+        frames: [newComponent('frame', 'Frame')],
+      }));
+    }
 
     setLoading(true);
     const catalogLoad = Promise.all([
@@ -330,7 +398,8 @@ export function SpecOpeningBuilder({
 
     // In edit mode, rehydrate the full draft from the persisted snapshot (or
     // fall back to lossy reconstruction for legacy openings without a snapshot).
-    if (editingOpeningId) {
+    // Skip when we already restored a more-recent unsaved draft from this session.
+    if (editingOpeningId && !persisted) {
       loadOpeningDraft(editingOpeningId)
         .then((savedDraft) => {
           if (savedDraft) {
@@ -347,6 +416,18 @@ export function SpecOpeningBuilder({
     void catalogLoad;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Mirror the working draft into sessionStorage on every change so a refresh
+  // mid-build restores it. The first run after (re)open is skipped so we don't
+  // overwrite the stored copy while the restore/default seed is still settling.
+  useEffect(() => {
+    if (!open) return;
+    if (skipNextPersistRef.current) {
+      skipNextPersistRef.current = false;
+      return;
+    }
+    savePersistedDraft(persistKey, draft);
+  }, [open, draft, persistKey]);
 
   // Auto-generate the hardware set whenever the opening config changes.
   useEffect(() => {
@@ -629,6 +710,12 @@ export function SpecOpeningBuilder({
     if (!steps.some((s) => s.id === step)) setStep('classify');
   }, [steps, step]);
 
+  // Always reset the content scroll to the top when switching steps so each tab
+  // starts from its heading rather than wherever the previous tab was scrolled.
+  useEffect(() => {
+    contentScrollRef.current?.scrollTo({ top: 0 });
+  }, [step]);
+
   const prepRequirements: PrepRequirement[] = useMemo(() => {
     if (!hwCatalog) return [];
     return derivePrepRequirements(spec.hardware, hwCatalog).prepRequirements;
@@ -736,6 +823,20 @@ export function SpecOpeningBuilder({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
+  const effectiveEngineResult = useMemo(
+    () => engineResult ? applyManualSellPriceOverrides(engineResult, manualSellPriceByLineKey) : null,
+    [engineResult, manualSellPriceByLineKey],
+  );
+
+  const updateManualLinePrice = (key: string, price: number | null) => {
+    setManualSellPriceByLineKey((prev) => {
+      const next = { ...prev };
+      if (price === null) delete next[key];
+      else next[key] = price;
+      return next;
+    });
+  };
+
   // ---- save ----
   const handleSave = async () => {
     if (!draft.name.trim()) { setError('Opening name is required.'); return; }
@@ -759,10 +860,11 @@ export function SpecOpeningBuilder({
       // Authoritative price-and-gate: re-price now so we never persist an opening
       // that can't actually be priced unless the user explicitly acknowledges a
       // manual quote. This is what stops a non-expert from finishing with $0.
-      let result = engineResult;
-      if (!result) {
-        result = await priceOpeningLive(buildNormalizedSpec(draft, mappings, ngpCatalog), { priceBookDocumentId: pinnedPriceBookId });
-        setEngineResult(result);
+      let result = effectiveEngineResult;
+      if (!engineResult) {
+        const rawResult = await priceOpeningLive(buildNormalizedSpec(draft, mappings, ngpCatalog), { priceBookDocumentId: pinnedPriceBookId });
+        setEngineResult(rawResult);
+        result = applyManualSellPriceOverrides(rawResult, manualSellPriceByLineKey);
       }
       const report = computeCompleteness(result, integrityIssues, ngpIssues);
       if (report.blockingCount > 0 && !ackManualQuote) {
@@ -773,7 +875,16 @@ export function SpecOpeningBuilder({
 
       const eid = estimateId ?? (resolveEstimateId ? await resolveEstimateId() : null);
       if (!eid) { setError('Unable to create estimate.'); return; }
-      const { opening } = await saveOpeningDraft(eid, draft, mappings, { priceBookDocumentId: pinnedPriceBookId }, editingOpeningId, ngpCatalog);
+      const { opening } = await saveOpeningDraft(
+        eid,
+        draft,
+        mappings,
+        { priceBookDocumentId: pinnedPriceBookId, manualSellPriceByLineKey },
+        editingOpeningId,
+        ngpCatalog,
+      );
+      // The opening is committed — drop the in-progress copy so it isn't restored.
+      clearPersistedDraft(persistKey);
       onSaved(opening);
       onOpenChange(false);
     } catch (e) {
@@ -783,11 +894,19 @@ export function SpecOpeningBuilder({
     }
   };
 
+  // Explicit exit (Cancel / Back): discard the in-progress draft so navigating
+  // away does NOT bring it back the next time the builder opens. (A refresh, by
+  // contrast, never calls this, so the stored draft survives the reload.)
+  const closeBuilder = () => {
+    clearPersistedDraft(persistKey);
+    onOpenChange(false);
+  };
+
   const completeness = useMemo(
-    () => computeCompleteness(engineResult, integrityIssues, ngpIssues),
-    [engineResult, integrityIssues, ngpIssues],
+    () => computeCompleteness(effectiveEngineResult, integrityIssues, ngpIssues),
+    [effectiveEngineResult, integrityIssues, ngpIssues],
   );
-  const blockingDeps = engineResult?.dependencyResults.filter((d) => d.blocking) ?? [];
+  const blockingDeps = effectiveEngineResult?.dependencyResults.filter((d) => d.blocking) ?? [];
   // Pre-pricing gate (name + structural/NGP blocks); the pricing gate is enforced
   // in handleSave (and reflected here once a price has been computed).
   const pricingBlocked = completeness.blockingCount > 0 && !ackManualQuote;
@@ -823,7 +942,7 @@ export function SpecOpeningBuilder({
       </nav>
 
       {/* Content */}
-      <div className="flex-1 min-w-0 overflow-y-auto px-6 py-4">
+      <div ref={contentScrollRef} className="flex-1 min-w-0 overflow-y-auto px-6 py-4">
         {loading ? (
           <div className="flex items-center justify-center py-20">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -844,7 +963,9 @@ export function SpecOpeningBuilder({
             specByEntity={specByEntity}
             variantsByCategory={variantsByCategory}
             prepRequirements={prepRequirements}
-            engineResult={engineResult}
+            engineResult={effectiveEngineResult}
+            rawEngineResult={engineResult}
+            manualSellPriceByLineKey={manualSellPriceByLineKey}
             pricing={pricing}
             onPatch={patch}
             onSetOpeningField={setOpeningField}
@@ -859,6 +980,7 @@ export function SpecOpeningBuilder({
             onRemoveCutout={removeCutout}
             onUpdateCutout={updateCutout}
             onRunPricing={runPricing}
+            onManualLinePriceChange={updateManualLinePrice}
             onGoToStep={setStep}
           />
         )}
@@ -896,16 +1018,16 @@ export function SpecOpeningBuilder({
               </label>
             )}
           </div>
-        ) : engineResult && (
+        ) : effectiveEngineResult && (
           <span>
-            Sell <strong className="text-foreground">${engineResult.totals.sellTotal.toFixed(2)}</strong>
-            {engineResult.totals.exceptionCount > 0 && (
-              <Badge variant="destructive" className="ml-2">{engineResult.totals.exceptionCount} exceptions</Badge>
+            Sell <strong className="text-foreground">${effectiveEngineResult.totals.sellTotal.toFixed(2)}</strong>
+            {effectiveEngineResult.totals.exceptionCount > 0 && (
+              <Badge variant="destructive" className="ml-2">{effectiveEngineResult.totals.exceptionCount} exceptions</Badge>
             )}
           </span>
         )}
       </div>
-      <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
+      <Button variant="outline" onClick={closeBuilder} disabled={saving}>Cancel</Button>
       <Button onClick={handleSave} disabled={!canSave || saving}>
         {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
         {editingOpeningId ? 'Update Opening' : 'Save Opening'}
@@ -917,7 +1039,7 @@ export function SpecOpeningBuilder({
     return (
       <div className="flex h-full flex-col bg-background">
         <div className="px-6 pt-5 pb-3 border-b shrink-0">
-          <Button variant="ghost" size="sm" className="-ml-2 mb-1 text-muted-foreground" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" size="sm" className="-ml-2 mb-1 text-muted-foreground" onClick={closeBuilder}>
             <ArrowLeft className="h-4 w-4 mr-1" /> Back to Openings
           </Button>
           <h1 className="font-display text-2xl">{title}</h1>
@@ -935,7 +1057,7 @@ export function SpecOpeningBuilder({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : closeBuilder())}>
       <DialogContent className="sm:max-w-4xl max-h-[92vh] flex flex-col p-0 gap-0">
         <DialogHeader className="px-6 pt-6 pb-3 border-b">
           <DialogTitle className="font-display text-2xl">{title}</DialogTitle>
@@ -973,6 +1095,8 @@ interface StepContentProps {
   variantsByCategory: Record<string, VariantOption[]>;
   prepRequirements: PrepRequirement[];
   engineResult: EngineResult | null;
+  rawEngineResult: EngineResult | null;
+  manualSellPriceByLineKey: Record<string, number>;
   pricing: boolean;
   onPatch: (p: Partial<OpeningDraft>) => void;
   onSetOpeningField: (path: string, value: string) => void;
@@ -987,6 +1111,7 @@ interface StepContentProps {
   onRemoveCutout: (id: string) => void;
   onUpdateCutout: (id: string, p: Partial<CutoutDraft>) => void;
   onRunPricing: () => void;
+  onManualLinePriceChange: (key: string, price: number | null) => void;
   /** Jump to another builder step (used by review "Fix" buttons). */
   onGoToStep: (id: StepId) => void;
 }
@@ -1025,7 +1150,10 @@ const LEAF_FIXED_CONFIGS: OpeningConfigurationType[] = [
 
 function ClassifyStep({ draft, ctx, descriptors, specByEntity, onPatch, onSetOpeningField }: StepContentProps) {
   const opening = fieldsFor(specByEntity, 'opening').filter(
-    (f) => f.category !== 'Configuration' && f.fieldId !== 'OPN-013',
+    // Drop Configuration (handled by dedicated controls), the fire-label boolean
+    // (its own switch), and quantity (the dedicated "Quantity of identical
+    // openings" input at the top of this step) to avoid duplicate fields.
+    (f) => f.category !== 'Configuration' && f.fieldId !== 'OPN-013' && f.fieldId !== 'OPN-002',
   );
   const visible = opening.filter((f) => fieldTier(f, draft, ctx) !== 'hidden');
   const essential = visible.filter((f) => fieldTier(f, draft, ctx) === 'essential');
@@ -2042,7 +2170,144 @@ function ConstructionStep({ draft, onUpdateComponentField }: StepContentProps) {
   );
 }
 
-function ReviewStep({ engineResult, pricing, integrityIssues, ngpIssues, onRunPricing, onGoToStep }: StepContentProps) {
+function formatManualPrice(n: number | null | undefined): string {
+  if (n === null || n === undefined) return '';
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+function ManualMissingPricePanel({
+  rawEngineResult,
+  manualSellPriceByLineKey,
+  onManualLinePriceChange,
+}: Pick<StepContentProps, 'rawEngineResult' | 'manualSellPriceByLineKey' | 'onManualLinePriceChange'>) {
+  const lines = rawEngineResult?.lines.filter(isManualPriceCandidate) ?? [];
+  if (lines.length === 0) return null;
+
+  const resolvedCount = lines.filter((line) => manualSellPriceByLineKey[engineLineOverrideKey(line)] !== undefined).length;
+
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50/60 dark:border-amber-800/40 dark:bg-amber-900/10 overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-amber-200/70 dark:border-amber-800/40 text-amber-900 dark:text-amber-200">
+        <DollarSign className="h-4 w-4 shrink-0" />
+        <span className="text-sm font-medium">Manual prices needed</span>
+        <Badge variant="outline" className="ml-auto border-amber-300 text-amber-800 dark:border-amber-700 dark:text-amber-200">
+          {resolvedCount}/{lines.length} entered
+        </Badge>
+      </div>
+      <div className="divide-y divide-amber-200/70 dark:divide-amber-800/40">
+        {lines.map((line) => {
+          const key = engineLineOverrideKey(line);
+          return (
+            <ManualMissingPriceRow
+              key={key}
+              line={line}
+              value={manualSellPriceByLineKey[key]}
+              onChange={(price) => onManualLinePriceChange(key, price)}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ManualMissingPriceRow({
+  line,
+  value,
+  onChange,
+}: {
+  line: EngineLine;
+  value: number | undefined;
+  onChange: (price: number | null) => void;
+}) {
+  const [input, setInput] = useState(formatManualPrice(value));
+  const [invalid, setInvalid] = useState(false);
+
+  useEffect(() => {
+    setInput(formatManualPrice(value));
+    setInvalid(false);
+  }, [value]);
+
+  const commit = () => {
+    const trimmed = input.trim();
+    if (trimmed === '') {
+      setInvalid(false);
+      onChange(null);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setInvalid(true);
+      return;
+    }
+    setInvalid(false);
+    onChange(Math.round(parsed * 100) / 100);
+  };
+
+  return (
+    <div className="flex items-start gap-3 px-3 py-2 text-xs bg-background/60">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="font-medium text-foreground">{line.description}</span>
+          <Badge variant="outline" className="text-[10px] py-0 px-1 border-amber-300 text-amber-800">
+            {line.priceStatus.replace(/_/g, ' ').toLowerCase()}
+          </Badge>
+          <span className="text-muted-foreground">×{line.quantity}</span>
+        </div>
+        {line.exceptionMessage && (
+          <p className="mt-0.5 text-[11px] text-muted-foreground">{line.exceptionMessage}</p>
+        )}
+      </div>
+      <div className="w-36 shrink-0 space-y-1">
+        <div className="relative">
+          <DollarSign className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commit();
+              if (e.key === 'Escape') {
+                setInput(formatManualPrice(value));
+                setInvalid(false);
+              }
+            }}
+            className={cn('h-8 pl-7 text-right text-xs tabular-nums', invalid && 'border-destructive focus-visible:ring-destructive')}
+            placeholder="0.00"
+          />
+        </div>
+        <div className="flex items-center justify-between">
+          {invalid ? (
+            <span className="text-[10px] text-destructive">Enter a valid price</span>
+          ) : value !== undefined ? (
+            <Badge variant="secondary" className="text-[10px] py-0 px-1 text-amber-700 bg-amber-50 border-amber-200">
+              manual
+            </Badge>
+          ) : (
+            <span />
+          )}
+          {value !== undefined && (
+            <button type="button" onClick={() => { setInput(''); onChange(null); }} className="text-[10px] text-muted-foreground hover:text-foreground">
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReviewStep({
+  engineResult,
+  rawEngineResult,
+  manualSellPriceByLineKey,
+  pricing,
+  integrityIssues,
+  ngpIssues,
+  onRunPricing,
+  onManualLinePriceChange,
+  onGoToStep,
+}: StepContentProps) {
   if (pricing) {
     return <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
   }
@@ -2058,6 +2323,11 @@ function ReviewStep({ engineResult, pricing, integrityIssues, ngpIssues, onRunPr
       <div className="flex items-center justify-end">
         <Button size="sm" variant="ghost" onClick={onRunPricing}>Re-price</Button>
       </div>
+      <ManualMissingPricePanel
+        rawEngineResult={rawEngineResult}
+        manualSellPriceByLineKey={manualSellPriceByLineKey}
+        onManualLinePriceChange={onManualLinePriceChange}
+      />
       <AuditableQuote quote={quote} completeness={completeness} onNavigate={onGoToStep} />
     </div>
   );

@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useState, useEffect, useCallback, useMemo, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { pdf, PDFViewer } from '@react-pdf/renderer';
 import {
   ArrowLeft,
@@ -20,6 +20,7 @@ import {
   Zap,
   Minus,
   Plus,
+  GripVertical,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -34,14 +35,27 @@ import { supabase } from '@/lib/supabase';
 import { getEstimateWithItems, updateEstimateOpening } from '@/lib/estimates-api';
 import { refreshEstimatePricing } from '@/lib/pricing-lookup';
 import { getCompany } from '@/lib/companies-api';
-import { createQuote } from '@/lib/quotes-api';
+import { createQuote, getQuoteWithItems, updateQuoteWithItems } from '@/lib/quotes-api';
+import { getTemplate } from '@/lib/templates-api';
 import { assertEstimateBuildable, priceEstimate } from '@/lib/cpq/service';
 import { loadEstimateLinesByOpening } from '@/lib/cpq/estimate-lines-api';
 import { buildQuotableOpenings, type QuotableOpening } from '@/lib/cpq/quote-bridge';
-import { generateQuoteSummary } from '@/lib/gemini-api';
+import { generateQuoteCopy, generateQuoteSummary, type QuoteCopyTarget } from '@/lib/gemini-api';
 import { CustomerQuotePdf } from '@/components/quotes/CustomerQuotePdf';
 import { ManufacturerQuotePdf } from '@/components/quotes/ManufacturerQuotePdf';
+import {
+  QuotePresentationControls,
+  type QuoteCopyGenerationRequest,
+} from '@/components/quotes/QuotePresentationControls';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
+import { getMarkupOverrideMatch } from '@/lib/customer-markups';
+import {
+  createDefaultQuoteDisplayConfig,
+  getBlock,
+  parseQuoteDisplayConfigJson,
+  serializeQuoteDisplayConfig,
+  type QuotePresentationLineOption,
+} from '@/lib/quote-display';
 import type {
   Company,
   EstimateItem,
@@ -49,6 +63,7 @@ import type {
   EstimateLine,
   ItemField,
   Quote,
+  QuoteDisplayConfig,
   QuoteItem,
   QuoteType,
 } from '@/types';
@@ -57,6 +72,8 @@ import type {
 
 interface EstimateItemWithFields extends EstimateItem {
   fields: ItemField[];
+  chargeCategory?: string | null;
+  isEngineOpening?: boolean;
   /**
    * True for individual engine line detail items (one per estimate_line row).
    * These have a fake id and carry `openingQuantity` / the source engine line.
@@ -77,19 +94,12 @@ interface LineItem {
   lineTotal: number;
 }
 
-/** Case-insensitive lookup of an item in the bulk markup overrides map. */
-function findItemOverride(
-  overrides: Record<string, number>,
-  item: EstimateItemWithFields
-): number | undefined {
-  const label = item.itemLabel?.toLowerCase().trim();
-  const code = item.canonicalCode?.toLowerCase().trim();
-  for (const [key, val] of Object.entries(overrides)) {
-    const k = key.toLowerCase().trim();
-    if (k === label || (code && k === code)) return val;
-  }
-  return undefined;
-}
+const QUOTE_COPY_FIELD_TARGETS: Record<QuoteCopyGenerationRequest['field'], QuoteCopyTarget> = {
+  summaryText: 'overview',
+  scopeText: 'scope',
+  termsText: 'terms',
+  customText: 'custom',
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,6 +115,108 @@ function triggerDownload(blob: Blob, filename: string) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+function getLineItemDisplayKey(item: EstimateItemWithFields): string {
+  if (item.isEngineLineDetail) {
+    return `engine-line:${item.engineLine?.id ?? item.id}`;
+  }
+  return `estimate-item:${item.id}`;
+}
+
+function getSavedQuoteItemMultiplier(item: Pick<QuoteItem, 'unitCost' | 'unitPrice'>): number | null {
+  if (!item.unitCost || item.unitCost <= 0) return null;
+  const multiplier = item.unitPrice / item.unitCost;
+  if (!Number.isFinite(multiplier) || multiplier <= 0) return null;
+  return parseFloat(multiplier.toFixed(2));
+}
+
+function multipliersMatch(a: number, b: number): boolean {
+  return Math.abs(a - b) < 0.0001;
+}
+
+function compactSpecFields(spec?: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(spec ?? {})
+      .filter(([, value]) => Boolean(value))
+      .slice(0, 18),
+  );
+}
+
+function buildInitialMultipliers({
+  estimateItems,
+  openings,
+  linesByOpening,
+  quotableOpenings,
+  engineOpeningIds,
+  quoteItems,
+  defaultMultiplier,
+  bulkOverrides,
+  fallbackMultiplier,
+}: {
+  estimateItems: EstimateItemWithFields[];
+  openings: EstimateOpeningWithItems[];
+  linesByOpening: Map<string, EstimateLine[]>;
+  quotableOpenings: QuotableOpening[];
+  engineOpeningIds: Set<string>;
+  quoteItems?: QuoteItem[];
+  defaultMultiplier: number;
+  bulkOverrides: Record<string, number>;
+  fallbackMultiplier?: number | null;
+}): Record<string, number> {
+  const next: Record<string, number> = {};
+  const fallback = fallbackMultiplier && fallbackMultiplier > 0 ? fallbackMultiplier : defaultMultiplier;
+  const multiplierByDisplayKey = new Map<string, number>();
+  const multiplierByEstimateItemId = new Map<string, number>();
+
+  for (const quoteItem of quoteItems ?? []) {
+    const multiplier = getSavedQuoteItemMultiplier(quoteItem);
+    if (!multiplier) continue;
+    if (quoteItem.displayKey) multiplierByDisplayKey.set(quoteItem.displayKey, multiplier);
+    if (quoteItem.estimateItemId) multiplierByEstimateItemId.set(quoteItem.estimateItemId, multiplier);
+  }
+
+  for (const qOpening of quotableOpenings) {
+    next[qOpening.openingId] = fallback;
+  }
+
+  for (const opening of openings) {
+    const visibleLines = (linesByOpening.get(opening.id) ?? []).filter(
+      (line) => !line.includedOrSuppressedBy && line.lineType !== 'INCLUDED',
+    );
+    if (visibleLines.length === 0) continue;
+
+    const lineMultipliers = visibleLines.map((line) =>
+      multiplierByDisplayKey.get(`engine-line:${line.id}`) ?? null,
+    );
+    const savedLineMultipliers = lineMultipliers.filter((value): value is number => value !== null);
+
+    if (
+      savedLineMultipliers.length === visibleLines.length &&
+      savedLineMultipliers.every((value) => multipliersMatch(value, savedLineMultipliers[0]))
+    ) {
+      next[opening.id] = savedLineMultipliers[0];
+      continue;
+    }
+
+    next[opening.id] = fallback;
+    visibleLines.forEach((line, index) => {
+      const multiplier = lineMultipliers[index];
+      if (multiplier) next[`engine-line:${line.id}`] = multiplier;
+    });
+  }
+
+  for (const item of estimateItems) {
+    if (item.openingId && engineOpeningIds.has(item.openingId)) continue;
+    const override = getMarkupOverrideMatch(bulkOverrides, item);
+    next[item.id] =
+      multiplierByDisplayKey.get(`estimate-item:${item.id}`) ??
+      multiplierByEstimateItemId.get(item.id) ??
+      override?.value ??
+      defaultMultiplier;
+  }
+
+  return next;
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -159,9 +271,9 @@ function CustomerLineItemsTable({
   let rowIdx = 0;
 
   const renderItemRow = (item: LineItem) => {
-    const isEngine = item.estimateItem.isEngineOpening === true;
+    const isEngine = item.estimateItem.isEngineOpening === true || item.estimateItem.isEngineLineDetail === true;
     const multiplierKey = isEngine ? (item.estimateItem.openingId ?? item.estimateItem.id) : item.estimateItem.id;
-    const bulkOverride = isEngine ? undefined : findItemOverride(bulkOverrides, item.estimateItem);
+    const bulkOverride = getMarkupOverrideMatch(bulkOverrides, item.estimateItem);
     const isOverriddenFromDefault = item.multiplier !== companyDefaultMultiplier;
     const hasBulkOverride = bulkOverride !== undefined;
     const stripe = rowIdx++ % 2 === 0 ? 'bg-background' : 'bg-muted/20';
@@ -272,7 +384,7 @@ function CustomerLineItemsTable({
         </tr>
         {group.items.map((groupItem) => {
           const item = groupItem as LineItem & { subcategory: LineItem['estimateItem']['subcategory'] };
-          const bulkOverride = findItemOverride(bulkOverrides, item.estimateItem);
+          const bulkOverride = getMarkupOverrideMatch(bulkOverrides, item.estimateItem);
           const isOverriddenFromDefault = item.multiplier !== companyDefaultMultiplier;
           const hasBulkOverride = bulkOverride !== undefined;
           const stripe = rowIdx++ % 2 === 0 ? 'bg-background' : 'bg-muted/20';
@@ -687,6 +799,7 @@ interface EngineOpeningsPanelProps {
   itemMultipliers: Record<string, number>;
   companyDefaultMultiplier: number;
   onUpdateMultiplier: (key: string, value: number) => void;
+  onResetMultiplier: (key: string) => void;
   onQuantityChange: (openingId: string, qty: number) => Promise<void>;
   currency: string;
 }
@@ -699,6 +812,7 @@ function EngineOpeningsPanel({
   itemMultipliers,
   companyDefaultMultiplier,
   onUpdateMultiplier,
+  onResetMultiplier,
   onQuantityChange,
   currency,
 }: EngineOpeningsPanelProps) {
@@ -860,6 +974,8 @@ function EngineOpeningsPanel({
                           </tr>
                           {byLayer[layer].map((li) => {
                             const line = li.estimateItem.engineLine;
+                            const lineMultiplierKey = getLineItemDisplayKey(li.estimateItem);
+                            const hasLineMultiplierOverride = itemMultipliers[lineMultiplierKey] !== undefined;
                             const uom = line?.unitOfMeasure ? `/${line.unitOfMeasure}` : '';
                             const hasException = line?.priceStatus === 'INVALID' || line?.priceStatus === 'CONTACT_FACTORY' || line?.priceStatus === 'EXTERNAL_PENDING';
                             const specChips = line?.matchedConditions
@@ -912,7 +1028,40 @@ function EngineOpeningsPanel({
                                   {fmt(li.unitCost, currency)}
                                 </td>
                                 <td className="px-3 py-2.5 text-center align-top pt-3">
-                                  <MultiplierBadge multiplier={li.multiplier} />
+                                  <div className="flex flex-col items-center gap-0.5">
+                                    <div className="flex items-center gap-1">
+                                      <input
+                                        type="number"
+                                        min="0.01"
+                                        step="0.05"
+                                        value={li.multiplier}
+                                        onChange={(e) => {
+                                          const v = parseFloat(e.target.value);
+                                          if (!isNaN(v) && v > 0) {
+                                            onUpdateMultiplier(lineMultiplierKey, parseFloat(v.toFixed(2)));
+                                          }
+                                        }}
+                                        className={`w-16 rounded border px-1.5 py-1 text-center text-xs font-semibold focus:outline-none focus:ring-1 ${
+                                          hasLineMultiplierOverride
+                                            ? 'border-amber-300 bg-amber-50 text-amber-900 focus:ring-amber-400'
+                                            : 'border-border bg-background text-foreground focus:ring-ring'
+                                        }`}
+                                        title="Markup multiplier for this line item"
+                                      />
+                                      <span className="text-xs text-muted-foreground">×</span>
+                                    </div>
+                                    {hasLineMultiplierOverride ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => onResetMultiplier(lineMultiplierKey)}
+                                        className="text-[10px] text-muted-foreground underline hover:text-foreground"
+                                      >
+                                        inherit opening
+                                      </button>
+                                    ) : (
+                                      <span className="text-[10px] text-muted-foreground">opening</span>
+                                    )}
+                                  </div>
                                 </td>
                                 <td className="px-3 py-2.5 text-right font-medium tabular-nums align-top pt-3">
                                   {fmt(li.unitPrice, currency)}
@@ -954,15 +1103,29 @@ function EngineOpeningsPanel({
 
 export default function QuoteBuilderPage() {
   const navigate = useNavigate();
+  const { id: routeQuoteId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const { toast } = useToast();
   const { user } = useAuth();
 
-  const estimateId = searchParams.get('estimateId');
-  const customerId = searchParams.get('customerId');
-  const quoteType = (searchParams.get('quoteType') ?? 'customer') as QuoteType;
+  const requestedEstimateId = searchParams.get('estimateId');
+  const requestedCustomerId = searchParams.get('customerId');
+  const requestedQuoteType = (searchParams.get('quoteType') ?? 'customer') as QuoteType;
+  const templateId = searchParams.get('templateId');
+  const baseQuoteId = searchParams.get('baseQuoteId');
+  const editQuoteId = routeQuoteId ?? searchParams.get('quoteId');
+  const isEditMode = Boolean(editQuoteId);
 
   // ── State ──────────────────────────────────────────────────────────────────
+  const [builderContext, setBuilderContext] = useState<{
+    estimateId: string | null;
+    customerId: string | null;
+    quoteType: QuoteType;
+  }>(() => ({
+    estimateId: requestedEstimateId,
+    customerId: requestedCustomerId,
+    quoteType: requestedQuoteType,
+  }));
   const [estimateItems, setEstimateItems] = useState<EstimateItemWithFields[]>([]);
   const [openings, setOpenings] = useState<EstimateOpeningWithItems[]>([]);
   const [linesByOpening, setLinesByOpening] = useState<Map<string, EstimateLine[]>>(new Map());
@@ -976,6 +1139,10 @@ export default function QuoteBuilderPage() {
   const [isDownloadingManufacturer, setIsDownloadingManufacturer] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [savedQuote, setSavedQuote] = useState<Quote | null>(null);
+  const [displayConfig, setDisplayConfig] = useState<QuoteDisplayConfig>(() =>
+    createDefaultQuoteDisplayConfig(null, requestedQuoteType),
+  );
+  const [sidebarWidth, setSidebarWidth] = useState(384);
   const [previewType, setPreviewType] = useState<'customer' | 'manufacturer' | null>(null);
   const [previewAiSummary, setPreviewAiSummary] = useState<string | null>(null);
   const [isGeneratingPreviewSummary, setIsGeneratingPreviewSummary] = useState(false);
@@ -986,18 +1153,83 @@ export default function QuoteBuilderPage() {
   // Pricing table refresh state
   const [refreshingPrices, setRefreshingPrices] = useState(false);
 
+  const estimateId = builderContext.estimateId;
+  const customerId = builderContext.customerId;
+  const quoteType = builderContext.quoteType;
+
+  const sidebarStyle = useMemo(
+    () => ({ '--quote-sidebar-width': `${sidebarWidth}px` }) as CSSProperties,
+    [sidebarWidth],
+  );
+
+  const handleSidebarResizeStart = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (window.innerWidth < 1024) return;
+    event.preventDefault();
+
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = startWidth + (startX - moveEvent.clientX);
+      setSidebarWidth(Math.min(680, Math.max(320, nextWidth)));
+    };
+
+    const handlePointerUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', handlePointerMove);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp, { once: true });
+  }, [sidebarWidth]);
+
   // ── Load data ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!estimateId) {
-      navigate('/app/estimates');
-      return;
-    }
-
     const load = async () => {
+      setIsLoading(true);
       try {
-        const [result, engineLines] = await Promise.all([
-          getEstimateWithItems(estimateId),
-          loadEstimateLinesByOpening(estimateId).catch(() => new Map<string, EstimateLine[]>()),
+        const sourceQuoteId = editQuoteId ?? baseQuoteId;
+        const sourceQuoteResult = sourceQuoteId
+          ? await getQuoteWithItems(sourceQuoteId)
+          : null;
+
+        if (sourceQuoteId && !sourceQuoteResult && editQuoteId) {
+          toast({ title: 'Quote not found', variant: 'destructive' });
+          navigate('/app/quotes');
+          return;
+        }
+
+        const sourceQuote = sourceQuoteResult?.quote ?? null;
+        const effectiveEstimateId = sourceQuote?.estimateId ?? requestedEstimateId;
+        if (!effectiveEstimateId) {
+          navigate('/app/estimates');
+          return;
+        }
+
+        const effectiveQuoteType = editQuoteId && sourceQuote
+          ? sourceQuote.quoteType
+          : requestedQuoteType;
+        const effectiveCustomerId = editQuoteId && sourceQuote
+          ? sourceQuote.companyId
+          : requestedCustomerId ?? sourceQuote?.companyId ?? null;
+
+        setBuilderContext({
+          estimateId: effectiveEstimateId,
+          customerId: effectiveCustomerId,
+          quoteType: effectiveQuoteType,
+        });
+        setSavedQuote(editQuoteId && sourceQuote ? sourceQuote : null);
+        setNotes(sourceQuote?.notes ?? '');
+
+        const [result, engineLines, selectedTemplate] = await Promise.all([
+          getEstimateWithItems(effectiveEstimateId),
+          loadEstimateLinesByOpening(effectiveEstimateId).catch(() => new Map<string, EstimateLine[]>()),
+          templateId ? getTemplate(templateId).catch(() => null) : Promise.resolve(null),
         ]);
         if (!result) {
           toast({
@@ -1008,6 +1240,12 @@ export default function QuoteBuilderPage() {
           return;
         }
         const items = result.items;
+        const defaultDisplayConfig = createDefaultQuoteDisplayConfig(selectedTemplate, effectiveQuoteType);
+        setDisplayConfig(
+          sourceQuote?.displayConfigJson
+            ? parseQuoteDisplayConfigJson(sourceQuote.displayConfigJson) ?? defaultDisplayConfig
+            : defaultDisplayConfig,
+        );
         setEstimateItems(items);
         setOpenings(result.openings ?? []);
         setLinesByOpening(engineLines);
@@ -1021,7 +1259,7 @@ export default function QuoteBuilderPage() {
         const { data: specItemRows } = await supabase
           .from('estimate_items')
           .select('id, opening_id, item_type, item_fields(field_key, field_value)')
-          .eq('estimate_id', estimateId)
+          .eq('estimate_id', effectiveEstimateId)
           .is('parent_item_id', null)
           .not('opening_id', 'is', null);
 
@@ -1044,36 +1282,37 @@ export default function QuoteBuilderPage() {
 
         // Set keyed by opening.id for engine openings, estimateItem.id for legacy.
         const engineOpeningIds = new Set(qo.map((q) => q.openingId));
+        let defaultMult = 1.0;
+        let overrides: Record<string, number> = {};
 
-        if (customerId) {
-          const co = await getCompany(customerId);
+        if (effectiveCustomerId) {
+          const co = await getCompany(effectiveCustomerId);
           setCompany(co);
           if (co) {
-            const defaultMult = co.settings?.costMultiplier ?? 1.0;
-            const overrides: Record<string, number> = co.settings?.markupOverrides ?? {};
+            defaultMult = co.settings?.costMultiplier ?? 1.0;
+            overrides = co.settings?.markupOverrides ?? {};
             setBulkOverrides(overrides);
-            const initMultipliers: Record<string, number> = {};
-            // Engine openings keyed by openingId
-            for (const qOpening of qo) {
-              initMultipliers[qOpening.openingId] = defaultMult;
-            }
-            // Legacy items keyed by itemId (skip items whose opening is engine-priced)
-            for (const item of items) {
-              if (item.openingId && engineOpeningIds.has(item.openingId)) continue;
-              const override = findItemOverride(overrides, item);
-              initMultipliers[item.id] = override ?? defaultMult;
-            }
-            setItemMultipliers(initMultipliers);
+          } else {
+            setBulkOverrides({});
           }
         } else {
-          const initMultipliers: Record<string, number> = {};
-          for (const qOpening of qo) initMultipliers[qOpening.openingId] = 1.0;
-          for (const item of items) {
-            if (item.openingId && engineOpeningIds.has(item.openingId)) continue;
-            initMultipliers[item.id] = 1.0;
-          }
-          setItemMultipliers(initMultipliers);
+          setCompany(null);
+          setBulkOverrides({});
         }
+
+        setItemMultipliers(
+          buildInitialMultipliers({
+            estimateItems: items,
+            openings: result.openings ?? [],
+            linesByOpening: engineLines,
+            quotableOpenings: qo,
+            engineOpeningIds,
+            quoteItems: sourceQuoteResult?.items,
+            defaultMultiplier: defaultMult,
+            bulkOverrides: overrides,
+            fallbackMultiplier: sourceQuote?.markupMultiplier,
+          }),
+        );
       } catch (err) {
         console.error(err);
         toast({
@@ -1088,7 +1327,16 @@ export default function QuoteBuilderPage() {
     };
 
     load();
-  }, [estimateId, customerId, navigate, toast]);
+  }, [
+    requestedEstimateId,
+    requestedCustomerId,
+    requestedQuoteType,
+    templateId,
+    editQuoteId,
+    baseQuoteId,
+    navigate,
+    toast,
+  ]);
 
   // ── Derived values ─────────────────────────────────────────────────────────
   const companyDefaultMultiplier = company?.settings?.costMultiplier ?? 1.0;
@@ -1106,12 +1354,12 @@ export default function QuoteBuilderPage() {
     for (const opening of openings) {
       const lines = linesByOpening.get(opening.id) ?? [];
       if (lines.length === 0) continue;
-      const multiplier = itemMultipliers[opening.id] ?? companyDefaultMultiplier;
+      const openingMultiplier = itemMultipliers[opening.id] ?? companyDefaultMultiplier;
       const visibleLines = lines.filter((l) => !l.includedOrSuppressedBy && l.lineType !== 'INCLUDED');
       for (const line of visibleLines) {
+        const lineMultiplierKey = `engine-line:${line.id}`;
         const lineQty = Math.max(1, line.quantity ?? 1);
         const unitNetCost = (line.extendedNetPrice ?? 0) / lineQty;
-        const unitPrice = parseFloat((unitNetCost * multiplier).toFixed(2));
         const syntheticItem: EstimateItemWithFields = {
           id: `engine-line:${line.id}`,
           estimateId: estimateId ?? '',
@@ -1125,6 +1373,7 @@ export default function QuoteBuilderPage() {
           parentItemId: null,
           subcategory: null,
           itemType: line.entityType as string | null,
+          chargeCategory: line.chargeCategory ?? null,
           priceSource: null,
           priceLookupMetadata: null,
           isManualPriceOverride: false,
@@ -1134,6 +1383,9 @@ export default function QuoteBuilderPage() {
           openingQuantity: opening.quantity,
           engineLine: line,
         };
+        const override = getMarkupOverrideMatch(bulkOverrides, syntheticItem);
+        const multiplier = itemMultipliers[lineMultiplierKey] ?? override?.value ?? openingMultiplier;
+        const unitPrice = parseFloat((unitNetCost * multiplier).toFixed(2));
         result.push({
           estimateItem: syntheticItem,
           unitCost: unitNetCost,
@@ -1160,20 +1412,41 @@ export default function QuoteBuilderPage() {
     }
 
     return result;
-  }, [openings, linesByOpening, estimateItems, engineOpeningIds, itemMultipliers, companyDefaultMultiplier, estimateId]);
+  }, [openings, linesByOpening, estimateItems, engineOpeningIds, itemMultipliers, companyDefaultMultiplier, estimateId, bulkOverrides]);
 
   // ── Per-item multiplier callbacks ──────────────────────────────────────────
   const handleUpdateMultiplier = useCallback((itemId: string, multiplier: number) => {
     setItemMultipliers((prev) => ({ ...prev, [itemId]: multiplier }));
   }, []);
 
-  const handleApplyToAll = useCallback((multiplier: number) => {
+  const handleResetMultiplier = useCallback((itemId: string) => {
     setItemMultipliers((prev) => {
       const next = { ...prev };
-      for (const key of Object.keys(next)) next[key] = multiplier;
+      delete next[itemId];
       return next;
     });
   }, []);
+
+  const handleApplyToAll = useCallback((multiplier: number) => {
+    setItemMultipliers(() => {
+      const next: Record<string, number> = {};
+      for (const qo of quotableOpenings) {
+        next[qo.openingId] = multiplier;
+      }
+      for (const opening of openings) {
+        const lines = linesByOpening.get(opening.id) ?? [];
+        for (const line of lines) {
+          if (line.includedOrSuppressedBy || line.lineType === 'INCLUDED') continue;
+          next[`engine-line:${line.id}`] = multiplier;
+        }
+      }
+      for (const item of estimateItems) {
+        if (item.openingId && engineOpeningIds.has(item.openingId)) continue;
+        next[item.id] = multiplier;
+      }
+      return next;
+    });
+  }, [quotableOpenings, openings, linesByOpening, estimateItems, engineOpeningIds]);
 
   const handleResetToDefaults = useCallback(() => {
     setItemMultipliers(() => {
@@ -1185,8 +1458,8 @@ export default function QuoteBuilderPage() {
       // Legacy items
       for (const item of estimateItems) {
         if (item.openingId && engineOpeningIds.has(item.openingId)) continue;
-        const override = findItemOverride(bulkOverrides, item);
-        next[item.id] = override ?? companyDefaultMultiplier;
+        const override = getMarkupOverrideMatch(bulkOverrides, item);
+        next[item.id] = override?.value ?? companyDefaultMultiplier;
       }
       return next;
     });
@@ -1200,6 +1473,7 @@ export default function QuoteBuilderPage() {
 
   // Refresh pricing: engine openings via the rule engine, legacy items via pricing tables.
   const handleRefreshPricingTables = useCallback(async () => {
+    if (!estimateId) return;
     setRefreshingPrices(true);
     try {
       if (quotableOpenings.length > 0) {
@@ -1266,6 +1540,7 @@ export default function QuoteBuilderPage() {
         const saveLineTotal = parseFloat((li.unitPrice * saveQty).toFixed(2));
         return {
           estimateItemId: isEngLine ? null : li.estimateItem.id,
+          displayKey: getLineItemDisplayKey(li.estimateItem),
           itemLabel: li.estimateItem.itemLabel,
           canonicalCode: li.estimateItem.canonicalCode ?? null,
           quantity: saveQty,
@@ -1285,23 +1560,33 @@ export default function QuoteBuilderPage() {
     try {
       // CPQ gate: block quoting non-buildable configurations (Phase 4).
       await assertEstimateBuildable(estimateId);
-      const quote = await createQuote({
-        estimateId,
-        companyId: customerId ?? null,
-        createdByUserId: user.id,
-        quoteType,
-        markupMultiplier: effectiveMarkupMultiplier,
-        subtotal,
-        total,
-        notes: notes.trim() || null,
-        items: buildQuoteItems(),
-      });
+      const quote = savedQuote
+        ? await updateQuoteWithItems(savedQuote.id, {
+            markupMultiplier: effectiveMarkupMultiplier,
+            subtotal,
+            total,
+            notes: notes.trim() || null,
+            displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+            items: buildQuoteItems(),
+          })
+        : await createQuote({
+            estimateId,
+            companyId: customerId ?? null,
+            createdByUserId: user.id,
+            quoteType,
+            markupMultiplier: effectiveMarkupMultiplier,
+            subtotal,
+            total,
+            notes: notes.trim() || null,
+            displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+            items: buildQuoteItems(),
+          });
       setSavedQuote(quote);
       toast({
-        title: 'Quote saved',
-        description: `Quote Q-${quote.id.slice(-8).toUpperCase()} saved as draft.`,
+        title: savedQuote ? 'Quote updated' : 'Quote saved',
+        description: `Quote Q-${quote.id.slice(-8).toUpperCase()} ${savedQuote ? 'updated' : 'saved as draft'}.`,
       });
-      navigate('/app/quotes');
+      navigate(savedQuote ? `/app/quotes/${quote.id}` : '/app/quotes');
     } catch (err) {
       toast({
         title: 'Failed to save quote',
@@ -1311,12 +1596,12 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [estimateId, user, customerId, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, buildQuoteItems, toast, navigate]);
+  }, [estimateId, user, savedQuote, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig, buildQuoteItems, customerId, quoteType, toast, navigate]);
 
   // ── PDF helpers ────────────────────────────────────────────────────────────
   const buildQuoteForPdf = useCallback((): Quote => {
     const now = new Date().toISOString();
-    const base = savedQuote ?? {
+    const base: Quote = savedQuote ?? {
       id: `preview-${Date.now()}`,
       estimateId: estimateId ?? '',
       companyId: customerId ?? null,
@@ -1329,11 +1614,25 @@ export default function QuoteBuilderPage() {
       currency: 'USD',
       notes: notes.trim() || null,
       pricedAsOf: null,
+      sentAt: null,
+      sentToEmail: null,
+      displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
       createdAt: now,
       updatedAt: now,
     };
-    return base;
-  }, [savedQuote, estimateId, customerId, user, quoteType, effectiveMarkupMultiplier, subtotal, total, notes]);
+    return {
+      ...base,
+      estimateId: estimateId ?? base.estimateId,
+      companyId: customerId ?? base.companyId,
+      quoteType,
+      markupMultiplier: effectiveMarkupMultiplier,
+      subtotal,
+      total,
+      notes: notes.trim() || null,
+      displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+      updatedAt: now,
+    };
+  }, [savedQuote, estimateId, customerId, user, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig]);
 
   const buildQuoteItemsForPdf = useCallback((): QuoteItem[] => {
     const now = new Date().toISOString();
@@ -1345,6 +1644,7 @@ export default function QuoteBuilderPage() {
         id: isEngLine ? (li.estimateItem.engineLine?.id ?? li.estimateItem.id) : li.estimateItem.id,
         quoteId: savedQuote?.id ?? 'preview',
         estimateItemId: isEngLine ? null : li.estimateItem.id,
+        displayKey: getLineItemDisplayKey(li.estimateItem),
         itemLabel: li.estimateItem.itemLabel,
         canonicalCode: li.estimateItem.canonicalCode ?? null,
         quantity: saveQty,
@@ -1360,8 +1660,7 @@ export default function QuoteBuilderPage() {
   // ── Reactive PDF data for live preview ────────────────────────────────────
   const pdfQuote = useMemo((): Quote => {
     const now = new Date().toISOString();
-    if (savedQuote) return savedQuote;
-    return {
+    const base: Quote = savedQuote ?? {
       id: `preview-${estimateId}`,
       estimateId: estimateId ?? '',
       companyId: customerId ?? null,
@@ -1374,10 +1673,25 @@ export default function QuoteBuilderPage() {
       currency: 'USD',
       notes: notes.trim() || null,
       pricedAsOf: null,
+      sentAt: null,
+      sentToEmail: null,
+      displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
       createdAt: now,
       updatedAt: now,
     };
-  }, [savedQuote, estimateId, customerId, user?.id, quoteType, effectiveMarkupMultiplier, subtotal, total, notes]);
+    return {
+      ...base,
+      estimateId: estimateId ?? base.estimateId,
+      companyId: customerId ?? base.companyId,
+      quoteType,
+      markupMultiplier: effectiveMarkupMultiplier,
+      subtotal,
+      total,
+      notes: notes.trim() || null,
+      displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+      updatedAt: now,
+    };
+  }, [savedQuote, estimateId, customerId, user?.id, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig]);
 
   const pdfItems = useMemo((): QuoteItem[] => {
     const now = new Date().toISOString();
@@ -1389,6 +1703,7 @@ export default function QuoteBuilderPage() {
         id: isEngLine ? (li.estimateItem.engineLine?.id ?? li.estimateItem.id) : li.estimateItem.id,
         quoteId: savedQuote?.id ?? 'preview',
         estimateItemId: isEngLine ? null : li.estimateItem.id,
+        displayKey: getLineItemDisplayKey(li.estimateItem),
         itemLabel: li.estimateItem.itemLabel,
         canonicalCode: li.estimateItem.canonicalCode ?? null,
         quantity: saveQty,
@@ -1410,30 +1725,125 @@ export default function QuoteBuilderPage() {
     [pdfItems, lineItems]
   );
 
+  const presentationLineOptions = useMemo<QuotePresentationLineOption[]>(
+    () =>
+      lineItems.map((li) => ({
+        displayKey: getLineItemDisplayKey(li.estimateItem),
+        label: li.estimateItem.itemLabel,
+        canonicalCode: li.estimateItem.canonicalCode ?? null,
+        quantity: li.estimateItem.quantity * (li.estimateItem.openingQuantity ?? 1),
+        unitCost: li.unitCost,
+        unitPrice: li.unitPrice,
+        lineTotal: li.lineTotal,
+      })),
+    [lineItems],
+  );
+
+  const quoteCopyItems = useMemo(
+    () =>
+      lineItems.map((li) => {
+        const isEngLine = li.estimateItem.isEngineLineDetail === true;
+        const openingQty = li.estimateItem.openingQuantity ?? 1;
+        const quantity = isEngLine
+          ? li.estimateItem.quantity * openingQty
+          : li.estimateItem.quantity;
+        const rawCategory =
+          li.estimateItem.engineLine?.chargeCategory ??
+          li.estimateItem.chargeCategory ??
+          li.estimateItem.itemType ??
+          null;
+        return {
+          label: li.estimateItem.itemLabel,
+          quantity,
+          unitPrice: li.unitPrice,
+          lineTotal: parseFloat((li.unitPrice * quantity).toFixed(2)),
+          canonicalCode: li.estimateItem.canonicalCode ?? null,
+          category: rawCategory ? LAYER_LABELS[rawCategory] ?? rawCategory : null,
+        };
+      }),
+    [lineItems],
+  );
+
+  const quoteCopyOpenings = useMemo(
+    () =>
+      openings.map((opening) => {
+        const lines = linesByOpening.get(opening.id) ?? [];
+        const specs = openingSpecMap.get(opening.id);
+        return {
+          name: opening.name,
+          quantity: opening.quantity,
+          summary: buildOpeningSpecSummary(lines) || null,
+          door: compactSpecFields(specs?.door),
+          frame: compactSpecFields(specs?.frame),
+        };
+      }),
+    [openings, linesByOpening, openingSpecMap],
+  );
+
+  const handleGeneratePresentationCopy = useCallback(
+    async (request: QuoteCopyGenerationRequest) => {
+      try {
+        return await generateQuoteCopy({
+          target: QUOTE_COPY_FIELD_TARGETS[request.field],
+          audience: request.audience,
+          companyName: company?.name ?? null,
+          quoteType,
+          total: request.audience === 'manufacturer' ? costSubtotal : total,
+          currency: pdfQuote.currency,
+          notes: notes.trim() || null,
+          currentText: request.currentText,
+          userPrompt: request.prompt,
+          items: quoteCopyItems,
+          openings: quoteCopyOpenings,
+        });
+      } catch (err) {
+        toast({
+          title: 'AI copy generation failed',
+          description: err instanceof Error ? err.message : undefined,
+          variant: 'destructive',
+        });
+        throw err;
+      }
+    },
+    [
+      company?.name,
+      costSubtotal,
+      notes,
+      pdfQuote.currency,
+      quoteCopyItems,
+      quoteCopyOpenings,
+      quoteType,
+      toast,
+      total,
+    ],
+  );
+
   const handlePreviewCustomer = useCallback(async () => {
     setPreviewAiSummary(null);
     setPreviewType('customer');
     setIsGeneratingPreviewSummary(true);
     try {
-      const summary = await generateQuoteSummary({
-        companyName: company?.name ?? null,
-        items: pdfItems.map((i) => ({
-          label: i.itemLabel,
-          quantity: i.quantity,
-          lineTotal: i.lineTotal,
-        })),
-        total: pdfQuote.total,
-        currency: pdfQuote.currency,
-        notes: pdfQuote.notes,
-      });
-      setPreviewAiSummary(summary);
+      if (getBlock(displayConfig.customer, 'summary').enabled) {
+        const summary = await generateQuoteSummary({
+          companyName: company?.name ?? null,
+          items: pdfItems.map((i) => ({
+            label: i.itemLabel,
+            quantity: i.quantity,
+            lineTotal: i.lineTotal,
+          })),
+          total: pdfQuote.total,
+          currency: pdfQuote.currency,
+          notes: pdfQuote.notes,
+        });
+        setPreviewAiSummary(summary);
+      }
     } catch (err) {
       console.warn('Preview AI summary failed:', err);
       setPreviewAiSummary(null);
     } finally {
       setIsGeneratingPreviewSummary(false);
     }
-  }, [company, pdfItems, pdfQuote]);
+  }, [company, pdfItems, pdfQuote, displayConfig.customer]);
 
   const handleDownloadCustomer = useCallback(async () => {
     setIsDownloadingCustomer(true);
@@ -1443,23 +1853,31 @@ export default function QuoteBuilderPage() {
 
       let aiSummary: string | null = null;
       try {
-        aiSummary = await generateQuoteSummary({
-          companyName: company?.name ?? null,
-          items: items.map((i) => ({
-            label: i.itemLabel,
-            quantity: i.quantity,
-            lineTotal: i.lineTotal,
-          })),
-          total: quote.total,
-          currency: quote.currency,
-          notes: quote.notes,
-        });
+        if (getBlock(displayConfig.customer, 'summary').enabled) {
+          aiSummary = await generateQuoteSummary({
+            companyName: company?.name ?? null,
+            items: items.map((i) => ({
+              label: i.itemLabel,
+              quantity: i.quantity,
+              lineTotal: i.lineTotal,
+            })),
+            total: quote.total,
+            currency: quote.currency,
+            notes: quote.notes,
+          });
+        }
       } catch (aiErr) {
         console.warn('AI summary skipped:', aiErr);
       }
 
       const blob = await pdf(
-        <CustomerQuotePdf quote={quote} items={items} company={company} aiSummary={aiSummary} />
+        <CustomerQuotePdf
+          quote={quote}
+          items={items}
+          company={company}
+          aiSummary={aiSummary}
+          displayConfig={displayConfig.customer}
+        />
       ).toBlob();
       const name = company?.name ?? 'Customer';
       const date = new Date().toISOString().slice(0, 10);
@@ -1473,7 +1891,7 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsDownloadingCustomer(false);
     }
-  }, [buildQuoteForPdf, buildQuoteItemsForPdf, company, toast]);
+  }, [buildQuoteForPdf, buildQuoteItemsForPdf, company, displayConfig.customer, toast]);
 
   const handleDownloadManufacturer = useCallback(async () => {
     setIsDownloadingManufacturer(true);
@@ -1484,7 +1902,12 @@ export default function QuoteBuilderPage() {
         fields: lineItems[idx]?.estimateItem.fields ?? [],
       }));
       const blob = await pdf(
-        <ManufacturerQuotePdf quote={quote} items={items} company={company} />
+        <ManufacturerQuotePdf
+          quote={quote}
+          items={items}
+          company={company}
+          displayConfig={displayConfig.manufacturer}
+        />
       ).toBlob();
       const name = company?.name ?? 'Manufacturer';
       const date = new Date().toISOString().slice(0, 10);
@@ -1498,7 +1921,7 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsDownloadingManufacturer(false);
     }
-  }, [buildQuoteForPdf, buildQuoteItemsForPdf, lineItems, company, toast]);
+  }, [buildQuoteForPdf, buildQuoteItemsForPdf, lineItems, company, displayConfig.manufacturer, toast]);
 
   const handleDownloadBoth = useCallback(async () => {
     await Promise.all([handleDownloadCustomer(), handleDownloadManufacturer()]);
@@ -1552,12 +1975,14 @@ export default function QuoteBuilderPage() {
                   items={pdfItems}
                   company={company}
                   aiSummary={previewAiSummary}
+                  displayConfig={displayConfig.customer}
                 />
               ) : (
                 <ManufacturerQuotePdf
                   quote={pdfQuote}
                   items={pdfManufacturerItems}
                   company={company}
+                  displayConfig={displayConfig.manufacturer}
                 />
               )}
             </PDFViewer>
@@ -1612,11 +2037,11 @@ export default function QuoteBuilderPage() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => navigate('/app/quotes')}
+              onClick={() => navigate(savedQuote ? `/app/quotes/${savedQuote.id}` : '/app/quotes')}
               className="mb-4 -ml-2"
             >
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Quotes
+              {savedQuote ? 'Back to Quote' : 'Back to Quotes'}
             </Button>
 
             <div className="flex flex-wrap items-start gap-3">
@@ -1626,13 +2051,18 @@ export default function QuoteBuilderPage() {
               <div className="flex-1 min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <h1 className="font-display text-2xl sm:text-3xl tracking-wide">
-                    Quote Builder
+                    {isEditMode ? 'Edit Quote' : 'Quote Builder'}
                   </h1>
                   <span
                     className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${typeBadge.className}`}
                   >
                     {typeBadge.label}
                   </span>
+                  {savedQuote && (
+                    <span className="font-mono text-xs text-muted-foreground">
+                      Q-{savedQuote.id.slice(-8).toUpperCase()}
+                    </span>
+                  )}
                 </div>
                 {company && (
                   <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
@@ -1713,6 +2143,7 @@ export default function QuoteBuilderPage() {
                   itemMultipliers={itemMultipliers}
                   companyDefaultMultiplier={companyDefaultMultiplier}
                   onUpdateMultiplier={handleUpdateMultiplier}
+                  onResetMultiplier={handleResetMultiplier}
                   onQuantityChange={handleOpeningQuantityChange}
                   currency="USD"
                 />
@@ -1737,6 +2168,7 @@ export default function QuoteBuilderPage() {
                   itemMultipliers={itemMultipliers}
                   companyDefaultMultiplier={companyDefaultMultiplier}
                   onUpdateMultiplier={handleUpdateMultiplier}
+                  onResetMultiplier={handleResetMultiplier}
                   onQuantityChange={handleOpeningQuantityChange}
                   currency="USD"
                 />
@@ -1760,6 +2192,7 @@ export default function QuoteBuilderPage() {
                 itemMultipliers={itemMultipliers}
                 companyDefaultMultiplier={companyDefaultMultiplier}
                 onUpdateMultiplier={handleUpdateMultiplier}
+                onResetMultiplier={handleResetMultiplier}
                 onQuantityChange={handleOpeningQuantityChange}
                 currency="USD"
               />
@@ -1785,6 +2218,7 @@ export default function QuoteBuilderPage() {
                 itemMultipliers={itemMultipliers}
                 companyDefaultMultiplier={companyDefaultMultiplier}
                 onUpdateMultiplier={handleUpdateMultiplier}
+                onResetMultiplier={handleResetMultiplier}
                 onQuantityChange={handleOpeningQuantityChange}
                 currency="USD"
               />
@@ -1802,7 +2236,22 @@ export default function QuoteBuilderPage() {
       </div>
 
       {/* ── Sidebar ── */}
-      <div className="w-full shrink-0 border-t bg-muted/5 lg:w-80 lg:border-l lg:border-t-0">
+      <div
+        className="relative w-full shrink-0 border-t bg-muted/5 lg:w-[var(--quote-sidebar-width)] lg:border-l lg:border-t-0"
+        style={sidebarStyle}
+      >
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize quote settings panel"
+          title="Drag to resize quote settings"
+          onPointerDown={handleSidebarResizeStart}
+          className="group absolute inset-y-0 left-0 z-20 hidden w-3 -translate-x-1/2 cursor-col-resize items-center justify-center lg:flex"
+        >
+          <div className="flex h-10 w-4 items-center justify-center rounded-full border bg-background text-muted-foreground shadow-sm transition-colors group-hover:border-primary/50 group-hover:text-primary">
+            <GripVertical className="h-4 w-4" />
+          </div>
+        </div>
         <div className="sticky top-0 overflow-y-auto p-4 sm:p-6">
           <Card>
             <CardHeader className="pb-4">
@@ -1878,6 +2327,16 @@ export default function QuoteBuilderPage() {
 
               <Separator />
 
+              <QuotePresentationControls
+                value={displayConfig}
+                quoteType={quoteType}
+                lineOptions={presentationLineOptions}
+                onChange={setDisplayConfig}
+                onGenerateCopy={handleGeneratePresentationCopy}
+              />
+
+              <Separator />
+
               {/* Save */}
               <Button
                 className="w-full"
@@ -1889,7 +2348,7 @@ export default function QuoteBuilderPage() {
                 ) : (
                   <Save className="mr-2 h-4 w-4" />
                 )}
-                Save Quote
+                {savedQuote ? 'Update Quote' : 'Save Quote'}
               </Button>
 
               {/* Preview & Download buttons */}

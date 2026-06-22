@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { FileCode2, Search, Plus, MoreHorizontal, Users, Factory, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -43,6 +44,10 @@ import {
   createTemplate,
   deleteTemplate,
 } from '@/lib/templates-api';
+import {
+  createDefaultAudienceDisplayConfig,
+  serializeAudienceDisplayConfig,
+} from '@/lib/quote-display';
 import type { Template, TemplateAudience } from '@/types';
 
 export default function TemplatesPage() {
@@ -81,11 +86,15 @@ export default function TemplatesPage() {
     if (!user) return;
     setIsSaving(true);
     try {
+      const audience = formData.get('audience') as TemplateAudience;
       const newTemplate = await createTemplate({
         name: formData.get('name') as string,
-        audience: formData.get('audience') as TemplateAudience,
+        audience,
         description: (formData.get('description') as string) || '',
         matchingRulesJson: null,
+        displayConfigJson: serializeAudienceDisplayConfig(
+          createDefaultAudienceDisplayConfig(audience, formData.get('name') as string),
+        ),
         createdByUserId: user.id,
       });
       setTemplates((prev) => [newTemplate, ...prev]);
@@ -299,9 +308,9 @@ export default function TemplatesPage() {
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuItem asChild>
-                              <a href={`/app/templates/${template.id}`}>
+                              <Link to={`/app/templates/${template.id}`}>
                                 Edit Template
-                              </a>
+                              </Link>
                             </DropdownMenuItem>
                             <DropdownMenuItem>Duplicate</DropdownMenuItem>
                             <DropdownMenuItem

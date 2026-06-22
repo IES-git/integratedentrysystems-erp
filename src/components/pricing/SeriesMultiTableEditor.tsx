@@ -46,6 +46,7 @@ function tabLabel(t: PricingTableSummary): string {
 
 interface SeriesMultiTableEditorProps {
   seriesValue: string;
+  initialTableId?: string;
   fieldValueOptionId?: string;
   category?: 'doors' | 'frames';
   onBack: () => void;
@@ -57,6 +58,7 @@ interface SeriesMultiTableEditorProps {
 
 export function SeriesMultiTableEditor({
   seriesValue,
+  initialTableId,
   fieldValueOptionId,
   category = 'doors',
   onBack,
@@ -91,6 +93,7 @@ export function SeriesMultiTableEditor({
       const data = await listPricingTablesForSeries(category, seriesValue);
       setTables(data);
       setActiveId((prev) => {
+        if (initialTableId && data.find((t) => t.id === initialTableId)) return initialTableId;
         if (prev && data.find((t) => t.id === prev)) return prev;
         return data[0]?.id ?? null;
       });
@@ -99,7 +102,7 @@ export function SeriesMultiTableEditor({
     } finally {
       setLoading(false);
     }
-  }, [seriesValue, category, toast]);
+  }, [seriesValue, initialTableId, category, toast]);
 
   useEffect(() => { void load(); }, [load]);
 

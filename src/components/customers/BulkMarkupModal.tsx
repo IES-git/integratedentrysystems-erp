@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { Plus, X, Save, Percent, Info } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { Check, Loader2, Plus, X, Save, Percent, Info } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -11,9 +11,32 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { updateCompanySettings } from '@/lib/companies-api';
 import type { CompanyWithContactCount } from '@/lib/companies-api';
+import { cn } from '@/lib/utils';
+import { listCustomerMarkupTargets } from '@/lib/customer-markup-targets-api';
+import {
+  getMarkupTargetKindLabel,
+  getMarkupTargetLabel,
+  type MarkupTargetCatalog,
+} from '@/lib/customer-markups';
 
 interface BulkMarkupModalProps {
   open: boolean;
@@ -28,6 +51,12 @@ interface RowState {
   overrides: Record<string, string>;
   isDirty: boolean;
 }
+
+const EMPTY_TARGET_CATALOG: MarkupTargetCatalog = {
+  categories: [],
+  subcategories: [],
+  items: [],
+};
 
 function MultiplierInput({
   value,
@@ -58,6 +87,237 @@ function MultiplierInput({
   );
 }
 
+type TargetMode = 'category' | 'subcategory' | 'item';
+
+function AddMarkupTargetPicker({
+  catalog,
+  existingKeys,
+  loading,
+  onAdd,
+}: {
+  catalog: MarkupTargetCatalog;
+  existingKeys: string[];
+  loading: boolean;
+  onAdd: (key: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<TargetMode>('category');
+  const [categorySlug, setCategorySlug] = useState('');
+  const [subcategorySlug, setSubcategorySlug] = useState('__all__');
+
+  const existingKeySet = useMemo(
+    () => new Set(existingKeys.map((key) => key.toLowerCase())),
+    [existingKeys],
+  );
+
+  const activeCategorySlug = categorySlug || catalog.categories[0]?.slug || '';
+  const categorySubcategories = catalog.subcategories.filter(
+    (subcategory) => subcategory.categorySlug === activeCategorySlug,
+  );
+  const visibleItems = catalog.items.filter((item) => {
+    if (item.categorySlug !== activeCategorySlug) return false;
+    if (subcategorySlug === '__all__') return true;
+    return item.subcategorySlug === subcategorySlug;
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    if (!categorySlug && catalog.categories[0]) {
+      setCategorySlug(catalog.categories[0].slug);
+    }
+  }, [open, categorySlug, catalog.categories]);
+
+  const addTarget = (key: string) => {
+    if (existingKeySet.has(key.toLowerCase())) return;
+    onAdd(key);
+    setOpen(false);
+  };
+
+  const modeButton = (value: TargetMode, label: string) => (
+    <button
+      type="button"
+      className={cn(
+        'rounded px-2 py-1 text-xs font-medium transition-colors',
+        mode === value
+          ? 'bg-background text-foreground shadow-sm'
+          : 'text-muted-foreground hover:text-foreground',
+      )}
+      onClick={() => setMode(value)}
+    >
+      {label}
+    </button>
+  );
+
+  const renderCategorySelect = () => (
+    <Select
+      value={activeCategorySlug}
+      onValueChange={(value) => {
+        setCategorySlug(value);
+        setSubcategorySlug('__all__');
+      }}
+      disabled={catalog.categories.length === 0}
+    >
+      <SelectTrigger className="h-8 text-xs">
+        <SelectValue placeholder="Category" />
+      </SelectTrigger>
+      <SelectContent>
+        {catalog.categories.map((category) => (
+          <SelectItem key={category.key} value={category.slug}>
+            {category.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+          Add Item
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[420px] p-0" align="end">
+        <div className="border-b p-3">
+          <div className="grid grid-cols-3 rounded-md border bg-muted/40 p-1">
+            {modeButton('category', 'Category')}
+            {modeButton('subcategory', 'Subcategory')}
+            {modeButton('item', 'Item')}
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading targets…
+          </div>
+        ) : mode === 'category' ? (
+          <Command>
+            <CommandInput placeholder="Search categories…" className="h-9" />
+            <CommandList>
+              <CommandEmpty>No categories found.</CommandEmpty>
+              <CommandGroup>
+                {catalog.categories.map((category) => {
+                  const isExisting = existingKeySet.has(category.key.toLowerCase());
+                  return (
+                    <CommandItem
+                      key={category.key}
+                      value={`${category.label} ${category.slug}`}
+                      disabled={isExisting}
+                      onSelect={() => addTarget(category.key)}
+                    >
+                      <Check className={cn('mr-2 h-4 w-4', isExisting ? 'opacity-100' : 'opacity-0')} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm">{category.label}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {category.itemCount} {category.itemCount === 1 ? 'target' : 'targets'}
+                          {category.subcategoryCount > 0 ? ` · ${category.subcategoryCount} subcategories` : ''}
+                        </div>
+                      </div>
+                    </CommandItem>
+                  );
+                })}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        ) : mode === 'subcategory' ? (
+          <div className="space-y-3 p-3">
+            {renderCategorySelect()}
+            <div className="max-h-[260px] overflow-y-auto rounded-md border">
+              {categorySubcategories.length === 0 ? (
+                <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+                  No subcategories found.
+                </div>
+              ) : (
+                categorySubcategories.map((subcategory) => {
+                  const isExisting = existingKeySet.has(subcategory.key.toLowerCase());
+                  return (
+                    <button
+                      key={subcategory.key}
+                      type="button"
+                      disabled={isExisting}
+                      className="flex w-full items-center gap-3 border-b px-3 py-2.5 text-left last:border-b-0 hover:bg-accent disabled:cursor-default disabled:opacity-60"
+                      onClick={() => addTarget(subcategory.key)}
+                    >
+                      <Check className={cn('h-4 w-4 shrink-0', isExisting ? 'opacity-100' : 'opacity-0')} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">{subcategory.label}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {subcategory.itemCount} {subcategory.itemCount === 1 ? 'target' : 'targets'}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3 p-3">
+            <div className="grid grid-cols-2 gap-2">
+              {renderCategorySelect()}
+              <Select
+                value={subcategorySlug}
+                onValueChange={setSubcategorySlug}
+                disabled={categorySubcategories.length === 0}
+              >
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue placeholder="Subcategory" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All subcategories</SelectItem>
+                  {categorySubcategories.map((subcategory) => (
+                    <SelectItem key={subcategory.key} value={subcategory.slug}>
+                      {subcategory.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="rounded-md border">
+              <Command>
+                <CommandInput placeholder="Search items…" className="h-9" />
+                <CommandList>
+                  <CommandEmpty>No items found.</CommandEmpty>
+                  <CommandGroup>
+                    {visibleItems.map((item) => {
+                      const isExisting = existingKeySet.has(item.key.toLowerCase());
+                      return (
+                        <CommandItem
+                          key={item.key}
+                          value={`${item.label} ${item.canonicalCode}`}
+                          disabled={isExisting}
+                          onSelect={() => addTarget(item.key)}
+                        >
+                          <Check className={cn('mr-2 h-4 w-4', isExisting ? 'opacity-100' : 'opacity-0')} />
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm">{item.label}</div>
+                            <div className="truncate font-mono text-[11px] text-muted-foreground">
+                              {item.canonicalCode}
+                              <span className="font-sans">
+                                {item.usageCount > 0 ? ` · ${item.usageCount} uses` : ''}
+                              </span>
+                            </div>
+                          </div>
+                        </CommandItem>
+                      );
+                    })}
+                  </CommandGroup>
+                </CommandList>
+              </Command>
+            </div>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function BulkMarkupModal({
   open,
   onOpenChange,
@@ -67,10 +327,9 @@ export function BulkMarkupModal({
   const { toast } = useToast();
   const [rows, setRows] = useState<RowState[]>([]);
   const [itemColumns, setItemColumns] = useState<string[]>([]);
-  const [newColumnName, setNewColumnName] = useState('');
-  const [isAddingColumn, setIsAddingColumn] = useState(false);
+  const [targetCatalog, setTargetCatalog] = useState<MarkupTargetCatalog>(EMPTY_TARGET_CATALOG);
+  const [isLoadingTargets, setIsLoadingTargets] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const newColumnInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -91,15 +350,34 @@ export function BulkMarkupModal({
         isDirty: false,
       }))
     );
-    setIsAddingColumn(false);
-    setNewColumnName('');
   }, [open, companies]);
 
   useEffect(() => {
-    if (isAddingColumn) {
-      setTimeout(() => newColumnInputRef.current?.focus(), 50);
-    }
-  }, [isAddingColumn]);
+    if (!open) return;
+
+    let cancelled = false;
+    setIsLoadingTargets(true);
+    listCustomerMarkupTargets()
+      .then((catalog) => {
+        if (!cancelled) setTargetCatalog(catalog);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        toast({
+          title: 'Error loading markup targets',
+          description: err instanceof Error ? err.message : 'Unable to load categories and items.',
+          variant: 'destructive',
+        });
+        setTargetCatalog(EMPTY_TARGET_CATALOG);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingTargets(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, toast]);
 
   const updateDefault = (companyId: string, value: string) => {
     setRows((prev) =>
@@ -124,19 +402,20 @@ export function BulkMarkupModal({
     );
   };
 
-  const addColumn = () => {
-    const trimmed = newColumnName.trim();
-    if (!trimmed) {
-      setIsAddingColumn(false);
-      return;
-    }
+  const addColumn = (key: string) => {
+    const trimmed = key.trim();
+    if (!trimmed) return;
+
     if (itemColumns.map((k) => k.toLowerCase()).includes(trimmed.toLowerCase())) {
       toast({ title: 'Column already exists', variant: 'destructive' });
       return;
     }
-    setItemColumns((prev) => [...prev, trimmed]);
-    setNewColumnName('');
-    setIsAddingColumn(false);
+
+    setItemColumns((prev) =>
+      [...prev, trimmed].sort((a, b) =>
+        getMarkupTargetLabel(a, targetCatalog).localeCompare(getMarkupTargetLabel(b, targetCatalog))
+      )
+    );
   };
 
   const removeColumn = (key: string) => {
@@ -202,8 +481,8 @@ export function BulkMarkupModal({
           <div>
             <DialogTitle className="font-display text-xl">Bulk Markup Manager</DialogTitle>
             <DialogDescription className="mt-1 max-w-xl">
-              Set a default multiplier per customer, then add item-specific overrides in columns.
-              Blank item cells inherit the default.
+              Set a default multiplier per customer, then add category, subcategory, or item
+              overrides in columns. Blank cells inherit the default.
             </DialogDescription>
           </div>
           <div className="ml-4 flex shrink-0 items-center gap-2">
@@ -223,7 +502,7 @@ export function BulkMarkupModal({
           </div>
           <div className="flex items-center gap-1.5">
             <Info className="h-3 w-3" />
-            <span>Leave item cells blank to inherit the customer's default</span>
+            <span>Leave override cells blank to inherit the customer's default</span>
           </div>
         </div>
 
@@ -251,16 +530,24 @@ export function BulkMarkupModal({
                 {itemColumns.map((col) => (
                   <th
                     key={col}
-                    className="min-w-[130px] border-b border-r px-3 py-2.5 text-center text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                    className="min-w-[150px] border-b border-r px-3 py-2.5 text-center text-xs font-semibold uppercase tracking-wide text-muted-foreground"
                   >
                     <div className="flex items-center justify-center gap-1">
-                      <span className="truncate max-w-[90px]" title={col}>
-                        {col}
-                      </span>
+                      <div className="min-w-0">
+                        <span
+                          className="block max-w-[100px] truncate text-foreground"
+                          title={getMarkupTargetLabel(col, targetCatalog)}
+                        >
+                          {getMarkupTargetLabel(col, targetCatalog)}
+                        </span>
+                        <span className="block text-[9px] font-medium normal-case text-muted-foreground">
+                          {getMarkupTargetKindLabel(col)}
+                        </span>
+                      </div>
                       <button
                         onClick={() => removeColumn(col)}
                         className="shrink-0 rounded text-muted-foreground/50 transition-colors hover:text-destructive"
-                        title={`Remove ${col} column`}
+                        title={`Remove ${getMarkupTargetLabel(col, targetCatalog)} column`}
                       >
                         <X className="h-3 w-3" />
                       </button>
@@ -270,53 +557,12 @@ export function BulkMarkupModal({
 
                 {/* Add column */}
                 <th className="min-w-[150px] border-b px-3 py-2.5">
-                  {isAddingColumn ? (
-                    <div className="flex items-center gap-1">
-                      <Input
-                        ref={newColumnInputRef}
-                        className="h-7 w-24 text-xs"
-                        placeholder="Item name…"
-                        value={newColumnName}
-                        onChange={(e) => setNewColumnName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') addColumn();
-                          if (e.key === 'Escape') {
-                            setIsAddingColumn(false);
-                            setNewColumnName('');
-                          }
-                        }}
-                      />
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 w-7 p-0 text-green-600 hover:text-green-700"
-                        onClick={addColumn}
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 w-7 p-0"
-                        onClick={() => {
-                          setIsAddingColumn(false);
-                          setNewColumnName('');
-                        }}
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 gap-1 text-xs text-muted-foreground hover:text-foreground"
-                      onClick={() => setIsAddingColumn(true)}
-                    >
-                      <Plus className="h-3 w-3" />
-                      Add Item
-                    </Button>
-                  )}
+                  <AddMarkupTargetPicker
+                    catalog={targetCatalog}
+                    existingKeys={itemColumns}
+                    loading={isLoadingTargets}
+                    onAdd={addColumn}
+                  />
                 </th>
               </tr>
             </thead>

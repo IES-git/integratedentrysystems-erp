@@ -86,9 +86,76 @@ function mapCell(row: Record<string, unknown>): PricingCell {
   };
 }
 
+export interface PricingTableLibraryRow {
+  id: string;
+  name: string;
+  category: PricingTable['category'];
+  seriesValue: string;
+  kind: PricingTable['kind'];
+  selectionCriteria: PricingTable['selectionCriteria'];
+  description: string | null;
+  rowCount: number;
+  columnCount: number;
+  lastUpdatedAt: string;
+  vendors: { id: string; name: string }[];
+}
+
 // ---------------------------------------------------------------------------
 // Series list
 // ---------------------------------------------------------------------------
+
+/**
+ * Returns every pricing table with the light metadata needed for the pricing
+ * library view. The editors still load the full grid on demand.
+ */
+export async function listPricingTableLibrary(): Promise<PricingTableLibraryRow[]> {
+  const { data, error } = await supabase
+    .from('pricing_tables')
+    .select(`
+      id,
+      category,
+      series_value,
+      kind,
+      selection_criteria,
+      name,
+      description,
+      updated_at,
+      pricing_table_vendors (
+        company_id,
+        companies ( id, name )
+      ),
+      pricing_columns ( id ),
+      pricing_rows ( id )
+    `)
+    .order('category', { ascending: true })
+    .order('series_value', { ascending: true })
+    .order('name', { ascending: true });
+
+  if (error) throw new Error(error.message);
+
+  return (data ?? []).map((t) => {
+    const vendors = (t.pricing_table_vendors ?? []).map(
+      (v: { company_id: string; companies: { id: string; name: string } | null }) => ({
+        id: v.company_id,
+        name: v.companies?.name ?? '',
+      }),
+    );
+
+    return {
+      id: t.id as string,
+      name: t.name as string,
+      category: t.category as PricingTable['category'],
+      seriesValue: t.series_value as string,
+      kind: (t.kind as PricingTable['kind']) ?? 'base',
+      selectionCriteria: (t.selection_criteria as PricingTable['selectionCriteria']) ?? {},
+      description: (t.description as string | null) ?? null,
+      rowCount: (t.pricing_rows ?? []).length,
+      columnCount: (t.pricing_columns ?? []).length,
+      lastUpdatedAt: t.updated_at as string,
+      vendors,
+    };
+  });
+}
 
 /**
  * Returns all door series, merging two sources:
