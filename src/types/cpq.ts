@@ -209,6 +209,8 @@ export interface PriceBookDocument {
   sourceFilePath: string | null;
   sourceFileHash: string | null;
   pageCount: number | null;
+  ingestionProfileKey?: string | null;
+  ingestionProfileVersion?: string | null;
   supersedesId: string | null;
   status: PriceBookStatus;
   reviewStatus: ReviewStatus;

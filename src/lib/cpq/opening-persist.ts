@@ -52,6 +52,7 @@ async function saveComponentItems(
       openingId,
       parentItemId: null,
       itemType: comp.entityType,
+      manufacturerId: comp.manufacturerId ?? null,
     });
     // Record draft-id -> real estimate_items.id so engine lines persist a valid
     // component_id FK (instead of null) — the spec component keeps its draft id.
@@ -227,7 +228,7 @@ export async function loadOpeningDraft(openingId: string): Promise<OpeningDraft 
   // 2. Lossy reconstruction from estimate_items + item_fields.
   const { data: items } = await supabase
     .from('estimate_items')
-    .select('id, item_label, canonical_code, quantity, item_type, item_fields(*)')
+    .select('id, item_label, canonical_code, quantity, item_type, manufacturer_id, item_fields(*)')
     .eq('opening_id', openingId)
     .is('parent_item_id', null)
     .order('sort_order', { ascending: true });
@@ -251,8 +252,11 @@ export async function loadOpeningDraft(openingId: string): Promise<OpeningDraft 
       id: item.id as string,
       entityType: (() => {
         switch (item.item_type) {
+          case 'door':
           case 'doors': return 'door';
+          case 'frame':
           case 'frames': return 'frame';
+          case 'panel':
           case 'panels': return 'panel';
           default: return 'specialty';
         }
@@ -260,6 +264,8 @@ export async function loadOpeningDraft(openingId: string): Promise<OpeningDraft 
       label: item.item_label as string,
       familyCode: (item.canonical_code as string | null) ?? null,
       quantity: Math.max(1, (item.quantity as number) ?? 1),
+      manufacturerId: (item.manufacturer_id as string | null) ?? null,
+      priceBookDocumentId: null,
       fields,
     };
     if (comp.entityType === 'door') doors.push(comp);
@@ -288,8 +294,8 @@ export async function loadOpeningDraft(openingId: string): Promise<OpeningDraft 
     estimateId: openingRow.estimate_id as string,
     name: openingRow.name as string,
     quantity: openingRow.quantity as number,
-    doors: doors.length ? doors : [{ id: `c${Date.now()}`, entityType: 'door', label: 'Door', familyCode: null, quantity: 1, fields: {} }],
-    frames: frames.length ? frames : [{ id: `c${Date.now() + 1}`, entityType: 'frame', label: 'Frame', familyCode: null, quantity: 1, fields: {} }],
+    doors: doors.length ? doors : [{ id: `c${Date.now()}`, entityType: 'door', label: 'Door', familyCode: null, quantity: 1, manufacturerId: null, priceBookDocumentId: null, fields: {} }],
+    frames: frames.length ? frames : [{ id: `c${Date.now() + 1}`, entityType: 'frame', label: 'Frame', familyCode: null, quantity: 1, manufacturerId: null, priceBookDocumentId: null, fields: {} }],
     panels,
     lites,
     hardware,
@@ -428,8 +434,9 @@ export async function saveOpeningDraft(
  */
 async function pinEstimatePricing(estimateId: string, options: Omit<EngineOptions, 'persist'>): Promise<void> {
   try {
-    const update: Record<string, unknown> = {};
-    if (options.priceBookDocumentId) update.price_book_id = options.priceBookDocumentId;
+    const update: Record<string, unknown> = {
+      price_book_id: options.priceBookDocumentId ?? null,
+    };
     update.priced_as_of = options.pricedAsOf ?? new Date().toISOString().slice(0, 10);
     await supabase.from('estimates').update(update).eq('id', estimateId);
   } catch {
@@ -449,6 +456,14 @@ async function writeResolutionRevision(
   options: Omit<EngineOptions, 'persist'>,
 ): Promise<void> {
   try {
+    const componentPriceBooks = [...draft.doors, ...draft.frames, ...draft.panels]
+      .filter((component) => component.manufacturerId || component.priceBookDocumentId)
+      .map((component) => ({
+        componentId: component.id,
+        entityType: component.entityType,
+        manufacturerId: component.manufacturerId ?? null,
+        priceBookDocumentId: component.priceBookDocumentId ?? null,
+      }));
     await supabase.from('opening_resolution_revision').insert({
       opening_id: openingId,
       estimate_id: estimateId,
@@ -459,7 +474,7 @@ async function writeResolutionRevision(
       input_spec: draft as unknown as Record<string, unknown>,
       candidates: [],
       estimator_selection_id: null,
-      resolved_config: {},
+      resolved_config: { componentPriceBooks },
     });
   } catch {
     // Non-fatal — the resolution-revision table may not be provisioned yet.
@@ -557,4 +572,3 @@ export async function repriceSpecOpening(
   await syncEstimateTotal(estimateId);
   return true;
 }
-

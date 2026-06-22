@@ -12,6 +12,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { interpretGridCell } from './normalize.js';
 
 /**
  * Parse bytes from an XLSX or CSV file into an array of sheet objects.
@@ -96,10 +97,8 @@ export function extractGridFromSheet(sheet, mapping) {
 
     for (let ci = 0; ci < colIndices.length; ci++) {
       const raw = sheetRow[colIndices[ci]];
-      const price = raw !== null && raw !== undefined ? parseFloat(String(raw).replace(/[^0-9.\-]/g, '')) : NaN;
-      if (!isNaN(price) && isFinite(price)) {
-        cells.push({ row: ri, col: ci, price });
-      }
+      const interpreted = interpretGridCell(raw);
+      if (interpreted) cells.push({ row: ri, col: ci, ...interpreted });
     }
   }
 

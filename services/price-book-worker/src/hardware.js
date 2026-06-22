@@ -22,8 +22,10 @@
 // duplicates) -> TABLE vs CALC (linear_hardware_rule for weatherstrip/sweeps/
 // thresholds/kick plates). Everything lands UNREVIEWED behind proposals.
 
+import { createHash } from 'node:crypto';
 import * as XLSX from 'xlsx';
 import { ensureDraftDocument } from './compile.js';
+import { identifyPriceBookProfile } from './profiles.js';
 
 const BUCKET = 'price-book-files';
 
@@ -209,6 +211,364 @@ function productKey(category, manufacturer, internalGroup, description) {
   return `${category}|${manufacturer ?? ''}|${head}`;
 }
 
+/** Read one normalized-master sheet using the first row containing `keyHeader`. */
+function readNormalizedSheet(wb, sheetName, keyHeader) {
+  const ws = wb.Sheets[sheetName];
+  if (!ws) return [];
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, blankrows: false });
+  const headerIndex = aoa.findIndex((row) =>
+    (row ?? []).some((value) => String(value ?? '').trim() === keyHeader));
+  if (headerIndex < 0) return [];
+  const headers = (aoa[headerIndex] ?? []).map((value) => String(value ?? '').trim());
+  return aoa.slice(headerIndex + 1).flatMap((row) => {
+    const out = {};
+    let nonBlank = false;
+    for (let i = 0; i < headers.length; i++) {
+      const key = headers[i];
+      if (!key) continue;
+      const value = row?.[i] ?? null;
+      out[key] = value;
+      if (value !== null && value !== undefined && String(value).trim() !== '') nonBlank = true;
+    }
+    return nonBlank ? [out] : [];
+  });
+}
+
+/** True for Hardware_Normalized_Ingestion_Master.xlsx, not the old raw dump. */
+export function isNormalizedHardwareWorkbook(wb) {
+  const required = ['Product Master', 'Price Records', 'Ingestion View', 'Product Attributes', 'Prep Crosswalk'];
+  return required.every((name) => wb.SheetNames.includes(name));
+}
+
+function normalizedText(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text && text.toLowerCase() !== 'unknown' ? text : null;
+}
+
+function normalizedBool(value) {
+  if (typeof value === 'boolean') return value;
+  const text = String(value ?? '').trim().toLowerCase();
+  if (['true', 'yes', 'y', '1'].includes(text)) return true;
+  if (['false', 'no', 'n', '0'].includes(text)) return false;
+  return null;
+}
+
+function normalizedConfidence(value) {
+  switch (String(value ?? '').trim().toUpperCase()) {
+    case 'HIGH': return 0.95;
+    case 'MEDIUM': return 0.75;
+    case 'SOURCE': return 0.7;
+    case 'LOW': return 0.4;
+    default: return 0.6;
+  }
+}
+
+function normalizedUom(value) {
+  const text = String(value ?? 'EA').trim().toUpperCase();
+  if (text === 'EA' || text === 'EACH') return 'EACH';
+  if (text === 'LF' || text === 'FT' || text === 'FOOT') return 'FT';
+  return text || 'EACH';
+}
+
+function positiveNumber(value) {
+  const parsed = num(value);
+  return parsed != null && parsed > 0 ? parsed : null;
+}
+
+export function normalizedPriceReviewStatus(product, price, importReady = null) {
+  const ready = String(product?.import_status ?? '').trim().toUpperCase() === 'READY';
+  const priced = String(price?.price_status ?? '').trim().toUpperCase() === 'PRICED';
+  const conflict = normalizedBool(price?.conflict_flag) === true;
+  const net = positiveNumber(price?.recommended_net_unit) ?? positiveNumber(price?.computed_net_unit);
+  const approvedByWorkbook = importReady == null
+    ? ready && priced && !conflict
+    : importReady === true && !conflict;
+  return approvedByWorkbook && net != null ? 'APPROVED' : 'NEEDS_REVIEW';
+}
+
+/** Pure preflight summary used by tests and operator tooling before DB writes. */
+export function summarizeNormalizedHardwareWorkbook(wb) {
+  if (!isNormalizedHardwareWorkbook(wb)) {
+    return { valid: false, errors: ['Required normalized hardware sheets are missing.'] };
+  }
+  const products = readNormalizedSheet(wb, 'Product Master', 'product_id');
+  const prices = readNormalizedSheet(wb, 'Price Records', 'price_id');
+  const ingestionRows = readNormalizedSheet(wb, 'Ingestion View', 'import_ready');
+  const attributes = readNormalizedSheet(wb, 'Product Attributes', 'attribute_id');
+  const prepCrosswalk = readNormalizedSheet(wb, 'Prep Crosswalk', 'subcategory_id');
+  const qaRows = readNormalizedSheet(wb, 'QA Issues', 'issue_id');
+  const productById = new Map(products.map((row) => [normalizedText(row.product_id), row]));
+  const importReadyByPriceId = new Map(
+    ingestionRows.map((row) => [normalizedText(row.price_id), normalizedBool(row.import_ready) === true]),
+  );
+  let approvedPrices = 0;
+  let reviewPrices = 0;
+  for (const price of prices) {
+    const status = normalizedPriceReviewStatus(
+      productById.get(normalizedText(price.product_id)),
+      price,
+      importReadyByPriceId.get(normalizedText(price.price_id)) ?? false,
+    );
+    if (status === 'APPROVED') approvedPrices++;
+    else reviewPrices++;
+  }
+  const errors = [];
+  if (products.length === 0) errors.push('Product Master contains no product rows.');
+  if (prices.length === 0) errors.push('Price Records contains no price rows.');
+  if (prepCrosswalk.length === 0) errors.push('Prep Crosswalk contains no mapping rows.');
+  return {
+    valid: errors.length === 0,
+    errors,
+    products: products.length,
+    prices: prices.length,
+    approvedPrices,
+    reviewPrices,
+    attributes: attributes.length,
+    prepCrosswalk: prepCrosswalk.length,
+    workbookQaIssues: qaRows.length,
+  };
+}
+
+async function insertChunks(sb, table, rows, size = 500) {
+  for (let i = 0; i < rows.length; i += size) {
+    const { error } = await sb.from(table).insert(rows.slice(i, i + size));
+    if (error) throw new Error(`${table} insert failed: ${error.message}`);
+  }
+}
+
+/**
+ * Deterministic importer for Hardware_Normalized_Ingestion_Master.xlsx.
+ *
+ * The workbook is an authoritative full catalog snapshot, so importing it
+ * replaces the prior shared hardware catalog. READY/PRICED rows become approved
+ * prices; REVIEW, UNPRICED, conflicts, and non-positive prices remain explicit
+ * NEEDS_REVIEW rows and never silently become zero.
+ */
+async function runIngestNormalizedHardware(sb, book, wb) {
+  const products = readNormalizedSheet(wb, 'Product Master', 'product_id');
+  const prices = readNormalizedSheet(wb, 'Price Records', 'price_id');
+  const ingestionRows = readNormalizedSheet(wb, 'Ingestion View', 'import_ready');
+  const attributes = readNormalizedSheet(wb, 'Product Attributes', 'attribute_id');
+  const prepCrosswalk = readNormalizedSheet(wb, 'Prep Crosswalk', 'subcategory_id');
+  const qaRows = readNormalizedSheet(wb, 'QA Issues', 'issue_id');
+
+  if (products.length === 0 || prices.length === 0) {
+    throw new Error('Normalized hardware workbook is missing Product Master or Price Records data.');
+  }
+
+  const documentId = await ensureDraftDocument(sb, book);
+
+  // Full-master replacement. FKs on estimate/linear rows are SET NULL by the
+  // schema, matching the existing normalized-master reseed migration.
+  await sb.from('linear_hardware_rule').delete().not('id', 'is', null);
+  await sb.from('hardware_product').delete().not('id', 'is', null);
+  await sb.from('hardware_price_book').delete().not('id', 'is', null);
+  await sb.from('hardware_prep_crosswalk').delete().not('id', 'is', null);
+
+  const { data: hpb, error: hpbErr } = await sb.from('hardware_price_book').insert({
+    supplier_id: book.company_id ?? null,
+    supplier_name: 'Mixed (normalized)',
+    title: book.name || 'Hardware Normalized Ingestion Master',
+    effective_date: book.effective_date ?? null,
+    source_file: book.original_file_name ?? book.source_file_url,
+    review_status: 'UNREVIEWED',
+  }).select('id').single();
+  if (hpbErr || !hpb) throw new Error(`hardware_price_book insert failed: ${hpbErr?.message}`);
+
+  const productBySourceId = new Map();
+  const productRowBySourceId = new Map();
+  const variantBySourceId = new Map();
+  const importReadyByPriceId = new Map(
+    ingestionRows.map((row) => [normalizedText(row.price_id), normalizedBool(row.import_ready) === true]),
+  );
+  const counts = {
+    products: 0,
+    variants: 0,
+    attributes: 0,
+    prices: 0,
+    approvedPrices: 0,
+    reviewPrices: 0,
+    prepCrosswalk: 0,
+    linearRules: 0,
+    workbookQaIssues: qaRows.length,
+  };
+
+  for (const product of products) {
+    const sourceId = normalizedText(product.product_id);
+    if (!sourceId) continue;
+    const { data: inserted, error } = await sb.from('hardware_product').insert({
+      category: normalizedText(product.category_id) ?? 'unclassified',
+      subcategory: normalizedText(product.subcategory_id),
+      manufacturer_id: null,
+      manufacturer_name: normalizedText(product.manufacturer_or_brand),
+      product_family: normalizedText(product.category_name),
+      model: normalizedText(product.part_number) ??
+        normalizedText(product.manufacturer_number) ??
+        normalizedText(product.customer_part_number),
+      description: normalizedText(product.description) ?? sourceId,
+      active: true,
+      source_row_ref: sourceId,
+      source_confidence: normalizedConfidence(product.data_confidence),
+    }).select('id').single();
+    if (error || !inserted) throw new Error(`hardware_product insert failed (${sourceId}): ${error?.message}`);
+    productBySourceId.set(sourceId, inserted.id);
+    productRowBySourceId.set(sourceId, product);
+    counts.products++;
+
+    const ratingParts = [
+      normalizedText(product.rating_text),
+      normalizedBool(product.fire_rated) ? 'Fire rated' : null,
+      normalizedBool(product.wind_rated) ? 'Wind rated' : null,
+    ].filter(Boolean);
+    const { data: variant, error: variantError } = await sb.from('hardware_variant').insert({
+      hardware_product_id: inserted.id,
+      sku: normalizedText(product.part_number) ??
+        normalizedText(product.manufacturer_number) ??
+        normalizedText(product.customer_part_number),
+      function: normalizedText(product.function),
+      finish: normalizedText(product.finish_code) ?? normalizedText(product.finish_description),
+      size: normalizedText(product.size_text),
+      hand: normalizedText(product.handing),
+      voltage: normalizedText(product.voltage),
+      rating: ratingParts.length > 0 ? [...new Set(ratingParts)].join('; ') : null,
+      material: normalizedText(product.material),
+      option_attributes: {
+        normalized_product_id: sourceId,
+        import_status: normalizedText(product.import_status),
+        width_in: num(product.width_in),
+        height_in: num(product.height_in),
+        duty_grade: normalizedText(product.duty_grade),
+        default_price_basis: normalizedText(product.default_price_basis),
+        pioneer_door_prep_family: normalizedText(product.pioneer_door_prep_family),
+        pioneer_frame_prep_family: normalizedText(product.pioneer_frame_prep_family),
+        template_required: normalizedText(product.template_required),
+        canonical_key: normalizedText(product.canonical_key),
+      },
+    }).select('id').single();
+    if (variantError || !variant) throw new Error(`hardware_variant insert failed (${sourceId}): ${variantError?.message}`);
+    variantBySourceId.set(sourceId, variant.id);
+    counts.variants++;
+  }
+
+  const attributeRows = [];
+  for (const attribute of attributes) {
+    const sourceId = normalizedText(attribute.product_id);
+    const productId = sourceId ? productBySourceId.get(sourceId) : null;
+    const variantId = sourceId ? variantBySourceId.get(sourceId) : null;
+    const name = normalizedText(attribute.attribute_name);
+    const value = normalizedText(attribute.attribute_value);
+    if (!productId || !name || value == null) continue;
+    attributeRows.push({
+      hardware_product_id: productId,
+      hardware_variant_id: variantId ?? null,
+      attr_name: name,
+      attr_value: value,
+      attr_unit: normalizedText(attribute.unit),
+      source_text: `Hardware normalized master row ${attribute.source_row ?? ''}`.trim(),
+    });
+  }
+  await insertChunks(sb, 'hardware_attribute', attributeRows);
+  counts.attributes = attributeRows.length;
+
+  const priceRows = [];
+  for (const price of prices) {
+    const sourceId = normalizedText(price.product_id);
+    const variantId = sourceId ? variantBySourceId.get(sourceId) : null;
+    if (!variantId) continue;
+    const product = productRowBySourceId.get(sourceId);
+    const reviewStatus = normalizedPriceReviewStatus(
+      product,
+      price,
+      importReadyByPriceId.get(normalizedText(price.price_id)) ?? false,
+    );
+    const net = positiveNumber(price.recommended_net_unit) ?? positiveNumber(price.computed_net_unit);
+    priceRows.push({
+      hardware_variant_id: variantId,
+      hardware_price_book_id: hpb.id,
+      list_price: num(price.list_unit_price),
+      discount_multiplier: num(price.discount_multiplier),
+      net_cost: net,
+      uom: normalizedUom(price.uom),
+      effective_from: book.effective_date ?? null,
+      minimum_quantity: positiveNumber(price.price_quantity),
+      source_row_ref: normalizedText(price.price_id) ?? normalizedText(price.source_row),
+      review_status: reviewStatus,
+    });
+    if (reviewStatus === 'APPROVED') counts.approvedPrices++;
+    else counts.reviewPrices++;
+  }
+  await insertChunks(sb, 'hardware_price', priceRows);
+  counts.prices = priceRows.length;
+
+  const crosswalkRows = prepCrosswalk.flatMap((row) => {
+    const subcategory = normalizedText(row.subcategory_id);
+    if (!subcategory) return [];
+    const noPrep = (value) => {
+      const text = normalizedText(value);
+      return text && !/^(none|n\/?a|not applicable)$/i.test(text) ? text : null;
+    };
+    return [{
+      hardware_category: subcategory,
+      door_prep_code: noPrep(row.door_prep),
+      frame_prep_code: noPrep(row.frame_prep),
+      additional_required_fields: normalizedText(row.validation_rule),
+      pricing_behavior: normalizedText(row.pricing_behavior),
+      notes: normalizedText(row.selection_cue),
+    }];
+  });
+  await insertChunks(sb, 'hardware_prep_crosswalk', crosswalkRows);
+  counts.prepCrosswalk = crosswalkRows.length;
+
+  const { error: linearError } = await sb.from('linear_hardware_rule').insert([
+    {
+      hardware_category: 'weather_seals',
+      length_basis: 'head_plus_jambs',
+      cut_increment: null,
+      waste_pct: 10,
+      minimum_length: null,
+      per_foot_price: null,
+      hardware_variant_id: null,
+    },
+    {
+      hardware_category: 'thresholds',
+      length_basis: 'width',
+      cut_increment: null,
+      waste_pct: 0,
+      minimum_length: null,
+      per_foot_price: null,
+      hardware_variant_id: null,
+    },
+  ]);
+  if (linearError) throw new Error(`linear_hardware_rule insert failed: ${linearError.message}`);
+  counts.linearRules = 2;
+
+  await sb.from('pricing_change_proposals').insert({
+    proposal_type: 'hardware_product',
+    source: 'ingestion',
+    price_book_id: book.id,
+    price_book_document_id: documentId,
+    target_ids: { hardwarePriceBookId: hpb.id, normalizedMaster: true },
+    payload: { ...counts, hardwarePriceBookId: hpb.id },
+    confidence: 0.98,
+    explanation: `Normalized hardware master ingested: ${counts.products} products/variants, ${counts.prices} price observations (${counts.approvedPrices} approved, ${counts.reviewPrices} review), ${counts.attributes} attributes, and ${counts.prepCrosswalk} prep crosswalk rows. Workbook QA queue contains ${counts.workbookQaIssues} issue rows.`,
+    status: 'pending',
+  });
+
+  await sb.from('price_books').update({
+    ocr_status: 'done',
+    ocr_error: null,
+    extract_status: 'done',
+    extracted_at: new Date().toISOString(),
+    extract_total: counts.products + counts.prices,
+    extract_done: counts.products + counts.prices,
+    extract_failed: counts.reviewPrices,
+  }).eq('id', book.id);
+
+  console.log(`[hardware-normalized] ${book.id}:`, JSON.stringify(counts));
+  return { hardwarePriceBookId: hpb.id, priceBookDocumentId: documentId, normalizedMaster: true, ...counts };
+}
+
 /**
  * Ingest a hardware catalog workbook (uploaded as a price_books row) into the
  * canonical hardware tables. Returns ingestion counts. Idempotent per book:
@@ -228,9 +588,37 @@ export async function runIngestHardware(sb, priceBookId) {
   const { data: blob, error: dlErr } = await sb.storage.from(BUCKET).download(book.source_file_url);
   if (dlErr || !blob) throw new Error('File download failed: ' + (dlErr?.message || 'no data'));
   const bytes = new Uint8Array(await blob.arrayBuffer());
+  const sourceSha256 = createHash('sha256').update(bytes).digest('hex');
   const wb = book.file_type === 'csv'
     ? XLSX.read(new TextDecoder('utf-8', { fatal: false }).decode(bytes), { type: 'string', raw: false })
     : XLSX.read(bytes, { type: 'buffer', raw: false, cellDates: true });
+  if (isNormalizedHardwareWorkbook(wb)) {
+    const preflight = summarizeNormalizedHardwareWorkbook(wb);
+    if (!preflight.valid) {
+      throw new Error(`Normalized hardware workbook preflight failed: ${preflight.errors.join(' ')}`);
+    }
+    const profile = identifyPriceBookProfile({
+      sha256: sourceSha256,
+      fileName: book.original_file_name,
+      title: book.name,
+    });
+    Object.assign(book, {
+      source_sha256: sourceSha256,
+      source_page_count: null,
+      ingestion_profile_key: profile?.key ?? null,
+      ingestion_profile_version: profile?.version ?? null,
+      ingestion_coverage: { passed: true, ...preflight },
+    });
+    await sb.from('price_books').update({
+      source_sha256: sourceSha256,
+      source_page_count: null,
+      ingestion_profile_key: profile?.key ?? null,
+      ingestion_profile_version: profile?.version ?? null,
+      ingestion_coverage: { passed: true, ...preflight },
+    }).eq('id', priceBookId);
+    return runIngestNormalizedHardware(sb, book, wb);
+  }
+  await sb.from('price_books').update({ source_sha256: sourceSha256 }).eq('id', priceBookId);
   // Choose the sheet with the most rows (the catalog).
   let sheetName = wb.SheetNames[0];
   let aoa = [];
@@ -447,6 +835,7 @@ export async function runIngestHardware(sb, priceBookId) {
   // catalog/extract flow, so leave ocr_status alone to avoid surfacing the
   // legacy grid-review button).
   await sb.from('price_books').update({
+    ocr_status: 'done', ocr_error: null,
     extract_status: 'done', extracted_at: new Date().toISOString(),
     extract_total: counts.products + counts.variants, extract_done: counts.variants, extract_failed: counts.mismatches,
   }).eq('id', priceBookId);

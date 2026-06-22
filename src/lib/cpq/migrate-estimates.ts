@@ -77,6 +77,8 @@ function componentDraft(item: EstimateItemWithHardware, entity: RuleEntityType):
     label: item.itemLabel || item.canonicalCode,
     familyCode: item.canonicalCode || null,
     quantity: Math.max(1, item.quantity),
+    manufacturerId: item.manufacturerId ?? null,
+    priceBookDocumentId: null,
     fields: fieldsRecord(item as ItemWithFields),
   };
 }

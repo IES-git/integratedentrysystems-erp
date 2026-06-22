@@ -159,6 +159,24 @@ export async function updateProposalStatus(
   return mapProposal(data as Record<string, unknown>);
 }
 
+/** Marks every pending ingestion proposal for one staging book as applied. */
+export async function applyPendingIngestionProposalsForBook(priceBookId: string): Promise<number> {
+  const { data: userData } = await supabase.auth.getUser();
+  const { data, error } = await supabase
+    .from('pricing_change_proposals')
+    .update({
+      status: 'applied',
+      reviewed_by: userData?.user?.id ?? null,
+      reviewed_at: new Date().toISOString(),
+    })
+    .eq('price_book_id', priceBookId)
+    .eq('source', 'ingestion')
+    .eq('status', 'pending')
+    .select('id');
+  if (error) throw new Error(error.message);
+  return data?.length ?? 0;
+}
+
 /** Rejects a pending proposal. */
 export async function rejectProposal(id: string): Promise<PricingChangeProposal> {
   return updateProposalStatus(id, 'rejected');

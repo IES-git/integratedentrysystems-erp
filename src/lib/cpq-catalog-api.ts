@@ -194,11 +194,12 @@ export type BaseSignatures = Record<string, BaseSignature[]>; // entity -> signa
 async function resolveBaseDocId(): Promise<string | null> {
   const { data } = await supabase
     .from('price_rule')
-    .select('price_book_id, price_book_document!inner(status, effective_date)')
+    .select('price_book_id, price_book_document!inner(status, source_verified, effective_date)')
     .eq('entity_type', 'door')
     .eq('action_type', 'BASE_AMOUNT')
     .eq('review_status', 'APPROVED')
     .eq('price_book_document.status', 'published')
+    .eq('price_book_document.source_verified', true)
     .order('effective_date', { ascending: false, foreignTable: 'price_book_document', nullsFirst: false })
     .limit(1)
     .maybeSingle();

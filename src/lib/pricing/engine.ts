@@ -149,19 +149,43 @@ interface ComponentPricing {
   amountByRuleId: Map<string, number>;
 }
 
-/** Prices one Pioneer component (door / frame / panel / lite / prep) via rules. */
+type ComponentPriceOptions = Required<Pick<EngineOptions, 'minConfidence'>> & {
+  priceBookId: string | null;
+  priceBookDocumentIdsByManufacturer?: Record<string, string>;
+};
+
+/** Resolves the immutable rule-book document that owns one component. */
+function componentDocumentId(component: SpecComponent, options: ComponentPriceOptions): string | null {
+  if (component.priceBookDocumentId) return component.priceBookDocumentId;
+  if (component.manufacturerId) {
+    return options.priceBookDocumentIdsByManufacturer?.[component.manufacturerId] ?? null;
+  }
+  // NGP infill rules are loaded separately and scoped by price-table ids; they
+  // must not be filtered to the door/frame fallback document.
+  if (NGP_ENTITY_SET.has(component.entityType)) return null;
+  return options.priceBookId;
+}
+
+/** Prices one manufacturer component (door / frame / panel / lite / prep) via rules. */
 function priceComponent(
   spec: NormalizedOpeningSpec,
   component: SpecComponent,
   rules: LoadedPriceRule[],
-  options: Required<Pick<EngineOptions, 'minConfidence'>> & { priceBookId: string | null },
+  options: ComponentPriceOptions,
   startSort: number,
 ): ComponentPricing {
   const lines: EngineLine[] = [];
   const manualQuotes: EngineManualQuote[] = [];
   const amountByRuleId = new Map<string, number>();
 
-  const candidates = rules.filter((r) => r.entityType === component.entityType);
+  const selectedDocumentId = componentDocumentId(component, options);
+  const mayUseUnscopedRules = NGP_ENTITY_SET.has(component.entityType);
+  const candidates = rules.filter(
+    (r) => r.entityType === component.entityType &&
+      (selectedDocumentId
+        ? r.priceBookId === selectedDocumentId
+        : mayUseUnscopedRules),
+  );
   const matched: { rule: LoadedPriceRule; evidence: Record<string, SpecValue> }[] = [];
   for (const rule of candidates) {
     const m = evaluateConditions(rule.conditions, spec, component);
@@ -201,7 +225,7 @@ function priceComponent(
         grossMargin: null, grossMarginPct: null, priceStatus: 'INCLUDED',
         calculationExpression: 'Suppressed to avoid double-counting', matchedConditions: evidence,
         includedOrSuppressedBy: suppressedBy, sourcePage: null, sourceRegionId: rule.sourceRegionId,
-        priceBookId: options.priceBookId, confidence: rule.extractionConfidence, exceptionMessage: null,
+        priceBookId: rule.priceBookId, confidence: rule.extractionConfidence, exceptionMessage: null,
         componentId: component.id, sortOrder: sort++,
       });
       continue;
@@ -233,7 +257,7 @@ function priceComponent(
       includedOrSuppressedBy: null,
       sourcePage: null,
       sourceRegionId: rule.sourceRegionId,
-      priceBookId: options.priceBookId,
+      priceBookId: rule.priceBookId,
       confidence: rule.extractionConfidence,
       exceptionMessage: res.exceptionMessage,
       componentId: component.id,
@@ -261,7 +285,7 @@ function priceComponent(
       sellPrice: null, grossMargin: null, grossMarginPct: null, priceStatus: 'INVALID',
       calculationExpression: 'No matching base price rule for this configuration',
       matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
-      priceBookId: options.priceBookId, confidence: null,
+      priceBookId: selectedDocumentId ?? options.priceBookId, confidence: null,
       exceptionMessage: 'No base price rule matched — configuration cannot be priced from the published book.',
       componentId: component.id, sortOrder: sort++,
     });
@@ -290,21 +314,38 @@ function pricePreps(
   spec: NormalizedOpeningSpec,
   preps: PrepRequirement[],
   rules: LoadedPriceRule[],
-  options: Required<Pick<EngineOptions, 'minConfidence'>> & { priceBookId: string | null },
+  options: ComponentPriceOptions,
   startSort: number,
 ): ComponentPricing {
-  const prepComponents: SpecComponent[] = preps.map((p, i) => ({
-    id: `prep-${i}`,
-    entityType: 'prep',
-    label: `${p.entityType === 'door' ? 'Door' : 'Frame'} prep ${p.prepCode} (${p.source})`,
-    quantity: p.quantity,
-    code: p.prepCode,
-    fields: {
-      'prep.code': p.prepCode,
-      'prep.entity': p.entityType,
-      'prep.hardware_category': p.hardwareCategory,
-    },
-  }));
+  const prepComponents: SpecComponent[] = preps.map((p, i) => {
+    const owners = spec.components.filter((c) => c.entityType === p.entityType);
+    const ownerKeys = new Set(owners.map((owner) =>
+      owner.priceBookDocumentId
+        ? `document:${owner.priceBookDocumentId}`
+        : owner.manufacturerId
+          ? `manufacturer:${owner.manufacturerId}`
+          : 'unassigned'));
+    const owner = ownerKeys.size === 1 ? owners[0] : null;
+    const ambiguousOwner = owners.length > 1 && ownerKeys.size > 1;
+    return {
+      id: `prep-${i}`,
+      entityType: 'prep',
+      label: `${p.entityType === 'door' ? 'Door' : 'Frame'} prep ${p.prepCode} (${p.source})`,
+      quantity: p.quantity,
+      code: p.prepCode,
+      // A sentinel manufacturer deliberately resolves to no document. This
+      // prevents a prep shared by differently pinned components from matching
+      // whichever manufacturer's rule happens to load first.
+      manufacturerId: ambiguousOwner ? '__ambiguous_owner__' : owner?.manufacturerId ?? null,
+      priceBookDocumentId: owner?.priceBookDocumentId ?? null,
+      fields: {
+        'prep.code': p.prepCode,
+        'prep.entity': p.entityType,
+        'prep.hardware_category': p.hardwareCategory,
+        'prep.owner_ambiguous': ambiguousOwner,
+      },
+    };
+  });
 
   const lines: EngineLine[] = [];
   const manualQuotes: EngineManualQuote[] = [];
@@ -317,6 +358,7 @@ function pricePreps(
     );
     const priced = priceComponent(spec, comp, prepRules, options, sort);
     if (priced.lines.length === 0) {
+      const ambiguousOwner = comp.fields['prep.owner_ambiguous'] === true;
       // No prep rule matched. Distinguish two cases instead of blindly assuming
       // either way (plan: "priced, explicitly source-included, or manual review"):
       //   • STANDARD machined preps (butt-hinge 450/500, strike 478/234,
@@ -324,7 +366,8 @@ function pricePreps(
       //     Pioneer door/frame base by convention → emit a non-blocking INCLUDED
       //     (N/C) line.
       //   • Any other / special prep is NOT assumed included → manual review.
-      if (isStandardIncludedPrep(comp.code)) {
+      const legacyPioneerFallback = !comp.manufacturerId && !comp.priceBookDocumentId;
+      if (legacyPioneerFallback && isStandardIncludedPrep(comp.code)) {
         lines.push({
           lineType: 'INCLUDED', priceRuleId: null, entityType: 'prep', chargeCategory: 'prep',
           description: `${comp.label} — standard prep, included in base`, selectedOptionCode: comp.code, quantity: comp.quantity, unitOfMeasure: null,
@@ -332,7 +375,7 @@ function pricePreps(
           sellPrice: 0, grossMargin: null, grossMarginPct: null, priceStatus: 'INCLUDED',
           calculationExpression: 'Standard machined prep — included (N/C) in the Pioneer door/frame base price',
           matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
-          priceBookId: options.priceBookId, confidence: null, exceptionMessage: null,
+          priceBookId: componentDocumentId(comp, options) ?? options.priceBookId, confidence: null, exceptionMessage: null,
           componentId: null, sortOrder: sort++,
         });
         continue;
@@ -342,10 +385,14 @@ function pricePreps(
         description: `${comp.label} — no prep price published`, selectedOptionCode: comp.code, quantity: comp.quantity, unitOfMeasure: null,
         unitListPrice: null, extendedListPrice: null, discountMultiplier: null, extendedNetPrice: null,
         sellPrice: null, grossMargin: null, grossMarginPct: null, priceStatus: 'INVALID',
-        calculationExpression: 'No prep price rule matched — manual review required (not assumed included)',
+        calculationExpression: ambiguousOwner
+          ? 'Prep ownership spans multiple manufacturer documents — manual assignment required'
+          : 'No prep price rule matched — manual review required (not assumed included)',
         matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
-        priceBookId: options.priceBookId, confidence: null,
-        exceptionMessage: `Preparation ${comp.code ?? ''} for ${comp.label} has no published price rule; confirm it is included by a source rule or price it manually.`,
+        priceBookId: componentDocumentId(comp, options) ?? options.priceBookId, confidence: null,
+        exceptionMessage: ambiguousOwner
+          ? `Preparation ${comp.code ?? ''} applies to components from multiple manufacturer documents; assign the prep to the owning component before pricing.`
+          : `Preparation ${comp.code ?? ''} for ${comp.label} has no published price rule; confirm it is included by a source rule or price it manually.`,
         componentId: null, sortOrder: sort++,
       });
       manualQuotes.push({ componentId: null, priceRuleId: null, reason: 'MISSING_PRICE', requestedInputs: `Prep price for ${comp.label} (${comp.code ?? ''})` });
@@ -684,11 +731,12 @@ export async function resolveActivePriceBookDocument(): Promise<string | null> {
   // null effective date, so pin to the doc that has APPROVED door base rules.
   const { data } = await supabase
     .from('price_rule')
-    .select('price_book_id, price_book_document!inner(id, status, effective_date)')
+    .select('price_book_id, price_book_document!inner(id, status, source_verified, effective_date)')
     .eq('entity_type', 'door')
     .eq('action_type', 'BASE_AMOUNT')
     .eq('review_status', 'APPROVED')
     .eq('price_book_document.status', 'published')
+    .eq('price_book_document.source_verified', true)
     .order('effective_date', { ascending: false, foreignTable: 'price_book_document', nullsFirst: false })
     .limit(1)
     .maybeSingle();
@@ -698,10 +746,37 @@ export async function resolveActivePriceBookDocument(): Promise<string | null> {
     .from('price_book_document')
     .select('id')
     .eq('status', 'published')
+    .eq('source_verified', true)
     .order('effective_date', { ascending: false })
     .limit(1)
     .maybeSingle();
   return (doc?.id as string | undefined) ?? null;
+}
+
+/** Latest published document for each selected manufacturer (legacy fallback). */
+async function resolveManufacturerDocuments(
+  manufacturerIds: string[],
+  pricedAsOf: string,
+): Promise<Record<string, string>> {
+  const ids = [...new Set(manufacturerIds.filter(Boolean))];
+  if (ids.length === 0) return {};
+  const { data } = await supabase
+    .from('price_book_document')
+    .select('id, manufacturer_id, effective_date, created_at')
+    .in('manufacturer_id', ids)
+    .eq('status', 'published')
+    .eq('review_status', 'APPROVED')
+    .eq('source_verified', true)
+    .order('effective_date', { ascending: false, nullsFirst: false })
+    .order('created_at', { ascending: false });
+  const out: Record<string, string> = {};
+  for (const row of data ?? []) {
+    const manufacturerId = row.manufacturer_id as string | null;
+    if (!manufacturerId || out[manufacturerId]) continue;
+    if (row.effective_date && String(row.effective_date) > pricedAsOf) continue;
+    out[manufacturerId] = row.id as string;
+  }
+  return out;
 }
 
 /**
@@ -718,13 +793,17 @@ export function priceOpeningCore(
 ): EngineResult {
   const priceBookId = options.priceBookDocumentId;
   const minConfidence = options.minConfidence ?? 0.5;
-  const opts = { minConfidence, priceBookId };
+  const opts: ComponentPriceOptions = {
+    minConfidence,
+    priceBookId,
+    priceBookDocumentIdsByManufacturer: options.priceBookDocumentIdsByManufacturer,
+  };
 
   const lines: EngineLine[] = [];
   const manualQuotes: EngineManualQuote[] = [];
   const warnings: string[] = [];
 
-  // 1. Pioneer + NGP infill components (both priced through the rule path).
+  // 1. Manufacturer books + NGP infill components (same canonical rule path).
   let sort = 0;
   const componentLines: EngineLine[] = [];
   for (const component of spec.components) {
@@ -752,7 +831,7 @@ export function priceOpeningCore(
   manualQuotes.push(...hw.manualQuotes);
   warnings.push(...hw.warnings);
 
-  // 3. Price the derived Pioneer prep requirements through the rule path.
+  // 3. Price derived door/frame prep requirements through the owning book.
   const prepPricing = pricePreps(spec, hw.prepRequirements, ruleSet.rules, opts, 2000);
   lines.push(...prepPricing.lines);
   manualQuotes.push(...prepPricing.manualQuotes);
@@ -800,7 +879,29 @@ export async function priceOpening(
   options: EngineOptions,
 ): Promise<EngineResult> {
   const pricedAsOf = options.pricedAsOf ?? new Date().toISOString().slice(0, 10);
-  const documentId = options.priceBookDocumentId ?? (await resolveActivePriceBookDocument());
+  const componentManufacturerIds = spec.components
+    .filter((c) => !NGP_ENTITY_SET.has(c.entityType))
+    .map((c) => c.manufacturerId)
+    .filter((id): id is string => !!id);
+  const resolvedByManufacturer = {
+    ...(await resolveManufacturerDocuments(componentManufacturerIds, pricedAsOf)),
+    ...(options.priceBookDocumentIdsByManufacturer ?? {}),
+  };
+  const needsFallbackDocument = spec.components.some(
+    (c) => !NGP_ENTITY_SET.has(c.entityType) &&
+      !c.priceBookDocumentId &&
+      (!c.manufacturerId || !resolvedByManufacturer[c.manufacturerId]),
+  );
+  const fallbackDocumentId = options.priceBookDocumentId ??
+    (needsFallbackDocument ? await resolveActivePriceBookDocument() : null);
+  const selectedDocumentIds = [...new Set([
+    ...spec.components
+      .filter((c) => !NGP_ENTITY_SET.has(c.entityType))
+      .map((c) => c.priceBookDocumentId ??
+        (c.manufacturerId ? resolvedByManufacturer[c.manufacturerId] : null))
+      .filter((id): id is string => !!id),
+    ...(fallbackDocumentId ? [fallbackDocumentId] : []),
+  ])];
   const ngpDocumentId = await resolveActiveNgpDocument();
 
   // Only load the NGP rules this opening references (resolved price tables + tape
@@ -814,12 +915,16 @@ export async function priceOpening(
     .map((c) => (c.fields['infill.tape_model'] != null ? String(c.fields['infill.tape_model']) : c.code ?? ''))
     .filter(Boolean);
 
-  const [ruleSet, catalog, ngpRuleSet, ngpCatalog] = await Promise.all([
-    documentId ? loadRuleSet(documentId, pricedAsOf) : Promise.resolve<LoadedRuleSet>({ rules: [], dependencyRules: [] }),
+  const [loadedRuleSets, catalog, ngpRuleSet, ngpCatalog] = await Promise.all([
+    Promise.all(selectedDocumentIds.map((id) => loadRuleSet(id, pricedAsOf))),
     loadHardwareCatalog(pricedAsOf),
     loadNgpScopedRuleSet(ngpDocumentId, ngpTableIds, ngpTapeModels, pricedAsOf),
     loadNgpCatalog(ngpDocumentId),
   ]);
+  const ruleSet: LoadedRuleSet = {
+    rules: loadedRuleSets.flatMap((set) => set.rules),
+    dependencyRules: loadedRuleSets.flatMap((set) => set.dependencyRules),
+  };
 
   // NGP matrix/direct/tape rules are priced through the same component path, so
   // merge them into the rule set. Option rules carry a non-matching selector and
@@ -838,14 +943,23 @@ export async function priceOpening(
   const variantIds = spec.hardware.map((h) => h.variantId).filter((v): v is string => !!v);
   const variantMap = await loadVariantsWithPrices(variantIds, pricedAsOf);
 
-  const result = priceOpeningCore(spec, mergedRuleSet, catalog, variantMap, { ...options, priceBookDocumentId: documentId }, ngpData);
+  const result = priceOpeningCore(spec, mergedRuleSet, catalog, variantMap, {
+    ...options,
+    priceBookDocumentId: fallbackDocumentId,
+    priceBookDocumentIdsByManufacturer: resolvedByManufacturer,
+  }, ngpData);
 
-  if (!documentId) {
-    result.warnings.unshift('No published price book document — Pioneer base/adder/prep lines cannot be priced.');
+  const missingManufacturerDocs = [...new Set(spec.components
+    .filter((c) => c.manufacturerId && !c.priceBookDocumentId && !resolvedByManufacturer[c.manufacturerId])
+    .map((c) => c.manufacturerId as string))];
+  if (missingManufacturerDocs.length > 0) {
+    result.warnings.unshift(`No published price book found for ${missingManufacturerDocs.length} selected manufacturer(s).`);
+  } else if (selectedDocumentIds.length === 0) {
+    result.warnings.unshift('No published manufacturer price book document — base/adder/prep lines cannot be priced.');
   }
 
   if (options.persist && spec.estimateId) {
-    await persistEngineResult(spec, result, documentId, options.componentIdMap);
+    await persistEngineResult(spec, result, fallbackDocumentId, options.componentIdMap);
   }
 
   return result;
@@ -910,7 +1024,7 @@ export async function persistEngineResult(
     included_or_suppressed_by: l.includedOrSuppressedBy,
     source_page: l.sourcePage ?? sourcePages.get(l.sourceRegionId ?? '') ?? null,
     source_region_id: l.sourceRegionId,
-    price_book_id: documentId,
+    price_book_id: l.priceBookId ?? documentId,
     confidence: l.confidence,
     exception_message: l.exceptionMessage,
     sort_order: l.sortOrder,

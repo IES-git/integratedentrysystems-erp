@@ -3,7 +3,9 @@ import {
   evaluateRuleQa,
   evaluateHardwareQa,
   evaluateVocabularyQa,
+  evaluateIngestionProfileQa,
   evaluateQa,
+  qaAllowsOverride,
   type QaRule,
   type QaHardwarePrice,
   type QaCondition,
@@ -136,6 +138,21 @@ describe('combined QA gate', () => {
     expect(result.blockingCount).toBeGreaterThan(0);
   });
 
+  it('allows explicit override for ERROR findings but never for BLOCK findings', () => {
+    expect(qaAllowsOverride({
+      findings: [{ checkName: 'value', severity: 'ERROR', detail: 'review me' }],
+      blockingCount: 1,
+      warningCount: 0,
+      passed: false,
+    })).toBe(true);
+    expect(qaAllowsOverride({
+      findings: [{ checkName: 'source', severity: 'BLOCK', detail: 'wrong source lane' }],
+      blockingCount: 1,
+      warningCount: 0,
+      passed: false,
+    })).toBe(false);
+  });
+
   it('passes (no blockers) when everything is clean', () => {
     const result = evaluateQa({
       rules: [qaRule({})],
@@ -143,5 +160,49 @@ describe('combined QA gate', () => {
       dependencyCount: 2,
     });
     expect(result.passed).toBe(true);
+  });
+});
+
+describe('ingestion profile publication gate', () => {
+  it('passes a complete fingerprinted Pioneer document', () => {
+    const findings = evaluateIngestionProfileQa({
+      profileKey: 'pioneer-steel-doors-frames',
+      profileVersion: '2026-06-21.4',
+      fileType: 'pdf',
+      sourceSha256: 'ef32d45501233ff59e06311abc0dce91f310a439dd0015b61b2b13b482abcf27',
+      sourcePageCount: 103,
+      coverage: { passed: true },
+      baseRuleEntities: new Set(['door', 'frame', 'panel']),
+    });
+    expect(findings.filter((f) => f.severity === 'ERROR' || f.severity === 'BLOCK')).toHaveLength(0);
+  });
+
+  it('blocks publication when required manufacturer entities are missing', () => {
+    const findings = evaluateIngestionProfileQa({
+      profileKey: 'ceco-steel-doors-frames',
+      profileVersion: '2026-06-21.4',
+      fileType: 'pdf',
+      sourceSha256: 'e491ce09add14b4ccd193a146817a6929c07120821153a9ae7aaacd22d888101',
+      sourcePageCount: 167,
+      coverage: { passed: true },
+      baseRuleEntities: new Set(['door']),
+    });
+    expect(findings.some((f) =>
+      f.checkName === 'required_entity_coverage' &&
+      f.severity === 'BLOCK' &&
+      f.detail.includes('frame'))).toBe(true);
+  });
+
+  it('blocks the raw NGP PDF from the normalized-workbook publication lane', () => {
+    const findings = evaluateIngestionProfileQa({
+      profileKey: 'ngp-infill-2026',
+      profileVersion: '2026-06-21.4',
+      fileType: 'pdf',
+      sourceSha256: '9ddb400c994d7416c04a488ae2be3bd29214f4ace40f9233bfe464e78ec2d2f7',
+      sourcePageCount: 88,
+      coverage: { passed: true },
+      baseRuleEntities: new Set(['lite_kit', 'louver', 'glass', 'glazing_tape']),
+    });
+    expect(findings.some((f) => f.checkName === 'source_ingestion_lane' && f.severity === 'BLOCK')).toBe(true);
   });
 });

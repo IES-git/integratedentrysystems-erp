@@ -12,8 +12,43 @@ Edge Functions, against the same Supabase tables:
   `pricing_change_proposals` row per table. Returns `202` immediately and runs
   in the background; the app polls `price_books.ocr_status`.
 - `POST /extract { extractionId }` — extracts one table's full grid and fills
-  the extraction row. Synchronous.
+  the extraction row. For PDFs, the worker uploads only a small page window
+  around the cataloged table hint (with offset padding), rather than asking the
+  model to re-read the entire book. Synchronous.
+- `POST /extract-all { priceBookId }` — extracts all pending tables in the
+  background with bounded concurrency.
+- `POST /compile { extractionId }` / `POST /compile-all { priceBookId }` —
+  compile extracted evidence into canonical price and dependency rules.
+- `POST /ingest-hardware { priceBookId }` — deterministic normalized/raw
+  hardware workbook ingestion. The normalized master is preflighted before the
+  shared hardware catalog is replaced.
+- `POST /ingest-ngp-catalog { priceBookId }` — deterministic normalized NGP
+  workbook ingestion with sheet, identifier, table-reference, source-page, and
+  base-rule completeness checks.
 - `GET /health` — liveness probe.
+
+Known sources are SHA-256 fingerprinted and assigned versioned ingestion
+profiles. Profile coverage is stored on `price_books` and enforced again by the
+application's QA publication gate.
+
+## Audit source files before upload
+
+Run the same PDF/workbook validation used by ingestion without touching the
+database:
+
+```bash
+npm run audit:sources -- --output ../../docs/supplied-price-book-audit.json \
+  /path/to/pioneer.pdf \
+  /path/to/ceco.pdf \
+  /path/to/de-la-fontaine.pdf \
+  /path/to/ngp-prices.pdf \
+  /path/to/Hardware_Normalized_Ingestion_Master.xlsx \
+  /path/to/NGP_Glass_Lite_Louver_Normalized_Catalog_with_2026_Prices.xlsx
+```
+
+The report records hashes, physical PDF page counts, profile/lane selection,
+and normalized workbook preflight counts. The command exits non-zero on a
+corrupt/incomplete source or a wrong production lane.
 
 All write endpoints require a valid Supabase **user access token** in the
 `Authorization: Bearer <token>` header (verified via Supabase Auth). DB/storage

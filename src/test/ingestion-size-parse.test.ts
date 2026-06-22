@@ -17,6 +17,16 @@ describe('ingestion size-label parsing', () => {
 
   it('takes the largest listed width for multi-size rows', () => {
     expect(parseSizeLabel('2-0, 2-4, 3-0 x 6-8')).toEqual({ width: 36, height: 80 });
+    expect(parseSizeLabel('3-0, 2-4, 2-8 x 6-8')).toEqual({ width: 36, height: 80 });
+  });
+
+  it('parses pipe-delimited width lists and height from extracted door grids', () => {
+    expect(parseSizeLabel("2-6, 2-8, 2-10, 3-0 | 7' 0\""))
+      .toEqual({ width: 36, height: 84 });
+    expect(parseSizeLabel("2-6, 2-8, | 7' 2\""))
+      .toEqual({ width: 32, height: 86 });
+    expect(parseSizeLabel("2-10, 3-0 | 7' 10\""))
+      .toEqual({ width: 36, height: 94 });
   });
 
   it('decodes compact concatenated size codes (the 2070 bug)', () => {

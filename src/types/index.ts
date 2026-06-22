@@ -855,6 +855,14 @@ export interface PriceBook {
   supersedesPriceBookId: string | null;
   /** CPQ v2 (Phase 2.0): the immutable published price_book_document version this book links to. */
   priceBookDocumentId: string | null;
+  priceBookDocumentStatus?: 'draft' | 'published' | 'superseded' | 'archived' | null;
+  priceBookDocumentReviewStatus?: ReviewStatus | null;
+  /** SHA-256 fingerprint of the exact uploaded source bytes. */
+  sourceSha256?: string | null;
+  sourcePageCount?: number | null;
+  ingestionProfileKey?: string | null;
+  ingestionProfileVersion?: string | null;
+  ingestionCoverage?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
@@ -866,6 +874,8 @@ export interface ExtractedGridCell {
   /** Column index within the extraction grid. */
   col: number;
   price: number | null;
+  /** Exact source text, including semantic values such as N/C, N/A, CF, or Included. */
+  rawValue?: string;
 }
 
 /**

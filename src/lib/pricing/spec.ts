@@ -29,6 +29,10 @@ export interface SpecComponent {
   quantity: number;
   /** Option/series code used for `item_or_option_code` matching, if known. */
   code: string | null;
+  /** Selected manufacturer for this component. */
+  manufacturerId?: string | null;
+  /** Immutable published rule-book revision selected for this component. */
+  priceBookDocumentId?: string | null;
   /**
    * Field map keyed by field_path AND field_id. Values are pre-normalized
    * (dimensions in inches as numbers where applicable).
@@ -102,6 +106,12 @@ export interface NormalizedOpeningSpec {
 export interface EngineOptions {
   /** Immutable price_book_document version to price against. */
   priceBookDocumentId: string | null;
+  /**
+   * Optional active-document fallback keyed by manufacturer id. Component-level
+   * `priceBookDocumentId` wins; this supports older snapshots that stored only
+   * the manufacturer choice.
+   */
+  priceBookDocumentIdsByManufacturer?: Record<string, string>;
   /** Effective date used to filter price rules (defaults to today). */
   pricedAsOf?: string | null;
   /** Hardware sell rule selection. */

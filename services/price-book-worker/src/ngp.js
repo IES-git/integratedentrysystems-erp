@@ -16,8 +16,10 @@
 // the document's prior NGP rows/rules first. Everything lands UNREVIEWED behind a
 // pricing_change_proposals gate (review -> approve -> publish, same as Pioneer).
 
+import { createHash } from 'node:crypto';
 import * as XLSX from 'xlsx';
 import { ensureDraftDocument } from './compile.js';
+import { identifyPriceBookProfile } from './profiles.js';
 
 const BUCKET = 'price-book-files';
 const CURRENCY = 'USD';
@@ -66,6 +68,160 @@ function readSheet(wb, name, firstCol) {
     rows.push(obj);
   }
   return rows;
+}
+
+const NGP_REQUIRED_SHEETS = [
+  'Products',
+  'Product Attributes',
+  'Kit Glass Capacity',
+  'Glass Ratings',
+  'Size Rules',
+  'Relationships',
+  'Finish Codes',
+  'Commercial Policies',
+  'Price Tables',
+  'Base Price Rules',
+  'Price Table Map',
+  'Direct Price Rules',
+  'Option Price Rules',
+  'Options Adders',
+];
+
+/** True for the normalized NGP catalog contract, not the source PDF/raw export. */
+export function isNormalizedNgpWorkbook(wb) {
+  return NGP_REQUIRED_SHEETS.every((name) => wb.SheetNames.includes(name));
+}
+
+function duplicateIds(rows, key) {
+  const seen = new Set();
+  const dupes = new Set();
+  for (const row of rows) {
+    const id = clean(row[key]);
+    if (!id) continue;
+    if (seen.has(id)) dupes.add(id);
+    seen.add(id);
+  }
+  return [...dupes];
+}
+
+/** Pure normalized-workbook preflight; performs no DB writes. */
+export function summarizeNgpWorkbook(wb) {
+  const missingSheets = NGP_REQUIRED_SHEETS.filter((name) => !wb.SheetNames.includes(name));
+  if (missingSheets.length > 0) {
+    return {
+      valid: false,
+      errors: [`Missing required sheets: ${missingSheets.join(', ')}`],
+      warnings: [],
+    };
+  }
+
+  const products = readSheet(wb, 'Products', 'product_id');
+  const attributes = readSheet(wb, 'Product Attributes', 'attribute_id');
+  const capacity = readSheet(wb, 'Kit Glass Capacity', 'capacity_id');
+  const ratings = readSheet(wb, 'Glass Ratings', 'rating_id');
+  const sizeRules = readSheet(wb, 'Size Rules', 'size_rule_id');
+  const relationships = readSheet(wb, 'Relationships', 'relationship_id');
+  const finishes = readSheet(wb, 'Finish Codes', 'finish_code');
+  const policies = readSheet(wb, 'Commercial Policies', 'policy_id');
+  const tables = readSheet(wb, 'Price Tables', 'price_table_id');
+  const baseRules = readSheet(wb, 'Base Price Rules', 'price_rule_id');
+  const tableMaps = readSheet(wb, 'Price Table Map', 'map_id');
+  const directs = readSheet(wb, 'Direct Price Rules', 'direct_rule_id');
+  const optionRules = readSheet(wb, 'Option Price Rules', 'option_rule_id');
+  const options = readSheet(wb, 'Options Adders', 'option_id');
+
+  const errors = [];
+  const warnings = [];
+  const tableIds = new Set(tables.map((row) => clean(row.price_table_id)).filter(Boolean));
+  const productModels = new Set(products.map((row) => clean(row.model)).filter(Boolean));
+
+  const invalidBaseRules = baseRules.filter((row) =>
+    !clean(row.price_rule_id) ||
+    !clean(row.price_table_id) ||
+    num(row.order_width_in) == null ||
+    num(row.order_height_in) == null ||
+    num(row.list_price) == null);
+  if (invalidBaseRules.length > 0) {
+    errors.push(`${invalidBaseRules.length} base price rule(s) are missing table, size, or list price.`);
+  }
+
+  const unknownBaseTables = [...new Set(baseRules
+    .map((row) => clean(row.price_table_id))
+    .filter((id) => id && !tableIds.has(id)))];
+  if (unknownBaseTables.length > 0) {
+    errors.push(`Base rules reference unknown price tables: ${unknownBaseTables.slice(0, 10).join(', ')}`);
+  }
+
+  const unknownMapTables = [...new Set(tableMaps
+    .map((row) => clean(row.price_table_id))
+    .filter((id) => id && !tableIds.has(id)))];
+  if (unknownMapTables.length > 0) {
+    errors.push(`Price Table Map references unknown tables: ${unknownMapTables.slice(0, 10).join(', ')}`);
+  }
+
+  const unmappedModels = [...new Set(tableMaps
+    .map((row) => clean(row.model))
+    .filter((model) => model && !productModels.has(model)))];
+  if (unmappedModels.length > 0) {
+    warnings.push(`${unmappedModels.length} mapped model(s) are not present in Products.`);
+  }
+
+  for (const [name, rows, key] of [
+    ['Products', products, 'product_id'],
+    ['Price Tables', tables, 'price_table_id'],
+    ['Base Price Rules', baseRules, 'price_rule_id'],
+    ['Price Table Map', tableMaps, 'map_id'],
+    ['Direct Price Rules', directs, 'direct_rule_id'],
+    ['Option Price Rules', optionRules, 'option_rule_id'],
+  ]) {
+    const dupes = duplicateIds(rows, key);
+    if (dupes.length > 0) errors.push(`${name} contains duplicate IDs: ${dupes.slice(0, 10).join(', ')}`);
+  }
+
+  const categoryCounts = {};
+  for (const row of products) {
+    const category = clean(row.category) ?? 'UNKNOWN';
+    categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
+  }
+  for (const [label, alternatives] of [
+    ['LITE_KIT', ['LITE_KIT']],
+    ['LOUVER', ['LOUVER']],
+    ['GLASS', ['GLASS']],
+    ['GLAZING_TAPE/ACCESSORY', ['GLAZING_TAPE', 'GLAZING_ACCESSORY']],
+  ]) {
+    if (!alternatives.some((category) => categoryCounts[category])) {
+      errors.push(`Products has no ${label} records.`);
+    }
+  }
+
+  const missingSourcePages =
+    baseRules.filter((row) => !clean(row.source_page)).length +
+    directs.filter((row) => !clean(row.source_page)).length +
+    optionRules.filter((row) => !clean(row.source_page)).length;
+  if (missingSourcePages > 0) warnings.push(`${missingSourcePages} pricing rule row(s) have no source page.`);
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    products: products.length,
+    attributes: attributes.length,
+    capacity: capacity.length,
+    ratings: ratings.length,
+    sizeRules: sizeRules.length,
+    relationships: relationships.length,
+    finishCodes: finishes.length,
+    policies: policies.length,
+    priceTables: tables.length,
+    baseRules: baseRules.length,
+    tableMaps: tableMaps.length,
+    directRules: directs.length,
+    optionRules: optionRules.length,
+    options: options.length,
+    totalPricingRules: baseRules.length + directs.length + optionRules.length,
+    categoryCounts,
+    missingSourcePages,
+  };
 }
 
 /** Map an NGP price-table entity_type -> our RuleEntityType + a charge category. */
@@ -192,6 +348,30 @@ export async function runIngestNgp(sb, priceBookId) {
   if (dlErr || !blob) throw new Error('File download failed: ' + (dlErr?.message || 'no data'));
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const wb = XLSX.read(bytes, { type: 'buffer', raw: false, cellDates: false });
+  const preflight = summarizeNgpWorkbook(wb);
+  if (!preflight.valid) {
+    throw new Error(`NGP workbook preflight failed: ${preflight.errors.join(' ')}`);
+  }
+  const sourceSha256 = createHash('sha256').update(bytes).digest('hex');
+  const profile = identifyPriceBookProfile({
+    sha256: sourceSha256,
+    fileName: book.original_file_name,
+    title: book.name,
+  });
+  Object.assign(book, {
+    source_sha256: sourceSha256,
+    source_page_count: null,
+    ingestion_profile_key: profile?.key ?? null,
+    ingestion_profile_version: profile?.version ?? null,
+    ingestion_coverage: { passed: true, ...preflight },
+  });
+  await sb.from('price_books').update({
+    source_sha256: sourceSha256,
+    source_page_count: null,
+    ingestion_profile_key: profile?.key ?? null,
+    ingestion_profile_version: profile?.version ?? null,
+    ingestion_coverage: { passed: true, ...preflight },
+  }).eq('id', priceBookId);
 
   const documentId = await ensureDraftDocument(sb, book);
   await clearPrior(sb, documentId);
@@ -541,6 +721,7 @@ export async function runIngestNgp(sb, priceBookId) {
   });
 
   await sb.from('price_books').update({
+    ocr_status: 'done', ocr_error: null,
     extract_status: 'done', extracted_at: new Date().toISOString(),
     extract_total: counts.matrixRules + counts.directRules + counts.optionRules,
     extract_done: counts.matrixRules + counts.directRules + counts.optionRules, extract_failed: 0,

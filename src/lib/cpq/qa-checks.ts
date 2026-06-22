@@ -14,6 +14,7 @@
 import { supabase } from '@/lib/supabase';
 import { publishPriceBookDocument } from '@/lib/price-rules-api';
 import type { QaIssueSeverity } from '@/types';
+import { getPriceBookProfile } from '../../../services/price-book-worker/src/profiles.js';
 
 export interface QaFinding {
   checkName: string;
@@ -66,6 +67,16 @@ export interface QaCondition {
   operator: string;
   value1: string | null;
   sourceRegionId: string | null;
+}
+
+export interface QaIngestionProfileInput {
+  profileKey: string | null;
+  profileVersion: string | null;
+  fileType: string | null;
+  sourceSha256: string | null;
+  sourcePageCount: number | null;
+  coverage: Record<string, unknown> | null;
+  baseRuleEntities: Set<string>;
 }
 
 /**
@@ -276,6 +287,89 @@ export function evaluateDependencyCoverage(ruleCount: number, dependencyCount: n
   return [];
 }
 
+/**
+ * Source-profile coverage — verifies the exact source identity, ingestion lane,
+ * catalog completeness, and required base-rule entities before publication.
+ */
+export function evaluateIngestionProfileQa(input: QaIngestionProfileInput): QaFinding[] {
+  const findings: QaFinding[] = [];
+  if (!input.profileKey) {
+    return [{
+      checkName: 'ingestion_profile_missing',
+      severity: 'WARNING',
+      detail: 'No governed ingestion profile is attached; source-family coverage cannot be proven automatically.',
+    }];
+  }
+  const profile = getPriceBookProfile(input.profileKey);
+  if (!profile) {
+    return [{
+      checkName: 'ingestion_profile_unknown',
+      severity: 'ERROR',
+      detail: `Unknown ingestion profile "${input.profileKey}".`,
+    }];
+  }
+
+  if (input.profileVersion && input.profileVersion !== profile.version) {
+    findings.push({
+      checkName: 'ingestion_profile_version',
+      severity: 'WARNING',
+      detail: `Document used profile ${input.profileVersion}; current governed version is ${profile.version}. Re-run coverage before publish.`,
+    });
+  }
+  if (!input.sourceSha256 || !/^[0-9a-f]{64}$/i.test(input.sourceSha256)) {
+    findings.push({
+      checkName: 'source_fingerprint',
+      severity: 'ERROR',
+      detail: 'The uploaded source has no valid SHA-256 fingerprint.',
+    });
+  }
+
+  const knownSource = profile.knownSources.find((source) => source.sha256 === input.sourceSha256);
+  if (knownSource?.pageCount != null && input.sourcePageCount !== knownSource.pageCount) {
+    findings.push({
+      checkName: 'source_page_count',
+      severity: 'ERROR',
+      detail: `Source fingerprint expects ${knownSource.pageCount} pages; document records ${input.sourcePageCount ?? 'none'}.`,
+    });
+  }
+
+  if (profile.ingestionLane === 'pdf_rule_compiler') {
+    if (input.coverage?.passed !== true) {
+      const issues = Array.isArray(input.coverage?.issues)
+        ? (input.coverage.issues as unknown[]).map(String).join(' ')
+        : 'Catalog-stage profile coverage did not pass.';
+      findings.push({
+        checkName: 'catalog_profile_coverage',
+        severity: 'BLOCK',
+        detail: issues,
+      });
+    }
+  } else if (!['xlsx', 'csv'].includes(input.fileType ?? '')) {
+    findings.push({
+      checkName: 'source_ingestion_lane',
+      severity: 'BLOCK',
+      detail: `${profile.manufacturer} requires the ${profile.ingestionLane} workbook lane; a ${input.fileType ?? 'missing'} source cannot be published through this document.`,
+    });
+  } else if (input.coverage?.passed !== true) {
+    findings.push({
+      checkName: 'workbook_preflight',
+      severity: 'BLOCK',
+      detail: `${profile.manufacturer} normalized workbook preflight did not pass.`,
+    });
+  }
+
+  for (const entity of profile.requiredRuleEntities) {
+    if (!input.baseRuleEntities.has(entity)) {
+      findings.push({
+        checkName: 'required_entity_coverage',
+        severity: 'BLOCK',
+        detail: `Profile ${profile.key} requires published base pricing for entity "${entity}", but no base rule was compiled.`,
+      });
+    }
+  }
+  return findings;
+}
+
 function summarize(findings: QaFinding[]): QaResult {
   const blockingCount = findings.filter((f) => f.severity === 'ERROR' || f.severity === 'BLOCK').length;
   const warningCount = findings.filter((f) => f.severity === 'WARNING').length;
@@ -291,6 +385,7 @@ export function evaluateQa(input: {
   vocab?: Map<string, VocabField>;
   hardwareVariants?: QaHardwareVariant[];
   pricedVariantIds?: Set<string>;
+  ingestionProfile?: QaIngestionProfileInput;
 }): QaResult {
   return summarize([
     ...evaluateRuleQa(input.rules),
@@ -300,6 +395,7 @@ export function evaluateQa(input: {
     ...(input.hardwareVariants && input.pricedVariantIds
       ? evaluateHardwareCoverage(input.hardwareVariants, input.pricedVariantIds)
       : []),
+    ...(input.ingestionProfile ? evaluateIngestionProfileQa(input.ingestionProfile) : []),
   ]);
 }
 
@@ -354,6 +450,8 @@ export async function runQaChecks(documentId: string): Promise<QaResult> {
     { data: depRows, error: dErr },
     { data: priceRows, error: pErr },
     { data: variantRows, error: vErr },
+    { data: documentRow, error: docErr },
+    { data: stagingRow, error: stagingErr },
   ] = await Promise.all([
     // REJECTED rules are excluded from pricing by the engine, so they should not
     // gate publication either — only APPROVED/UNREVIEWED rules are QA-checked.
@@ -361,11 +459,22 @@ export async function runQaChecks(documentId: string): Promise<QaResult> {
     supabase.from('dependency_rule').select('id', { count: 'exact' }).eq('price_book_id', documentId),
     supabase.from('hardware_price').select('id, list_price, discount_multiplier, net_cost').neq('review_status', 'REJECTED'),
     supabase.from('hardware_variant').select('id, sku, hardware_product(category, model, description)'),
+    supabase.from('price_book_document')
+      .select('source_file_hash, page_count, ingestion_profile_key, ingestion_profile_version')
+      .eq('id', documentId)
+      .maybeSingle(),
+    supabase.from('price_books')
+      .select('file_type, source_sha256, source_page_count, ingestion_profile_key, ingestion_profile_version, ingestion_coverage')
+      .eq('price_book_document_id', documentId)
+      .limit(1)
+      .maybeSingle(),
   ]);
   if (rErr) throw new Error(`QA: failed to load rules: ${rErr.message}`);
   if (dErr) throw new Error(`QA: failed to load dependency rules: ${dErr.message}`);
   if (pErr) throw new Error(`QA: failed to load hardware prices: ${pErr.message}`);
   if (vErr) throw new Error(`QA: failed to load hardware variants: ${vErr.message}`);
+  if (docErr) throw new Error(`QA: failed to load price-book document profile: ${docErr.message}`);
+  if (stagingErr) throw new Error(`QA: failed to load staging price-book profile: ${stagingErr.message}`);
 
   const rules: QaRule[] = (ruleRows ?? []).map((row) => {
     const r = row as Record<string, unknown>;
@@ -431,15 +540,37 @@ export async function runQaChecks(documentId: string): Promise<QaResult> {
     .eq('review_status', 'APPROVED');
   if (pvErr) throw new Error(`QA: failed to load priced hardware variants: ${pvErr.message}`);
   const pricedVariantIds = new Set((pricedRows ?? []).map((r) => (r as { hardware_variant_id: string }).hardware_variant_id));
+  const baseRuleEntities = new Set(rules
+    .filter((rule) => rule.actionType === 'BASE_AMOUNT' && rule.priceStatus === 'PRICED')
+    .map((rule) => rule.entityType));
+  const profileKey = (stagingRow?.ingestion_profile_key as string | null) ??
+    (documentRow?.ingestion_profile_key as string | null) ?? null;
+  const isHardwareCatalogDocument =
+    getPriceBookProfile(profileKey ?? '')?.ingestionLane === 'hardware_normalized_workbook';
 
   return evaluateQa({
     rules,
-    hardwarePrices,
+    // Hardware is a shared catalog, not a child of every door/frame/NGP
+    // document. Run its global reconciliation/coverage gate only while
+    // publishing the governed hardware workbook revision.
+    hardwarePrices: isHardwareCatalogDocument ? hardwarePrices : [],
     dependencyCount: depRows?.length ?? 0,
     conditions,
     vocab,
-    hardwareVariants,
-    pricedVariantIds,
+    hardwareVariants: isHardwareCatalogDocument ? hardwareVariants : undefined,
+    pricedVariantIds: isHardwareCatalogDocument ? pricedVariantIds : undefined,
+    ingestionProfile: {
+      profileKey,
+      profileVersion: (stagingRow?.ingestion_profile_version as string | null) ??
+        (documentRow?.ingestion_profile_version as string | null) ?? null,
+      fileType: (stagingRow?.file_type as string | null) ?? null,
+      sourceSha256: (stagingRow?.source_sha256 as string | null) ??
+        (documentRow?.source_file_hash as string | null) ?? null,
+      sourcePageCount: (stagingRow?.source_page_count as number | null) ??
+        (documentRow?.page_count as number | null) ?? null,
+      coverage: (stagingRow?.ingestion_coverage as Record<string, unknown> | null) ?? null,
+      baseRuleEntities,
+    },
   });
 }
 
@@ -509,6 +640,11 @@ export interface PublishWithQaOptions {
   override?: boolean;
 }
 
+/** BLOCK findings represent source-integrity invariants and are never overrideable. */
+export function qaAllowsOverride(result: QaResult): boolean {
+  return !result.findings.some((finding) => finding.severity === 'BLOCK');
+}
+
 /**
  * Publishes a draft price_book_document only after the QA gate passes. Throws a
  * `QaGateError` (carrying the result) when blocking findings remain and no
@@ -519,7 +655,7 @@ export async function publishPriceBookDocumentWithQa(
   opts: PublishWithQaOptions = {},
 ): Promise<QaResult> {
   const result = await runAndPersistQaChecks(documentId);
-  if (!result.passed && !opts.override) {
+  if (!result.passed && (!opts.override || !qaAllowsOverride(result))) {
     throw new QaGateError(result);
   }
   await publishPriceBookDocument(documentId, opts.supersedesId ?? null);

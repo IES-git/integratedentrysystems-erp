@@ -26,9 +26,11 @@ import {
   type ColumnMapping, type RowMapping, type BaseTableOption, type GridDiff, type HardwareRowMapping,
 } from '@/lib/price-books-api';
 import RuleReviewPanel from '@/components/pricing/RuleReviewPanel';
+import HardwareCatalogReviewPanel from '@/components/pricing/HardwareCatalogReviewPanel';
 import { approveAllCompiledExtractions } from '@/lib/price-rules-api';
-import { publishPriceBookDocumentWithQa, QaGateError } from '@/lib/cpq/qa-checks';
+import { publishPriceBookDocumentWithQa, qaAllowsOverride, QaGateError } from '@/lib/cpq/qa-checks';
 import { getProposalForExtraction } from '@/lib/pricing-proposals-api';
+import { applyPendingIngestionProposalsForBook } from '@/lib/pricing-proposals-api';
 import { getFieldDefinitions } from '@/lib/estimates-api';
 import type {
   PriceBook, PriceBookCategory, PriceBookExtraction, Company, ColumnCriteria, DimensionCriteria, FieldDefinition,
@@ -124,6 +126,8 @@ export default function PriceBookIngestPage() {
   const [recompiling, setRecompiling] = useState(false);
   const [hardwareIngestingId, setHardwareIngestingId] = useState<string | null>(null);
   const [ngpIngestingId, setNgpIngestingId] = useState<string | null>(null);
+  const [hardwareReviewBook, setHardwareReviewBook] = useState<PriceBook | null>(null);
+  const [directPublishingId, setDirectPublishingId] = useState<string | null>(null);
   const [proposalId, setProposalId] = useState<string | null>(null);
   const [reviewName, setReviewName] = useState('');
   const [reviewCategory, setReviewCategory] = useState<PriceBookCategory>('doors');
@@ -212,13 +216,37 @@ export default function PriceBookIngestPage() {
         effectiveDate: effectiveDate || null,
         supersedesPriceBookId: (supersedesId && supersedesId !== '__none__') ? supersedesId : null,
       });
-      toast({ title: 'Uploaded', description: 'Scanning the whole book for every pricing table (this can take a minute)…' });
+      const isWorkbook = /\.(xlsx?|csv)$/i.test(file.name);
+      const directHardware = hasPriceBookWorker && category === 'hardware' && isWorkbook;
+      const directNgp = hasPriceBookWorker && category === 'lites_louvers_glass' && isWorkbook;
+      toast({
+        title: 'Uploaded',
+        description: directHardware || directNgp
+          ? 'Validating and loading the normalized workbook…'
+          : 'Scanning the whole book for every pricing table (this can take a minute)…',
+      });
       setName(''); setFile(null); setCategory(''); setCompanyId(''); setEffectiveDate(''); setSupersedesId('__none__');
-      await ingestPriceBook(priceBookId);
-      await loadList();
-      const book = await pollBookStatus(priceBookId);
-      const tables = await listExtractionsForBook(book.id);
-      toast({ title: 'Catalog complete', description: `${tables.length} table(s) found. Open "Review & approve" to pull each grid.` });
+      if (directHardware) {
+        await ingestHardwareBook(priceBookId);
+        const finished = await pollExtractAllStatus(priceBookId);
+        toast({
+          title: 'Hardware workbook loaded',
+          description: `${finished.extractDone} product/price rows loaded; ${finished.extractFailed} price observation(s) require review.`,
+        });
+      } else if (directNgp) {
+        await ingestNgpCatalog(priceBookId);
+        const finished = await pollExtractAllStatus(priceBookId);
+        toast({
+          title: 'NGP workbook loaded',
+          description: `${finished.extractDone} deterministic price rule(s) loaded and ready for QA publication.`,
+        });
+      } else {
+        await ingestPriceBook(priceBookId);
+        await loadList();
+        const book = await pollBookStatus(priceBookId);
+        const tables = await listExtractionsForBook(book.id);
+        toast({ title: 'Catalog complete', description: `${tables.length} table(s) found. Open "Review & approve" to pull each grid.` });
+      }
       await loadList();
     } catch (err) {
       toast({ title: 'Ingestion failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
@@ -265,7 +293,7 @@ export default function PriceBookIngestPage() {
     setExtractingIds((p) => new Set(p).add(ext.id));
     try {
       const r = await extractPriceBookTable(ext.id);
-      toast({ title: 'Grid extracted', description: `${ext.title ?? 'Table'}: ${r.rowCount}×${r.colCount}, ${r.cellCount} prices.` });
+      toast({ title: 'Grid extracted', description: `${ext.title ?? 'Table'}: ${r.rowCount}×${r.colCount}, ${r.cellCount} captured values.` });
       await reloadBookExtractions(reviewBook);
     } catch (err) {
       toast({ title: 'Extraction failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
@@ -288,11 +316,11 @@ export default function PriceBookIngestPage() {
       if (r.cellCount === 0) {
         toast({
           title: 'Re-extraction produced no prices',
-          description: `${ext.title ?? 'Table'}: ${r.rowCount} rows, ${r.colCount} cols, 0 prices — response may have been truncated again. Try once more or check the page hint.`,
+          description: `${ext.title ?? 'Table'}: ${r.rowCount} rows, ${r.colCount} cols, 0 captured values — response may have been truncated again. Try once more or check the page hint.`,
           variant: 'destructive',
         });
       } else {
-        toast({ title: 'Grid re-extracted', description: `${ext.title ?? 'Table'}: ${r.rowCount}×${r.colCount}, ${r.cellCount} prices.` });
+        toast({ title: 'Grid re-extracted', description: `${ext.title ?? 'Table'}: ${r.rowCount}×${r.colCount}, ${r.cellCount} captured values.` });
       }
       await reloadBookExtractions(reviewBook);
     } catch (err) {
@@ -801,6 +829,14 @@ export default function PriceBookIngestPage() {
       await loadList();
     } catch (err) {
       if (err instanceof QaGateError) {
+        if (!qaAllowsOverride(err.result)) {
+          toast({
+            title: 'Publication blocked',
+            description: 'Source-integrity BLOCK findings cannot be overridden. Resolve them in Price Book QA.',
+            variant: 'destructive',
+          });
+          return;
+        }
         const proceed = confirm(
           `QA gate found ${err.result.blockingCount} blocking issue(s):\n\n` +
           err.result.findings.filter((f) => f.severity === 'ERROR' || f.severity === 'BLOCK').slice(0, 8).map((f) => `• [${f.checkName}] ${f.detail}`).join('\n') +
@@ -877,6 +913,48 @@ export default function PriceBookIngestPage() {
     }
   };
 
+  const publishDeterministicBook = async (book: PriceBook, override = false) => {
+    if (!book.priceBookDocumentId) {
+      toast({ title: 'Nothing to publish', description: 'The deterministic importer has not created a document yet.', variant: 'destructive' });
+      return;
+    }
+    setDirectPublishingId(book.id);
+    try {
+      const result = await publishPriceBookDocumentWithQa(book.priceBookDocumentId, { override });
+      await applyPendingIngestionProposalsForBook(book.id);
+      toast({
+        title: 'Version published',
+        description: `This catalog is now selectable by the opening builder.${result.warningCount ? ` ${result.warningCount} QA warning(s).` : ''}`,
+      });
+      await loadList();
+    } catch (err) {
+      if (err instanceof QaGateError) {
+        if (!qaAllowsOverride(err.result)) {
+          toast({
+            title: 'Publication blocked',
+            description: 'The source profile or normalized workbook contract failed. BLOCK findings cannot be overridden.',
+            variant: 'destructive',
+          });
+          return;
+        }
+        const proceed = confirm(
+          `QA found ${err.result.blockingCount} blocking issue(s):\n\n` +
+          err.result.findings.filter((finding) => finding.severity === 'ERROR' || finding.severity === 'BLOCK')
+            .slice(0, 8).map((finding) => `• ${finding.detail}`).join('\n') +
+          '\n\nPublish anyway with an explicit override?',
+        );
+        if (proceed) {
+          setDirectPublishingId(null);
+          return publishDeterministicBook(book, true);
+        }
+      } else {
+        toast({ title: 'Publish failed', description: err instanceof Error ? err.message : String(err), variant: 'destructive' });
+      }
+    } finally {
+      setDirectPublishingId(null);
+    }
+  };
+
   const handleDelete = async (book: PriceBook) => {
     if (!confirm(`Delete price book "${book.name}"? This cannot be undone.`)) return;
     try {
@@ -893,6 +971,16 @@ export default function PriceBookIngestPage() {
   };
 
   // ---------------------------------------------------------------- Rule review/approval (CPQ v2)
+  if (hardwareReviewBook) {
+    return (
+      <HardwareCatalogReviewPanel
+        book={hardwareReviewBook}
+        onClose={() => setHardwareReviewBook(null)}
+        onChanged={() => void loadList()}
+      />
+    );
+  }
+
   if (reviewBook && ruleReviewExt) {
     return (
       <RuleReviewPanel
@@ -972,7 +1060,8 @@ export default function PriceBookIngestPage() {
                       <TableCell className="sticky left-0 bg-background whitespace-nowrap text-xs font-medium">{rLabel}</TableCell>
                       {g.columnLabels.map((_, cIdx) => {
                         const price = viewPrice(rIdx, cIdx);
-                        return <TableCell key={cIdx} className="text-xs tabular-nums">{price != null ? `$${price.toFixed(2)}` : '—'}</TableCell>;
+                        const rawValue = g.cells.find((c) => c.row === rIdx && c.col === cIdx)?.rawValue;
+                        return <TableCell key={cIdx} className="text-xs tabular-nums">{price != null ? `$${price.toFixed(2)}` : (rawValue ?? '—')}</TableCell>;
                       })}
                     </TableRow>
                   ))}
@@ -1849,7 +1938,7 @@ export default function PriceBookIngestPage() {
                           <span className={`text-[11px] font-medium ${gridEmpty ? 'text-destructive' : gridTruncated ? 'text-amber-600' : 'text-muted-foreground'}`}>
                             {gridEmpty
                               ? '0 rows · 0 prices'
-                              : `${ext.grid.rowLabels.length} rows × ${ext.grid.columnLabels.length} cols · ${ext.grid.cells.length} prices`}
+                              : `${ext.grid.rowLabels.length} rows × ${ext.grid.columnLabels.length} cols · ${ext.grid.cells.length} captured values`}
                           </span>
                         )}
                       </div>
@@ -2041,25 +2130,50 @@ export default function PriceBookIngestPage() {
                     <TableCell>
                       <div className="flex items-center gap-2"><FileText className="h-4 w-4 text-muted-foreground" />{b.name}</div>
                       {b.effectiveDate && <p className="text-xs text-muted-foreground mt-0.5">Effective {b.effectiveDate}</p>}
+                      {b.ingestionProfileKey && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          <Badge variant="outline" className="text-[10px]">{b.ingestionProfileKey}</Badge>
+                          {b.ingestionCoverage?.passed === true && (
+                            <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-700">Source verified</Badge>
+                          )}
+                          {b.ingestionCoverage?.passed === false && (
+                            <Badge variant="outline" className="border-destructive/40 bg-destructive/10 text-[10px] text-destructive">Coverage incomplete</Badge>
+                          )}
+                        </div>
+                      )}
                       {b.ocrError && <p className="mt-1 text-xs text-destructive">{b.ocrError}</p>}
                     </TableCell>
                     <TableCell className="capitalize">{b.category?.replace(/_/g, ' ') ?? '—'}</TableCell>
                     <TableCell>{statusBadge(b.ocrStatus)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        {hasPriceBookWorker && b.category === 'hardware' && (b.fileType === 'xlsx' || b.fileType === 'csv') && (
+                        {hasPriceBookWorker && b.category === 'hardware' && (b.fileType === 'xlsx' || b.fileType === 'csv') && b.extractStatus !== 'done' && (
                           <Button size="sm" variant="outline" onClick={() => handleIngestHardware(b)} disabled={hardwareIngestingId === b.id}>
                             {hardwareIngestingId === b.id ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
                             Ingest hardware
                           </Button>
                         )}
-                        {hasPriceBookWorker && b.category === 'lites_louvers_glass' && (b.fileType === 'xlsx' || b.fileType === 'csv') && (
+                        {b.category === 'hardware' && b.extractStatus === 'done' && b.priceBookDocumentId && (
+                          <Button size="sm" variant="outline" onClick={() => setHardwareReviewBook(b)}>
+                            <Eye className="mr-1.5 h-3.5 w-3.5" />Review hardware
+                          </Button>
+                        )}
+                        {hasPriceBookWorker && b.category === 'lites_louvers_glass' && (b.fileType === 'xlsx' || b.fileType === 'csv') && b.extractStatus !== 'done' && (
                           <Button size="sm" variant="outline" onClick={() => handleIngestNgp(b)} disabled={ngpIngestingId === b.id}>
                             {ngpIngestingId === b.id ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
                             Ingest NGP catalog
                           </Button>
                         )}
-                        {b.ocrStatus === 'done' && (
+                        {b.category === 'lites_louvers_glass' && b.extractStatus === 'done' && b.priceBookDocumentId && b.priceBookDocumentStatus !== 'published' && (
+                          <Button size="sm" onClick={() => void publishDeterministicBook(b)} disabled={directPublishingId === b.id}>
+                            {directPublishingId === b.id ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                            Publish NGP
+                          </Button>
+                        )}
+                        {b.priceBookDocumentStatus === 'published' && (
+                          <Badge className="self-center bg-emerald-600 hover:bg-emerald-600">Published</Badge>
+                        )}
+                        {b.ocrStatus === 'done' && b.category !== 'hardware' && !(b.category === 'lites_louvers_glass' && (b.fileType === 'xlsx' || b.fileType === 'csv')) && (
                           <Button size="sm" onClick={() => openReview(b)}>Review &amp; approve</Button>
                         )}
                         {b.ocrStatus === 'error' && (

@@ -19,8 +19,11 @@ import {
   flattenColumnHeader,
   parseSizeLabel,
   parseFrameOpeningRow,
+  parsePageHint,
   normalizeToken,
   parsePrice,
+  interpretGridCell,
+  inferCanonicalSelectors,
 } from './normalize.js';
 
 const CURRENCY = 'USD';
@@ -38,6 +41,10 @@ export async function ensureDraftDocument(sb, book) {
       title: book.name,
       effective_date: book.effective_date ?? null,
       source_file_path: book.source_file_url ?? null,
+      source_file_hash: book.source_sha256 ?? null,
+      page_count: book.source_page_count ?? null,
+      ingestion_profile_key: book.ingestion_profile_key ?? null,
+      ingestion_profile_version: book.ingestion_profile_version ?? null,
       status: 'draft',
       review_status: 'UNREVIEWED',
       notes: `Auto-created from price_books ${book.id} during CPQ v2 ingestion.`,
@@ -56,13 +63,19 @@ export async function ensureDraftDocument(sb, book) {
 async function ensureSourceRegion(sb, documentId, ext) {
   if (ext.source_region_id) {
     // Keep it pointed at the live document (defensive on re-link).
-    await sb.from('source_region').update({ price_book_id: documentId }).eq('id', ext.source_region_id);
+    await sb.from('source_region').update({
+      price_book_id: documentId,
+      page_number: parsePageHint(ext.page_hint),
+      table_title: ext.title ?? null,
+      raw_text: ext.page_hint ?? null,
+    }).eq('id', ext.source_region_id);
     return ext.source_region_id;
   }
   const { data: region, error } = await sb
     .from('source_region')
     .insert({
       price_book_id: documentId,
+      page_number: parsePageHint(ext.page_hint),
       region_type: 'table',
       table_title: ext.title ?? null,
       raw_text: ext.page_hint ?? null,
@@ -84,16 +97,26 @@ async function writeRawCells(sb, documentId, regionId, grid) {
   const rowLabels = grid?.rowLabels ?? [];
   const cells = grid?.cells ?? [];
   if (cells.length === 0) return;
-  const rows = cells.map((c) => ({
-    source_region_id: regionId,
-    price_book_id: documentId,
-    row_index: c.row,
-    col_index: c.col,
-    row_headers: { label: rowLabels[c.row] ?? null },
-    col_headers: { label: colLabels[c.col] ?? null },
-    raw_value: c.price != null ? String(c.price) : null,
-    normalized_value: c.price != null ? String(c.price) : null,
-  }));
+  const rows = cells.flatMap((c) => {
+    const interpreted = interpretGridCell(c.rawValue ?? c.raw_value, c.price);
+    if (!interpreted) return [];
+    const token = normalizeToken(interpreted.rawValue);
+    const normalized = interpreted.price != null
+      ? String(interpreted.price)
+      : token?.kind === 'status'
+        ? token.status
+        : interpreted.rawValue;
+    return [{
+      source_region_id: regionId,
+      price_book_id: documentId,
+      row_index: c.row,
+      col_index: c.col,
+      row_headers: { label: rowLabels[c.row] ?? null },
+      col_headers: { label: colLabels[c.col] ?? null },
+      raw_value: interpreted.rawValue,
+      normalized_value: normalized,
+    }];
+  });
   // Chunk to keep payloads small.
   for (let i = 0; i < rows.length; i += 500) {
     const { error } = await sb.from('raw_table_cell').insert(rows.slice(i, i + 500));
@@ -243,6 +266,15 @@ function seriesCondition(paths, ext) {
   return [{ fieldPath: paths.series, operator: 'EQ', valueType: 'CODE', value1: normalizeSeriesToken(ext.detected_series), sourcePhrase: `series ${ext.detected_series}` }];
 }
 
+/**
+ * Prefer manufacturer-neutral construction selectors. The immutable document
+ * already scopes rules to a manufacturer, so vendor series is only a fallback.
+ */
+function identityConditions(entityType, paths, ext) {
+  const inferred = inferCanonicalSelectors(entityType, ext);
+  return inferred.length > 0 ? inferred : seriesCondition(paths, ext);
+}
+
 function columnConditions(paths, colLabel) {
   const flat = flattenColumnHeader(colLabel);
   const out = [];
@@ -327,8 +359,12 @@ async function compileMatrix(sb, ctx, archetype) {
   let skippedUnparseableSize = 0;
   let skippedRejected = 0;
   for (const cell of grid.cells ?? []) {
-    const price = parsePrice(cell.price);
-    if (price == null || price <= 0) continue;
+    const interpreted = interpretGridCell(cell.rawValue ?? cell.raw_value, cell.price);
+    if (!interpreted) continue;
+    const token = normalizeToken(interpreted.rawValue);
+    const status = token?.kind === 'status' ? token.status : 'PRICED';
+    const price = interpreted.price ?? parsePrice(cell.price);
+    if (status === 'PRICED' && (price == null || price <= 0)) continue;
     const colLabel = colLabels[cell.col] ?? '';
     const rowLabel = rowLabels[cell.row] ?? '';
     // Skip header / non-data cells that otherwise compile into junk rules
@@ -338,7 +374,7 @@ async function compileMatrix(sb, ctx, archetype) {
     // Normalize series + column attrs to the governed vocabulary. A 'reject'
     // value (e.g. a series code/header leaked into the gauge column) skips the
     // whole cell instead of emitting an over-matching rule.
-    const seriesRes = aliasConds(seriesCondition(paths, ext), aliases);
+    const seriesRes = aliasConds(identityConditions(entityType, paths, ext), aliases);
     const colRes = aliasConds(columnConditions(paths, colLabel), aliases);
     if (seriesRes.rejected || colRes.rejected) { skippedRejected++; continue; }
     const colConds = colRes.conds;
@@ -370,13 +406,14 @@ async function compileMatrix(sb, ctx, archetype) {
 
     const { exclusiveGroup, priority } = matrixStacking(entityType, archetype, ext, colConds, sizeConds);
     const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
-      action_type: 'BASE_AMOUNT',
+      action_type: status === 'PRICED' ? 'BASE_AMOUNT' : statusToAction(status),
+      price_status: status,
       charge_category: archetype === 'component_matrix' ? 'component' : 'base',
-      amount: price,
+      amount: status === 'PRICED' ? price : null,
       exclusive_group: exclusiveGroup,
       stacking_behavior: exclusiveGroup ? 'EXCLUSIVE_GROUP' : 'STACK',
       priority,
-      raw_value_text: `${rowLabel} | ${colLabel} = ${price}`,
+      raw_value_text: `${rowLabel} | ${colLabel} = ${interpreted.rawValue}`,
     }));
     await insertConditions(sb, ruleId, [
       ...seriesRes.conds,
@@ -401,17 +438,21 @@ async function compileAdderList(sb, ctx) {
   const rowLabels = grid.rowLabels ?? [];
   const colLabels = grid.columnLabels ?? [];
   // Map a price to each row (first numeric cell on that row).
-  const priceByRow = new Map();
+  const cellByRow = new Map();
   for (const c of grid.cells ?? []) {
-    if (!priceByRow.has(c.row)) priceByRow.set(c.row, parsePrice(c.price));
+    if (!cellByRow.has(c.row)) {
+      const interpreted = interpretGridCell(c.rawValue ?? c.raw_value, c.price);
+      if (interpreted) cellByRow.set(c.row, interpreted);
+    }
   }
   let count = 0;
   for (let r = 0; r < rowLabels.length; r++) {
     const label = String(rowLabels[r] ?? '').trim();
     if (!label) continue;
     const code = extractOptionCode(label);
-    const token = normalizeToken(label) ?? normalizeToken(colLabels[0]);
-    const price = priceByRow.get(r) ?? null;
+    const cell = cellByRow.get(r) ?? null;
+    const token = normalizeToken(cell?.rawValue) ?? normalizeToken(label) ?? normalizeToken(colLabels[0]);
+    const price = cell?.price ?? null;
 
     let action = 'FIXED_ADD';
     let status = 'PRICED';
@@ -427,7 +468,7 @@ async function compileAdderList(sb, ctx) {
 
     // Normalize series to the governed vocabulary; skip if rejected.
     const { conds: addConds, rejected } = aliasConds([
-      ...seriesCondition(ctx.paths, ext),
+      ...identityConditions(entityType, ctx.paths, ext),
       { fieldPath: `${entityType}.option_code`, operator: 'EQ', valueType: 'CODE', value1: code, sourcePhrase: label, nullBehavior: 'IGNORE' },
     ], ctx.aliases);
     if (rejected) continue;
@@ -440,7 +481,7 @@ async function compileAdderList(sb, ctx) {
       amount,
       percentage,
       unit_of_measure: uom,
-      raw_value_text: `${label}${price != null ? ` = ${price}` : ''}`,
+      raw_value_text: `${label}${cell?.rawValue ? ` = ${cell.rawValue}` : ''}`,
     }));
     await insertConditions(sb, ruleId, addConds);
     count++;
@@ -452,21 +493,30 @@ async function compileAdderList(sb, ctx) {
 async function compilePerFoot(sb, ctx) {
   const { documentId, regionId, priceTableId, entityType, ext, grid } = ctx;
   const rowLabels = grid.rowLabels ?? [];
-  const priceByRow = new Map();
-  for (const c of grid.cells ?? []) if (!priceByRow.has(c.row)) priceByRow.set(c.row, parsePrice(c.price));
+  const cellByRow = new Map();
+  for (const c of grid.cells ?? []) {
+    if (!cellByRow.has(c.row)) {
+      const interpreted = interpretGridCell(c.rawValue ?? c.raw_value, c.price);
+      if (interpreted) cellByRow.set(c.row, interpreted);
+    }
+  }
   let count = 0;
   for (let r = 0; r < rowLabels.length; r++) {
     const label = String(rowLabels[r] ?? '').trim();
-    const price = priceByRow.get(r);
-    if (!label || price == null) continue;
+    const cell = cellByRow.get(r) ?? null;
+    const token = normalizeToken(cell?.rawValue);
+    const status = token?.kind === 'status' ? token.status : 'PRICED';
+    const price = cell?.price ?? null;
+    if (!label || (status === 'PRICED' && price == null)) continue;
     const code = extractOptionCode(label);
     const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
-      action_type: 'RATE_X_QUANTITY',
+      action_type: status === 'PRICED' ? 'RATE_X_QUANTITY' : statusToAction(status),
+      price_status: status,
       charge_category: 'linear',
       item_or_option_code: code,
-      amount: price,
-      unit_of_measure: 'FT',
-      raw_value_text: `${label} = ${price}/ft`,
+      amount: status === 'PRICED' ? price : null,
+      unit_of_measure: status === 'PRICED' ? 'FT' : null,
+      raw_value_text: `${label} = ${cell?.rawValue ?? ''}`,
     }));
     await insertConditions(sb, ruleId, [
       { fieldPath: `${entityType}.option_code`, operator: 'EQ', valueType: 'CODE', value1: code, sourcePhrase: label, nullBehavior: 'IGNORE' },
@@ -522,7 +572,7 @@ async function compileNarrative(sb, ctx) {
 /** Compile a whole-table status (included / NC / NA / CF). */
 async function compileStatusTable(sb, ctx, status) {
   const { documentId, regionId, priceTableId, entityType, ext } = ctx;
-  const { conds, rejected } = aliasConds(seriesCondition(ctx.paths, ext), ctx.aliases);
+  const { conds, rejected } = aliasConds(identityConditions(entityType, ctx.paths, ext), ctx.aliases);
   if (rejected) return 0;
   const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
     action_type: statusToAction(status),
@@ -582,7 +632,7 @@ async function compileQuantityTier(sb, ctx) {
   }
   if (tiers.length < 2) return compileAdderList(sb, ctx); // not actually a tier grid
 
-  const { conds, rejected } = aliasConds(seriesCondition(ctx.paths, ext), ctx.aliases);
+  const { conds, rejected } = aliasConds(identityConditions(entityType, ctx.paths, ext), ctx.aliases);
   if (rejected) return 0;
   const ruleId = await insertRule(sb, baseRule(documentId, regionId, priceTableId, entityType, ext, {
     action_type: 'TIERED_ADD',

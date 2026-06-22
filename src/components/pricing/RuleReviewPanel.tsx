@@ -15,7 +15,7 @@ import {
   type CompiledRuleReview,
   type DocumentCompileSummary,
 } from '@/lib/price-rules-api';
-import { publishPriceBookDocumentWithQa, QaGateError, type QaResult } from '@/lib/cpq/qa-checks';
+import { publishPriceBookDocumentWithQa, qaAllowsOverride, QaGateError, type QaResult } from '@/lib/cpq/qa-checks';
 import type { PriceBook, PriceBookExtraction, RuleCondition } from '@/types';
 
 interface RuleReviewPanelProps {
@@ -146,7 +146,9 @@ export default function RuleReviewPanel({ book, extraction, onClose, onChanged }
         setQaResult(err.result);
         toast({
           title: 'Blocked by QA gate',
-          description: `${err.result.blockingCount} blocking issue(s) must be resolved (or override) before publishing.`,
+          description: qaAllowsOverride(err.result)
+            ? `${err.result.blockingCount} error(s) must be resolved or explicitly overridden before publishing.`
+            : `${err.result.blockingCount} blocking source-integrity issue(s) must be resolved before publishing.`,
           variant: 'destructive',
         });
       } else {
@@ -293,7 +295,7 @@ export default function RuleReviewPanel({ book, extraction, onClose, onChanged }
                     <span>{f.detail}</span>
                   </div>
                 ))}
-                {!qaResult.passed && documentId && summary?.status !== 'published' && (
+                {!qaResult.passed && qaAllowsOverride(qaResult) && documentId && summary?.status !== 'published' && (
                   <Button variant="outline" size="sm" className="mt-2" onClick={() => handlePublish(true)} disabled={working}>
                     <Rocket className="mr-1.5 h-3.5 w-3.5" /> Publish anyway (override QA gate)
                   </Button>

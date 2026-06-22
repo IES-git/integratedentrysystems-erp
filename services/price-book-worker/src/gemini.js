@@ -99,7 +99,13 @@ export function recoverCells(jsonText) {
   while ((m = re.exec(jsonText)) !== null) {
     try {
       const o = JSON.parse(m[0]);
-      if (typeof o.row === 'number' && typeof o.col === 'number' && typeof o.price === 'number') cells.push(o);
+      if (
+        typeof o.row === 'number' &&
+        typeof o.col === 'number' &&
+        (typeof o.price === 'number' || typeof o.raw_value === 'string')
+      ) {
+        cells.push(o);
+      }
     } catch { /* skip */ }
   }
   return cells;
@@ -128,14 +134,15 @@ export function recoverCatalogTables(jsonText) {
  * Build the catalog prompt for a PDF/image file (unchanged path — Gemini reads numbers).
  * For spreadsheets use buildSpreadsheetCatalogPrompt instead.
  */
-export function buildCatalogPrompt(categoryHint, aliasHints, csvText, excludeTitles = []) {
+export function buildCatalogPrompt(categoryHint, aliasHints, csvText, excludeTitles = [], profileChecklist = '') {
   const aliasSection = aliasHints ? `\nKNOWN FIELD ALIASES (context):\n${aliasHints}\n` : '';
   const catSection = categoryHint ? `\nThe user expects this book to be primarily "${categoryHint}", but it WILL contain other categories too (frames, hardware, adders). Include them all.` : '';
   const source = csvText ? `\nPRICE BOOK CONTENT (CSV/text):\n\n${csvText.slice(0, 80000)}\n` : '';
+  const profileSection = profileChecklist ? `\nSOURCE PROFILE COVERAGE CHECKLIST:\n${profileChecklist}\n` : '';
   const excludeSection = excludeTitles.length
-    ? `\nALREADY-LISTED TABLES (do NOT repeat any of these; list ONLY tables that are NOT in this list):\n${excludeTitles.map((t) => `- ${t}`).join('\n')}\n`
+    ? `\nALREADY-LISTED TABLE LOCATIONS (do NOT repeat the same title AT THE SAME LOCATION; the same printed heading on another physical page is a distinct entry and must still be listed):\n${excludeTitles.map((t) => `- ${t}`).join('\n')}\n`
     : '';
-  return `You are cataloging a manufacturer price book for commercial doors, frames, hardware, glass/lites, and panels.${catSection}${aliasSection}${source}${excludeSection}
+  return `You are cataloging a manufacturer price book for commercial doors, frames, hardware, glass/lites, and panels.${catSection}${aliasSection}${profileSection}${source}${excludeSection}
 Build a COMPLETE index of EVERY distinct pricing table or priced section in this document, from the FIRST page to the LAST.
 
 How to be exhaustive:
@@ -143,6 +150,7 @@ How to be exhaustive:
 2. Then page through the ENTIRE document in order. A real book has MANY tables: every door series has its own size grid (and often header/transom/louver/glass add tables), every frame series has its own grid, plus standalone hardware lists and MANY option/adder/surcharge tables (e.g. "add for fire label", "add for header", finish upcharges, oversize upcharges, prep charges).
 3. Treat each size grid, each flat price list, and each adder/surcharge table as a SEPARATE entry — never merge two printed tables into one.
    IMPORTANT: A single PDF page titled "Additional Preparations (Adders)" often contains MULTIPLE sub-sections (e.g. one section for astragals, a separate section for lock types, another for hinges, another for undercuts). These are DISTINCT adder groups — list each sub-section as its own entry. Use the section heading as the title (e.g. "H Series - Astragal Adders", "H Series - Lock Prep Adders", "H Series - Hinge Adders").
+   Repeated headings on consecutive pages (for example "Door and Frame Preparation Charges") are NOT duplicates when the physical page differs. List every priced page/sub-table separately with its physical PDF page.
 4. Do NOT stop after the first few. Err on the side of MORE entries.
 
 For EACH table/section return:
@@ -150,7 +158,7 @@ For EACH table/section return:
 - category: one of doors|frames|hardware|lites_louvers_glass|panels|other.
 - series: the product line/series name, or null.
 - kind: size_grid (rows=sizes, cols=options) | flat_list (item -> price) | adder (surcharge/upcharge).
-- page_hint: the page number or page range where this table appears (e.g. "p. 12" or "pp. 12-13"). REQUIRED — give your best estimate.
+- page_hint: the PHYSICAL PDF page index shown by the PDF viewer, where the cover is page 1 (e.g. "PDF p. 15" or "PDF pp. 15-16"). Do not use a printed section label such as "R-2", "D-4", or "S-10" by itself. REQUIRED.
 - description: <= 12 words. Keep it short to leave room for more tables.
 
 Do NOT extract any prices yet. Include vendor_name if shown. Return ONLY valid JSON matching the schema.`;
@@ -289,10 +297,10 @@ export function getCatalogSchema() {
  * @param {{ field_key: string, field_label: string, description: string|null }[]} [fieldDefs]
  *   When provided (for adder tables), Gemini will try to match each row to a field key.
  */
-export function buildGridPrompt(title, category, series, kind, pageHint, aliasHints, csvText, fieldDefs = []) {
+export function buildGridPrompt(title, category, series, kind, pageHint, aliasHints, csvText, fieldDefs = [], sourceWindow = null) {
   const aliasSection = aliasHints ? `\nFIELD ALIASES — map column headers to these standard field keys when recognized (use the standard key in column_field_hints):\n${aliasHints}\n` : '';
   const source = csvText ? `\nPRICE BOOK CONTENT (CSV/text):\n\n${csvText.slice(0, 80000)}\n` : '';
-  const loc = pageHint ? ` located at ${pageHint}` : '';
+  const loc = pageHint ? ` located at source ${pageHint}` : '';
   const isAdder = kind === 'adder' || kind === 'flat_list';
 
   // For adder tables, append the known field list so Gemini can auto-classify rows
@@ -303,19 +311,27 @@ export function buildGridPrompt(title, category, series, kind, pageHint, aliasHi
   const rowHintInstruction = isAdder && fieldDefs.length > 0
     ? `6. row_field_hints: for each adder/option row, your best guess at the field_key it belongs to (from the KNOWN ITEM FIELDS list above). Use { row, field_key } pairs. Omit the row if you are unsure — do NOT guess randomly; only include confident matches.`
     : '';
+  const locationInstruction = sourceWindow
+    ? `The uploaded PDF is a cropped window containing SOURCE physical pages ${sourceWindow.start}-${sourceWindow.end}; its local viewer numbering restarts at 1. Find "${title}" by its printed heading inside this window rather than trying to navigate to local page ${pageHint}.`
+    : pageHint
+      ? `Go to source ${pageHint} and find the table titled "${title}".`
+      : `Find the table titled "${title}".`;
 
   return `You are extracting ONE specific pricing table from a manufacturer price book.${source}
 TARGET TABLE: "${title}"${loc} — category: ${category ?? 'unknown'}, series: ${series ?? 'n/a'}, kind: ${kind ?? 'size_grid'}.${aliasSection}${fieldHintSection}
-${pageHint ? `Go to ${pageHint} and find the table titled "${title}". ` : ''}Extract the COMPLETE grid for THIS table ONLY. Do NOT merge in rows or columns from any other table, and do NOT extract a different table even if it looks similar.
+${locationInstruction} Extract the COMPLETE grid for THIS table ONLY. Do NOT merge in rows or columns from any other table, and do NOT extract a different table even if it looks similar.
 
 1. column_labels: every column header left-to-right, exactly as printed. For a flat_list or adder table that has a single price column, use one column labeled "Price".
 2. row_labels: every row top-to-bottom (sizes like "3'0\" x 7'0\"" for grids, or item/option names for flat_list/adder tables). Preserve the printed order and the exact size formatting.
-3. cells: every priced cell as { row, col, price } using 0-based indices into row_labels/column_labels. Omit blank/empty cells. Capture EVERY priced cell across ALL rows and ALL columns — do not stop early or sample.
+3. cells: every NON-BLANK value cell as { row, col, raw_value, price? } using 0-based indices into row_labels/column_labels.
+   - raw_value is REQUIRED and must preserve the printed text exactly (examples: "$733", "N/C", "N/A", "CF", "Included", "Add 25%").
+   - price is present only when the cell is a numeric money amount. Do not invent 0 for N/C, N/A, CF, Included, or blank cells.
+   - Omit truly blank/empty cells. Capture EVERY value across ALL rows and ALL columns — do not stop early or sample.
 4. column_field_hints: { col, field_key } for any column mappable to a standard field key.
 5. warnings: note anything unreadable, ambiguous, or any prices that appear to continue onto another page.
 ${rowHintInstruction}
 
-If the table spans multiple pages, include the continuation rows too. Return ONLY valid JSON. Prices are plain numbers (no $, commas, or text).`;
+If the table spans multiple pages, include the continuation rows too. Return ONLY valid JSON. Numeric prices are plain numbers; raw_value keeps the source text.`;
 }
 
 export function getGridSchema() {
@@ -324,7 +340,19 @@ export function getGridSchema() {
     properties: {
       column_labels: { type: 'array', items: { type: 'string' } },
       row_labels: { type: 'array', items: { type: 'string' } },
-      cells: { type: 'array', items: { type: 'object', properties: { row: { type: 'integer' }, col: { type: 'integer' }, price: { type: 'number' } }, required: ['row', 'col', 'price'] } },
+      cells: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            row: { type: 'integer' },
+            col: { type: 'integer' },
+            raw_value: { type: 'string' },
+            price: { type: 'number' },
+          },
+          required: ['row', 'col', 'raw_value'],
+        },
+      },
       column_field_hints: { type: 'array', items: { type: 'object', properties: { col: { type: 'integer' }, field_key: { type: 'string' } }, required: ['col', 'field_key'] } },
       row_field_hints: { type: 'array', items: { type: 'object', properties: { row: { type: 'integer' }, field_key: { type: 'string' } }, required: ['row', 'field_key'] } },
       warnings: { type: 'array', items: { type: 'string' } },

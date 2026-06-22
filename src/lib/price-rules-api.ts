@@ -26,6 +26,93 @@ import type {
   RuleEntityType,
 } from '@/types';
 
+export type ManufacturerPricedEntity = 'door' | 'frame' | 'panel';
+
+/** Latest published price-book document per manufacturer and component type. */
+export interface ManufacturerCatalogOption {
+  manufacturerId: string;
+  manufacturerName: string;
+  documentIds: Partial<Record<ManufacturerPricedEntity, string>>;
+  effectiveDates: Partial<Record<ManufacturerPricedEntity, string | null>>;
+  titles: Partial<Record<ManufacturerPricedEntity, string>>;
+}
+
+/**
+ * Lists manufacturers that have a published canonical rule book. A manufacturer
+ * can use one document for all components or separate door/frame revisions; the
+ * returned map pins the correct immutable document for each component type.
+ */
+export async function listPublishedManufacturerCatalogs(
+  pricedAsOf = new Date().toISOString().slice(0, 10),
+): Promise<ManufacturerCatalogOption[]> {
+  const { data: docs, error: docErr } = await supabase
+    .from('price_book_document')
+    .select('id, manufacturer_id, title, effective_date, created_at')
+    .eq('status', 'published')
+    .eq('review_status', 'APPROVED')
+    .eq('source_verified', true)
+    .not('manufacturer_id', 'is', null)
+    .order('effective_date', { ascending: false, nullsFirst: false })
+    .order('created_at', { ascending: false });
+  if (docErr) throw new Error(docErr.message);
+
+  const eligibleDocs = (docs ?? []).filter(
+    (d) => !d.effective_date || String(d.effective_date) <= pricedAsOf,
+  );
+  const documentIds = eligibleDocs.map((d) => d.id as string);
+  if (documentIds.length === 0) return [];
+
+  const manufacturerIds = [...new Set(eligibleDocs.map((d) => d.manufacturer_id as string))];
+  const [{ data: tables, error: tableErr }, { data: companies, error: companyErr }] = await Promise.all([
+    supabase
+      .from('price_table')
+      .select('price_book_id, entity_type')
+      .in('price_book_id', documentIds)
+      .in('entity_type', ['door', 'frame', 'panel']),
+    supabase
+      .from('companies')
+      .select('id, name')
+      .in('id', manufacturerIds),
+  ]);
+  if (tableErr) throw new Error(tableErr.message);
+  if (companyErr) throw new Error(companyErr.message);
+
+  const entitiesByDocument = new Map<string, Set<ManufacturerPricedEntity>>();
+  for (const row of tables ?? []) {
+    const entity = row.entity_type as ManufacturerPricedEntity;
+    const id = row.price_book_id as string;
+    if (!entitiesByDocument.has(id)) entitiesByDocument.set(id, new Set());
+    entitiesByDocument.get(id)!.add(entity);
+  }
+  const nameById = new Map((companies ?? []).map((c) => [c.id as string, c.name as string]));
+  const byManufacturer = new Map<string, ManufacturerCatalogOption>();
+
+  // Documents are already newest-first; first assignment per entity wins.
+  for (const doc of eligibleDocs) {
+    const manufacturerId = doc.manufacturer_id as string;
+    const entities = entitiesByDocument.get(doc.id as string);
+    if (!entities || entities.size === 0) continue;
+    const option = byManufacturer.get(manufacturerId) ?? {
+      manufacturerId,
+      manufacturerName: nameById.get(manufacturerId) ?? 'Unknown manufacturer',
+      documentIds: {},
+      effectiveDates: {},
+      titles: {},
+    };
+    for (const entity of entities) {
+      if (option.documentIds[entity]) continue;
+      option.documentIds[entity] = doc.id as string;
+      option.effectiveDates[entity] = (doc.effective_date as string | null) ?? null;
+      option.titles[entity] = doc.title as string;
+    }
+    byManufacturer.set(manufacturerId, option);
+  }
+
+  return [...byManufacturer.values()].sort((a, b) =>
+    a.manufacturerName.localeCompare(b.manufacturerName),
+  );
+}
+
 /** A compiled price rule with its conditions, for the review UI. */
 export interface CompiledPriceRule extends PriceRule {
   conditions: RuleCondition[];
@@ -282,7 +369,13 @@ export async function rejectCompiledExtraction(input: ApproveCompiledInput): Pro
 export async function publishPriceBookDocument(documentId: string, supersedesId?: string | null): Promise<void> {
   const { error } = await supabase
     .from('price_book_document')
-    .update({ status: 'published', review_status: 'APPROVED', supersedes_id: supersedesId ?? null })
+    .update({
+      status: 'published',
+      review_status: 'APPROVED',
+      source_verified: true,
+      source_verified_at: new Date().toISOString(),
+      supersedes_id: supersedesId ?? null,
+    })
     .eq('id', documentId);
   if (error) throw new Error(error.message);
   if (supersedesId) {

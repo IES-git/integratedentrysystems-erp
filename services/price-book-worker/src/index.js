@@ -83,7 +83,10 @@ app.post('/extract-all', requireUser, async (req, res) => {
   const { data: book, error } = await admin.from('price_books').select('id').eq('id', priceBookId).single();
   if (error || !book) return res.status(404).json({ error: 'Price book not found' });
 
-  await admin.from('price_books').update({ extract_status: 'processing', extract_error: null }).eq('id', priceBookId);
+  await admin.from('price_books').update({
+    extract_status: 'processing',
+    extract_error: null,
+  }).eq('id', priceBookId);
   res.status(202).json({ success: true, started: true, priceBookId });
 
   // Fire-and-forget; runExtractAll sets extract_status done/error. The frontend polls.
@@ -137,13 +140,23 @@ app.post('/ingest-hardware', requireUser, async (req, res) => {
   const { data: book, error } = await admin.from('price_books').select('id').eq('id', priceBookId).single();
   if (error || !book) return res.status(404).json({ error: 'Price book not found' });
 
-  await admin.from('price_books').update({ extract_status: 'processing', extract_error: null }).eq('id', priceBookId);
+  await admin.from('price_books').update({
+    ocr_status: 'processing',
+    ocr_error: null,
+    extract_status: 'processing',
+    extract_error: null,
+  }).eq('id', priceBookId);
   res.status(202).json({ success: true, started: true, priceBookId });
 
   runIngestHardware(admin, priceBookId).catch(async (e) => {
     const message = e instanceof Error ? e.message : String(e);
     console.error('[ingest-hardware] background error:', message);
-    await admin.from('price_books').update({ extract_status: 'error', extract_error: message }).eq('id', priceBookId);
+    await admin.from('price_books').update({
+      ocr_status: 'error',
+      ocr_error: message,
+      extract_status: 'error',
+      extract_error: message,
+    }).eq('id', priceBookId);
   });
 });
 
@@ -155,13 +168,23 @@ app.post('/ingest-ngp-catalog', requireUser, async (req, res) => {
   const { data: book, error } = await admin.from('price_books').select('id').eq('id', priceBookId).single();
   if (error || !book) return res.status(404).json({ error: 'Price book not found' });
 
-  await admin.from('price_books').update({ extract_status: 'processing', extract_error: null }).eq('id', priceBookId);
+  await admin.from('price_books').update({
+    ocr_status: 'processing',
+    ocr_error: null,
+    extract_status: 'processing',
+    extract_error: null,
+  }).eq('id', priceBookId);
   res.status(202).json({ success: true, started: true, priceBookId });
 
   runIngestNgp(admin, priceBookId).catch(async (e) => {
     const message = e instanceof Error ? e.message : String(e);
     console.error('[ingest-ngp-catalog] background error:', message);
-    await admin.from('price_books').update({ extract_status: 'error', extract_error: message }).eq('id', priceBookId);
+    await admin.from('price_books').update({
+      ocr_status: 'error',
+      ocr_error: message,
+      extract_status: 'error',
+      extract_error: message,
+    }).eq('id', priceBookId);
   });
 });
 

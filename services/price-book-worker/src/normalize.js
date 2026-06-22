@@ -99,6 +99,176 @@ export function parsePrice(raw) {
   return isFinite(n) ? n : null;
 }
 
+/**
+ * Preserve one non-blank source cell without forcing it to be numeric.
+ *
+ * Price books use semantic tokens such as N/C, INCLUDED, N/A, and CF in the
+ * same cells that otherwise contain prices. Dropping those cells turns an
+ * explicit manufacturer rule into a silent gap. This helper keeps the exact
+ * source text and only assigns `price` when the cell is genuinely numeric.
+ *
+ * @param {unknown} raw
+ * @param {unknown} [explicitPrice]
+ * @returns {{ rawValue: string, price: number|null } | null}
+ */
+export function interpretGridCell(raw, explicitPrice = null) {
+  const source = raw ?? explicitPrice;
+  if (source == null) return null;
+  const rawValue = String(source).trim();
+  if (!rawValue) return null;
+
+  // Semantic tokens are first-class and must not be parsed as money.
+  const token = normalizeToken(rawValue);
+  if (token && token.kind !== 'number') return { rawValue, price: null };
+
+  if (typeof explicitPrice === 'number' && Number.isFinite(explicitPrice)) {
+    return { rawValue, price: explicitPrice };
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return { rawValue, price: raw };
+  }
+
+  // Strict money/number cell only. Avoid turning labels such as "Size 36" or
+  // "Add 25%" into a price.
+  const compact = rawValue.replace(/\s+/g, '');
+  if (!/^\(?\$?-?\d[\d,]*(?:\.\d+)?\)?$/.test(compact)) {
+    return { rawValue, price: null };
+  }
+  const negative = compact.startsWith('(') && compact.endsWith(')');
+  const parsed = Number(compact.replace(/[,$()]/g, ''));
+  return Number.isFinite(parsed)
+    ? { rawValue, price: negative ? -parsed : parsed }
+    : { rawValue, price: null };
+}
+
+/**
+ * Parse the first printed PDF page number from an extractor page hint.
+ * Spreadsheet hints intentionally return null.
+ *
+ * @param {unknown} raw
+ * @returns {number|null}
+ */
+export function parsePageHint(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text || /\bsheet\b/i.test(text)) return null;
+  const explicit = text.match(/\b(?:p{1,2}\.?|pages?)\s*#?\s*(\d{1,4})\b/i);
+  if (explicit) return Number(explicit[1]);
+  if (/^\s*\d{1,4}(?:\s*[-–—]\s*\d{1,4})?\s*$/.test(text)) {
+    return Number(text.match(/\d{1,4}/)?.[0] ?? NaN) || null;
+  }
+  return null;
+}
+
+/**
+ * Infer manufacturer-neutral selectors from a table title/description/series.
+ *
+ * The selected immutable price-book document already supplies manufacturer
+ * identity. Base rules should match canonical construction specs rather than
+ * require vendor-specific series codes in the opening schema.
+ *
+ * @param {string} entityType
+ * @param {{ title?: string|null, description?: string|null, detected_series?: string|null, series?: string|null }} meta
+ * @returns {{ fieldPath:string, operator:string, valueType:string, value1:string, normalizedValue:string, sourcePhrase:string }[]}
+ */
+export function inferCanonicalSelectors(entityType, meta = {}) {
+  const title = String(meta.title ?? '');
+  const description = String(meta.description ?? '');
+  const seriesRaw = String(meta.detected_series ?? meta.series ?? '').replace(/\s+series$/i, '').trim();
+  const series = seriesRaw.toUpperCase();
+  const titleHay = title.toLowerCase();
+  const descriptionHay = description.toLowerCase();
+  const hay = `${titleHay} ${descriptionHay}`;
+  const sourcePhrase = [title, seriesRaw].filter(Boolean).join(' | ');
+  const out = [];
+  const add = (fieldPath, value1, operator = 'EQ') => {
+    if (out.some((c) => c.fieldPath === fieldPath)) return;
+    out.push({
+      fieldPath,
+      operator,
+      valueType: 'CODE',
+      value1,
+      normalizedValue: value1.toLowerCase(),
+      sourcePhrase,
+    });
+  };
+
+  if (entityType === 'door') {
+    let core = null;
+    if (/temperature[- ]?rise|\btemp(?:erature)?\s*rise\b/.test(titleHay)) core = 'temperature rise';
+    else if (/polyurethane/.test(titleHay)) core = 'polyurethane';
+    else if (/polystyrene|foam core/.test(titleHay)) core = 'polystyrene';
+    else if (/steel[- ]?stiffen/.test(titleHay)) core = 'steel stiffened';
+    else if (/fiberglass/.test(titleHay)) core = 'fiberglass';
+    else if (/honeycomb|glued core/.test(titleHay)) core = 'Honeycomb';
+    else if (/^(HP|HPF|CHP|EP|EPF)$/.test(series)) core = 'polystyrene';
+    else if (/^(HT|HTF|CHT)$/.test(series)) core = 'polyurethane';
+    else if (/^(HR|HRF|CHR)$/.test(series)) core = 'temperature rise';
+    else if (/^(LW|LWF|C)$/.test(series)) core = 'steel stiffened';
+    else if (/^(H|HF|CH|EH|EHF)$/.test(series)) core = 'Honeycomb';
+    else if (/^(RI|HC|HCSS)$/.test(series)) core = 'Honeycomb';
+    else if (/^(LP|PS|PSSS)$/.test(series)) core = 'polystyrene';
+    else if (/^(PU|PUSS)$/.test(series)) core = 'polyurethane';
+    else if (/^(MS|ST|STSS)$/.test(series)) core = 'steel stiffened';
+    else if (/^TR$/.test(series)) core = 'temperature rise';
+    else if (/temperature[- ]?rise|\btemp(?:erature)?\s*rise\b/.test(descriptionHay)) core = 'temperature rise';
+    else if (/polyurethane/.test(descriptionHay)) core = 'polyurethane';
+    else if (/polystyrene|foam core/.test(descriptionHay)) core = 'polystyrene';
+    else if (/steel[- ]?stiffen/.test(descriptionHay)) core = 'steel stiffened';
+    else if (/fiberglass/.test(descriptionHay)) core = 'fiberglass';
+    else if (/honeycomb|glued core/.test(descriptionHay)) core = 'Honeycomb';
+
+    let edge = null;
+    if (/continuous(?:ly)?[- ]?weld|continuous throat weld/.test(titleHay)) {
+      edge = 'continuous weld';
+    } else if (/seamless|tack[- ]?and[- ]?fill|tack[- ]?fill/.test(titleHay)) {
+      edge = 'seamless tack-and-fill';
+    } else if (/emboss/.test(titleHay)) {
+      edge = 'embossed';
+    } else if (/lock[- ]?seam/.test(titleHay)) {
+      edge = 'Lockseam';
+    } else if (/^(CH|CHP|CHT|CHR|C)$/.test(series)) {
+      edge = 'continuous weld';
+    } else if (/^(EH|EHF|EP|EPF)$/.test(series)) {
+      edge = 'embossed';
+    } else if (/^(HF|HPF|HTF|HRF|LWF)$/.test(series)) {
+      edge = 'seamless tack-and-fill';
+    } else if (/^(H|HP|HT|HR|LW)$/.test(series)) {
+      edge = 'Lockseam';
+    } else if (/^(RI|LP|MS|HC|HCSS|PS|PSSS|PU|PUSS|ST|STSS|TR)$/.test(series)) {
+      edge = 'Lockseam';
+    } else if (/continuous(?:ly)?[- ]?weld|continuous throat weld/.test(descriptionHay)) {
+      edge = 'continuous weld';
+    } else if (/seamless|tack[- ]?and[- ]?fill|tack[- ]?fill/.test(descriptionHay)) {
+      edge = 'seamless tack-and-fill';
+    } else if (/emboss/.test(descriptionHay)) {
+      edge = 'embossed';
+    } else if (/lock[- ]?seam/.test(descriptionHay)) {
+      edge = 'Lockseam';
+    }
+
+    if (core) add('door.core_type', core);
+    if (edge) add('door.edge_seam_construction', edge);
+  }
+
+  if (entityType === 'frame') {
+    if (/drywall|steel stud|wood stud/.test(hay)) {
+      add('opening.wall_construction', 'steel stud|wood stud|drywall', 'IN');
+    } else if (/masonry|mason(?:ry)? wall/.test(hay)) {
+      add('opening.wall_construction', 'masonry');
+    } else if (/^(F|SR|SQ|SU)$/.test(series)) {
+      add('opening.wall_construction', 'masonry');
+    } else if (/^(DW|DR|DQ|DU|BQ|BU|BR)$/.test(series)) {
+      add('opening.wall_construction', 'steel stud|wood stud|drywall', 'IN');
+    }
+
+    if (/\bknock[- ]?down\b|\bkd\b/.test(hay)) add('frame.assembly_welding', 'KD');
+    else if (/continuous throat weld|\bcw\b/.test(hay)) add('frame.assembly_welding', 'CW continuous throat weld');
+    else if (/face[- ]?weld|\bfw\b/.test(hay)) add('frame.assembly_welding', 'FW setup and face weld');
+  }
+
+  return out;
+}
+
 const GAUGE_RE = /\b(7|10|11|12|14|16|18|20|22|24)\s*(?:ga|gauge|gage)\b/i;
 const MATERIAL_RE = /\b(crs|cold rolled|galv(?:annealed|anized)?|a60|g60|g90|stainless|ss|304|316|alum(?:inum)?)\b/i;
 const DEPTH_RE = /\b(\d+(?:\s+\d\/\d)?(?:\.\d+)?)\s*(?:"|in\b|inch)/i;
@@ -176,14 +346,36 @@ export function parseSizeLabel(label) {
   const s = String(label ?? '').trim();
   if (!s) return { width: null, height: null };
 
+  const parseListedDimension = (raw, max) => {
+    const values = String(raw ?? '')
+      .split(/[,/&]/)
+      .map((part) => plausible(feetInchesToInches(part.trim()), max))
+      .filter((value) => value != null);
+    return values.length > 0 ? Math.max(...values) : null;
+  };
+
   // Explicit width x height.
   if (/[x×]/i.test(s)) {
     const parts = s.split(/\s*[x×]\s*/i);
-    const lastWidth = (parts[0] ?? '').split(/[,/]/).map((p) => p.trim()).filter(Boolean).pop() ?? parts[0];
     return {
-      width: plausible(feetInchesToInches(lastWidth), MAX_NOMINAL_WIDTH_IN),
-      height: parts[1] ? plausible(feetInchesToInches(parts[1]), MAX_NOMINAL_HEIGHT_IN) : null,
+      width: parseListedDimension(parts[0], MAX_NOMINAL_WIDTH_IN),
+      height: parseListedDimension(parts[1], MAX_NOMINAL_HEIGHT_IN),
     };
+  }
+
+  // Extracted door grids commonly serialize the width choices and height as
+  // separate pipe-delimited row headers:
+  //   "2-6, 2-8, 2-10, 3-0 | 7' 0\""
+  // Treat the widest listed width as the inclusive width bound and the largest
+  // listed height as the inclusive height bound. Without this branch the old
+  // parser consumed only the final width and silently dropped the height.
+  if (s.includes('|')) {
+    const parts = s.split('|').map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const width = parseListedDimension(parts[0], MAX_NOMINAL_WIDTH_IN);
+      const height = parseListedDimension(parts[1], MAX_NOMINAL_HEIGHT_IN);
+      if (width != null || height != null) return { width, height };
+    }
   }
 
   // Compact concatenated size code (no separator): "2070" -> 24 x 84.
@@ -192,8 +384,7 @@ export function parseSizeLabel(label) {
 
   // Single feet-inches dimension ("3-0", "20-0", "2-0, 2-4").
   if (/\d\s*[-'’]\s*\d/.test(s)) {
-    const lastWidth = s.split(/[,/]/).map((p) => p.trim()).filter(Boolean).pop() ?? s;
-    return { width: plausible(feetInchesToInches(lastWidth), MAX_NOMINAL_WIDTH_IN), height: null };
+    return { width: parseListedDimension(s, MAX_NOMINAL_WIDTH_IN), height: null };
   }
 
   // Not a recognizable dimension (bare number, 3/5-digit shortcut, junk).
@@ -310,9 +501,9 @@ export function categoryToEntityType(category) {
 export function fieldPaths(entityType) {
   switch (entityType) {
     case 'door':
-      return { series: 'door.door_series_construction', gauge: 'door.door_gauge', material: 'door.door_material', width: 'door.nominal_door_width', height: 'door.nominal_door_height', depth: null };
+      return { series: 'door.door_series_construction', core: 'door.core_type', edge: 'door.edge_seam_construction', gauge: 'door.door_gauge', material: 'door.door_material', width: 'door.nominal_door_width', height: 'door.nominal_door_height', depth: null };
     case 'frame':
-      return { series: 'frame.frame_series', gauge: 'frame.frame_gauge', material: 'frame.frame_material', width: 'frame.nominal_frame_width', height: 'frame.nominal_frame_height', depth: 'frame.jamb_depth', type: 'frame.frame_type' };
+      return { series: 'frame.frame_series', gauge: 'frame.frame_gauge', material: 'frame.frame_material', width: 'frame.nominal_frame_width', height: 'frame.nominal_frame_height', depth: 'frame.jamb_depth', type: 'frame.frame_type', wall: 'opening.wall_construction', assembly: 'frame.assembly_welding' };
     case 'panel':
       return { series: 'panel.panel_construction_series', gauge: 'panel.panel_gauge', material: 'panel.panel_material', width: 'panel.panel_width', height: 'panel.panel_height', depth: null };
     default:

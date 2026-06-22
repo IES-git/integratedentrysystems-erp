@@ -1,6 +1,7 @@
 // Catalog + per-table grid extraction jobs. Ported from the Supabase Edge
 // Functions, but with no wall-clock limit (runs on Render).
 
+import { createHash } from 'node:crypto';
 import {
   ALLOWED_CATEGORIES,
   getMimeType,
@@ -20,6 +21,13 @@ import {
   getSpreadsheetGridSchema,
 } from './gemini.js';
 import { parseSpreadsheet, extractGridFromSheet } from './spreadsheet.js';
+import { interpretGridCell, normalizeToken } from './normalize.js';
+import { getPdfPageCount, slicePdfToPageHint } from './pdf.js';
+import {
+  buildProfileCatalogChecklist,
+  evaluateCatalogProfileCoverage,
+  identifyPriceBookProfile,
+} from './profiles.js';
 
 /** True when the file is a spreadsheet (handled by SheetJS instead of Gemini vision). */
 function isSpreadsheet(fileType) {
@@ -29,7 +37,7 @@ function isSpreadsheet(fileType) {
 const CATALOG_MAX_TOKENS = 16384;
 const GRID_MAX_TOKENS = 24576;
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
-const MAX_TABLES = 200;
+const MAX_TABLES = 500;
 // Catalog enumeration is repeated until the model reports no new tables (or it
 // stops being truncated). Bounded so a misbehaving model can't loop forever.
 const MAX_CATALOG_ROUNDS = 10;
@@ -54,15 +62,24 @@ async function downloadBytes(sb, path) {
  * Returns { tables, vendorName, truncated } where `truncated` flags that we
  * stopped while the model was still being cut off (i.e. possibly incomplete).
  */
-async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart) {
+async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart, profile = null) {
   const all = [];
   const seen = new Set();
   let vendorName = null;
   let lastTruncated = false;
+  let roundsUsed = 0;
+  let reachedNaturalStop = false;
 
   for (let round = 0; round < MAX_CATALOG_ROUNDS && all.length < MAX_TABLES; round++) {
-    const excludeTitles = all.map((t) => t.title);
-    const prompt = buildCatalogPrompt(book.category, aliasHints, csvText, excludeTitles);
+    roundsUsed = round + 1;
+    const excludeTitles = all.map((t) => `${t.title} @ ${t.page_hint ?? 'unknown page'}`);
+    const prompt = buildCatalogPrompt(
+      book.category,
+      aliasHints,
+      csvText,
+      excludeTitles,
+      buildProfileCatalogChecklist(profile),
+    );
     const { parsed, truncated, raw } = await callGemini(geminiKey, prompt, getCatalogSchema(), CATALOG_MAX_TOKENS, filePart);
     lastTruncated = truncated;
 
@@ -85,12 +102,24 @@ async function catalogAllTables(geminiKey, book, aliasHints, csvText, filePart) 
     console.log(`[catalog] round ${round + 1}: +${added} (total ${all.length})${truncated ? ' [truncated]' : ''}`);
 
     // Done when the model produced nothing new AND was not cut off mid-list.
-    if (added === 0 && !truncated) break;
+    if (added === 0 && !truncated) {
+      reachedNaturalStop = true;
+      break;
+    }
     // Defensive: if a round adds nothing yet keeps claiming truncation, stop.
     if (added === 0) break;
   }
 
-  return { tables: all, vendorName, truncated: lastTruncated };
+  const hitTableCap = all.length >= MAX_TABLES;
+  const exhaustedRounds = !reachedNaturalStop && roundsUsed >= MAX_CATALOG_ROUNDS && all.length < MAX_TABLES;
+  return {
+    tables: all,
+    vendorName,
+    truncated: lastTruncated || hitTableCap || exhaustedRounds,
+    hitTableCap,
+    exhaustedRounds,
+    roundsUsed,
+  };
 }
 
 /**
@@ -103,7 +132,8 @@ async function catalogAllSpreadsheetTables(geminiKey, book, aliasHints, parsedSh
   let vendorName = null;
 
   for (let round = 0; round < MAX_CATALOG_ROUNDS && all.length < MAX_TABLES; round++) {
-    const excludeTitles = all.map((t) => t.title);
+    const excludeTitles = all.map((t) =>
+      `${t.title} @ sheet ${t._spreadsheet_meta?.sheetIndex ?? t.sheet_index ?? 0}`);
     const prompt = buildSpreadsheetCatalogPrompt(book.category, aliasHints, parsedSheets, excludeTitles);
     const { parsed, truncated, raw } = await callGemini(geminiKey, prompt, getSpreadsheetCatalogSchema(), CATALOG_MAX_TOKENS, null);
 
@@ -155,6 +185,21 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
     const aliasHints = await loadAliasHints(sb);
     const bytes = await downloadBytes(sb, book.source_file_url);
     if (bytes.length > MAX_FILE_SIZE) throw new Error('File too large: ' + (bytes.length / 1024 / 1024).toFixed(1) + ' MB (max 50 MB)');
+    const sourceSha256 = createHash('sha256').update(bytes).digest('hex');
+    const profile = identifyPriceBookProfile({
+      sha256: sourceSha256,
+      fileName: book.original_file_name,
+      title: book.name,
+    });
+    const sourcePageCount = book.file_type === 'pdf'
+      ? await getPdfPageCount(bytes)
+      : null;
+    await sb.from('price_books').update({
+      source_sha256: sourceSha256,
+      source_page_count: sourcePageCount,
+      ingestion_profile_key: profile?.key ?? null,
+      ingestion_profile_version: profile?.version ?? null,
+    }).eq('id', priceBookId);
 
     let filePart = null;
     let geminiFileUri = null;
@@ -176,9 +221,15 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
       await sb.from('price_books').update({ gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
     }
 
-    const { tables, vendorName, truncated } = parsedSheets
+    const catalog = parsedSheets
       ? await catalogAllSpreadsheetTables(geminiKey, book, aliasHints, parsedSheets)
-      : await catalogAllTables(geminiKey, book, aliasHints, null, filePart);
+      : await catalogAllTables(geminiKey, book, aliasHints, null, filePart, profile);
+    const {
+      tables, vendorName, truncated,
+      hitTableCap = false,
+      exhaustedRounds = false,
+      roundsUsed = 1,
+    } = catalog;
 
     // Fail loudly rather than silently degrading to a single bogus "whole book"
     // table (the old behavior that made it look like only one table existed).
@@ -209,8 +260,41 @@ export async function runCatalog(sb, geminiKey, priceBookId) {
 
     // Surface a soft warning when enumeration may have been cut off so the user
     // knows to re-run if a category looks incomplete.
-    const ocrError = truncated ? `Cataloged ${tables.length} tables, but the index may be incomplete (hit the table cap or output limit). Re-run if a section is missing.` : null;
-    await sb.from('price_books').update({ ocr_status: 'done', ocr_error: ocrError, extracted_at: new Date().toISOString(), gemini_file_uri: geminiFileUri, gemini_file_name: geminiFileName }).eq('id', priceBookId);
+    const profileCoverage = evaluateCatalogProfileCoverage(profile, tables);
+    const enumerationComplete = !hitTableCap && !exhaustedRounds && !truncated;
+    const coverage = {
+      ...profileCoverage,
+      passed: profileCoverage.passed && enumerationComplete,
+      enumeration: {
+        complete: enumerationComplete,
+        roundsUsed,
+        hitTableCap,
+        exhaustedRounds,
+        responseTruncated: truncated && !hitTableCap && !exhaustedRounds,
+      },
+      issues: [
+        ...profileCoverage.issues,
+        hitTableCap ? `Catalog hit the hard cap of ${MAX_TABLES} entries.` : null,
+        exhaustedRounds ? `Catalog still found new entries after ${MAX_CATALOG_ROUNDS} enumeration rounds.` : null,
+      ].filter(Boolean),
+    };
+    const warnings = [
+      !enumerationComplete ? `Cataloged ${tables.length} tables, but enumeration did not reach a proven stopping point.` : null,
+      !coverage.passed ? coverage.issues.join(' ') : null,
+    ].filter(Boolean);
+    const ocrError = warnings.length > 0 ? warnings.join(' ') : null;
+    await sb.from('price_books').update({
+      ocr_status: 'done',
+      ocr_error: ocrError,
+      extracted_at: new Date().toISOString(),
+      gemini_file_uri: geminiFileUri,
+      gemini_file_name: geminiFileName,
+      source_sha256: sourceSha256,
+      source_page_count: sourcePageCount,
+      ingestion_profile_key: profile?.key ?? null,
+      ingestion_profile_version: profile?.version ?? null,
+      ingestion_coverage: coverage,
+    }).eq('id', priceBookId);
     console.log(`[catalog] Cataloged ${tables.length} table(s) for ${priceBookId}${truncated ? ' (possibly incomplete)' : ''}`);
     return { tableCount: tables.length };
   } catch (err) {
@@ -353,12 +437,8 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
       const row = dataRows[ri];
       for (let ci = 0; ci < meta.priceColIndices.length; ci++) {
         const raw = row[meta.priceColIndices[ci]];
-        const price = raw !== null && raw !== undefined
-          ? parseFloat(String(raw).replace(/[^0-9.\-]/g, ''))
-          : NaN;
-        if (!isNaN(price) && isFinite(price)) {
-          cells.push({ row: ri, col: ci, price });
-        }
+        const interpreted = interpretGridCell(raw);
+        if (interpreted) cells.push({ row: ri, col: ci, ...interpreted });
       }
     }
 
@@ -366,17 +446,37 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
     const effectiveRowCount = dataRows.length;
     const trimmedRowLabels = rowLabels.slice(0, effectiveRowCount);
     const normalizedGrid = { columnLabels, rowLabels: trimmedRowLabels, cells, columnFieldHints: {} };
+    const priceCellCount = cells.filter((c) => c.price != null).length;
+    const statusCellCount = cells.filter((c) => normalizeToken(c.rawValue)?.kind === 'status').length;
 
     await sb.from('price_book_extractions').update({ grid: normalizedGrid, warnings, grid_extracted: true }).eq('id', extractionId);
     const { data: props } = await sb.from('pricing_change_proposals').select('id').eq('price_book_id', book.id).contains('target_ids', { extractionId }).limit(1);
     if (props && props[0]) {
       await sb.from('pricing_change_proposals').update({
-        payload: { title: ext.title, kind: ext.kind, detectedCategory: ext.detected_category, detectedSeries: ext.detected_series, detectedVendorName: ext.detected_vendor_name, rowCount: trimmedRowLabels.length, colCount: columnLabels.length, cellCount: cells.length },
+        payload: {
+          title: ext.title,
+          kind: ext.kind,
+          detectedCategory: ext.detected_category,
+          detectedSeries: ext.detected_series,
+          detectedVendorName: ext.detected_vendor_name,
+          rowCount: trimmedRowLabels.length,
+          colCount: columnLabels.length,
+          cellCount: cells.length,
+          priceCellCount,
+          statusCellCount,
+        },
         confidence: warnings.length === 0 ? 0.95 : 0.7,
-        explanation: `"${ext.title}": ${trimmedRowLabels.length}×${columnLabels.length} grid (${cells.length} prices, SheetJS). Map to approve.`,
+        explanation: `"${ext.title}": ${trimmedRowLabels.length}×${columnLabels.length} grid (${priceCellCount} prices, ${statusCellCount} status cells, SheetJS). Map to approve.`,
       }).eq('id', props[0].id);
     }
-    return { rowCount: trimmedRowLabels.length, colCount: columnLabels.length, cellCount: cells.length, warnings: warnings.length };
+    return {
+      rowCount: trimmedRowLabels.length,
+      colCount: columnLabels.length,
+      cellCount: cells.length,
+      priceCellCount,
+      statusCellCount,
+      warnings: warnings.length,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -384,16 +484,43 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
   // ---------------------------------------------------------------------------
   const mimeType = getMimeType(book.original_file_name, book.file_type);
   let filePart = null;
-  if (book.gemini_file_uri) {
+  let scopedUpload = null;
+  if (mimeType === 'application/pdf' && ext.page_hint) {
+    const sourceBytes = await downloadBytes(sb, book.source_file_url);
+    const window = await slicePdfToPageHint(sourceBytes, ext.page_hint);
+    if (window) {
+      const baseName = String(book.original_file_name || 'price-book').replace(/\.pdf$/i, '');
+      const displayName = `${baseName}-pages-${window.sourceStartPage}-${window.sourceEndPage}.pdf`;
+      const up = await uploadToGeminiFiles(geminiKey, window.bytes, mimeType, displayName);
+      filePart = { file_data: { mime_type: mimeType, file_uri: up.uri } };
+      scopedUpload = {
+        bytes: window.bytes,
+        displayName,
+        sourceStartPage: window.sourceStartPage,
+        sourceEndPage: window.sourceEndPage,
+      };
+    }
+  }
+  if (!filePart && book.gemini_file_uri) {
     filePart = { file_data: { mime_type: mimeType, file_uri: book.gemini_file_uri } };
-  } else {
+  } else if (!filePart) {
     const bytes = await downloadBytes(sb, book.source_file_url);
     const up = await uploadToGeminiFiles(geminiKey, bytes, mimeType, book.original_file_name || 'price-book');
     filePart = { file_data: { mime_type: mimeType, file_uri: up.uri } };
     await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
   }
 
-  const prompt = buildGridPrompt(ext.title ?? book.name, ext.detected_category, ext.detected_series, ext.kind, ext.page_hint ?? null, aliasHints, null, fieldDefs);
+  const prompt = buildGridPrompt(
+    ext.title ?? book.name,
+    ext.detected_category,
+    ext.detected_series,
+    ext.kind,
+    ext.page_hint ?? null,
+    aliasHints,
+    null,
+    fieldDefs,
+    scopedUpload ? { start: scopedUpload.sourceStartPage, end: scopedUpload.sourceEndPage } : null,
+  );
 
   let res;
   try {
@@ -401,9 +528,12 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
   } catch (e) {
     // Gemini Files reference may have expired (48h) — re-upload and retry once.
     if (filePart && [400, 403, 404].includes(e.status)) {
-      const bytes = await downloadBytes(sb, book.source_file_url);
-      const up = await uploadToGeminiFiles(geminiKey, bytes, mimeType, book.original_file_name || 'price-book');
-      await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
+      const bytes = scopedUpload?.bytes ?? await downloadBytes(sb, book.source_file_url);
+      const displayName = scopedUpload?.displayName ?? book.original_file_name ?? 'price-book';
+      const up = await uploadToGeminiFiles(geminiKey, bytes, mimeType, displayName);
+      if (!scopedUpload) {
+        await sb.from('price_books').update({ gemini_file_uri: up.uri, gemini_file_name: up.name }).eq('id', book.id);
+      }
       filePart = { file_data: { mime_type: mimeType, file_uri: up.uri } };
       res = await callGemini(geminiKey, prompt, getGridSchema(), GRID_MAX_TOKENS, filePart);
     } else {
@@ -427,22 +557,45 @@ export async function runExtractTable(sb, geminiKey, extractionId) {
   const normalizedGrid = {
     columnLabels: grid?.column_labels ?? [],
     rowLabels: grid?.row_labels ?? [],
-    cells: (grid?.cells ?? []).filter((c) => c.price != null),
+    cells: (grid?.cells ?? []).flatMap((c) => {
+      const interpreted = interpretGridCell(c.raw_value, c.price);
+      return interpreted ? [{ row: c.row, col: c.col, ...interpreted }] : [];
+    }),
     columnFieldHints: colHints,
     rowFieldHints: Object.keys(rowHints).length > 0 ? rowHints : undefined,
   };
   const allWarnings = [...warnings, ...(grid?.warnings ?? [])];
+  const priceCellCount = normalizedGrid.cells.filter((c) => c.price != null).length;
+  const statusCellCount = normalizedGrid.cells.filter((c) => normalizeToken(c.rawValue)?.kind === 'status').length;
 
   await sb.from('price_book_extractions').update({ grid: normalizedGrid, warnings: allWarnings, grid_extracted: true }).eq('id', extractionId);
 
   const { data: props } = await sb.from('pricing_change_proposals').select('id').eq('price_book_id', book.id).contains('target_ids', { extractionId }).limit(1);
   if (props && props[0]) {
     await sb.from('pricing_change_proposals').update({
-      payload: { title: ext.title, kind: ext.kind, detectedCategory: ext.detected_category, detectedSeries: ext.detected_series, detectedVendorName: ext.detected_vendor_name, rowCount: normalizedGrid.rowLabels.length, colCount: normalizedGrid.columnLabels.length, cellCount: normalizedGrid.cells.length },
+      payload: {
+        title: ext.title,
+        kind: ext.kind,
+        detectedCategory: ext.detected_category,
+        detectedSeries: ext.detected_series,
+        detectedVendorName: ext.detected_vendor_name,
+        rowCount: normalizedGrid.rowLabels.length,
+        colCount: normalizedGrid.columnLabels.length,
+        cellCount: normalizedGrid.cells.length,
+        priceCellCount,
+        statusCellCount,
+      },
       confidence: allWarnings.length === 0 ? 0.9 : 0.5,
-      explanation: `"${ext.title}": ${normalizedGrid.rowLabels.length}×${normalizedGrid.columnLabels.length} grid (${normalizedGrid.cells.length} prices). Map to approve.`,
+      explanation: `"${ext.title}": ${normalizedGrid.rowLabels.length}×${normalizedGrid.columnLabels.length} grid (${priceCellCount} prices, ${statusCellCount} status cells). Map to approve.`,
     }).eq('id', props[0].id);
   }
 
-  return { rowCount: normalizedGrid.rowLabels.length, colCount: normalizedGrid.columnLabels.length, cellCount: normalizedGrid.cells.length, warnings: allWarnings.length };
+  return {
+    rowCount: normalizedGrid.rowLabels.length,
+    colCount: normalizedGrid.columnLabels.length,
+    cellCount: normalizedGrid.cells.length,
+    priceCellCount,
+    statusCellCount,
+    warnings: allWarnings.length,
+  };
 }

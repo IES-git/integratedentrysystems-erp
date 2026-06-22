@@ -173,6 +173,9 @@ function detectFileType(file: File): PriceBookFileType {
 }
 
 function mapPriceBook(row: Record<string, unknown>): PriceBook {
+  const documentRelation = Array.isArray(row.price_book_document)
+    ? row.price_book_document[0] as Record<string, unknown> | undefined
+    : row.price_book_document as Record<string, unknown> | null | undefined;
   return {
     id: row.id as string,
     companyId: (row.company_id as string | null) ?? null,
@@ -193,6 +196,13 @@ function mapPriceBook(row: Record<string, unknown>): PriceBook {
     effectiveDate: (row.effective_date as string | null) ?? null,
     supersedesPriceBookId: (row.supersedes_price_book_id as string | null) ?? null,
     priceBookDocumentId: (row.price_book_document_id as string | null) ?? null,
+    priceBookDocumentStatus: (documentRelation?.status as PriceBook['priceBookDocumentStatus']) ?? null,
+    priceBookDocumentReviewStatus: (documentRelation?.review_status as PriceBook['priceBookDocumentReviewStatus']) ?? null,
+    sourceSha256: (row.source_sha256 as string | null) ?? null,
+    sourcePageCount: (row.source_page_count as number | null) ?? null,
+    ingestionProfileKey: (row.ingestion_profile_key as string | null) ?? null,
+    ingestionProfileVersion: (row.ingestion_profile_version as string | null) ?? null,
+    ingestionCoverage: (row.ingestion_coverage as Record<string, unknown> | null) ?? {},
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -323,6 +333,8 @@ export async function extractPriceBookTable(extractionId: string): Promise<{
   rowCount: number;
   colCount: number;
   cellCount: number;
+  priceCellCount?: number;
+  statusCellCount?: number;
   warnings: number;
 }> {
   if (WORKER_URL) {
@@ -430,7 +442,7 @@ export async function pollExtractAllStatus(
 export async function listPriceBooks(): Promise<PriceBook[]> {
   const { data, error } = await supabase
     .from('price_books')
-    .select('*')
+    .select('*, price_book_document(status, review_status)')
     .order('created_at', { ascending: false });
   if (error) throw new Error(error.message);
   return (data ?? []).map((r) => mapPriceBook(r as Record<string, unknown>));

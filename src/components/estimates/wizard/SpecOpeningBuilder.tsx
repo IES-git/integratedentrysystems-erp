@@ -49,6 +49,11 @@ import { buildNormalizedSpec, createOpeningDraft, createCutoutDraft, type Openin
 import { saveOpeningDraft, loadOpeningCutouts, loadOpeningDraft } from '@/lib/cpq/opening-persist';
 import { loadNgpCatalog, emptyNgpCatalog, type NgpCatalog } from '@/lib/ngp-catalog-api';
 import { resolveOpeningSpecFromDb, withTimeout } from '@/lib/cpq/resolver';
+import {
+  listPublishedManufacturerCatalogs,
+  type ManufacturerCatalogOption,
+  type ManufacturerPricedEntity,
+} from '@/lib/price-rules-api';
 import { resolveInfill, type NgpInfillType, type ResolvedInfill } from '@/lib/cpq/ngp-infill';
 import {
   deriveBuilderContext, fieldTier, allowedEnumOptions, isStepVisible,
@@ -101,7 +106,16 @@ let localSeq = 0;
 const nextId = () => `c${Date.now()}_${localSeq++}`;
 
 function newComponent(entityType: RuleEntityType, label: string): ComponentDraft {
-  return { id: nextId(), entityType, label, familyCode: null, quantity: 1, fields: {} };
+  return {
+    id: nextId(),
+    entityType,
+    label,
+    familyCode: null,
+    quantity: 1,
+    manufacturerId: null,
+    priceBookDocumentId: null,
+    fields: {},
+  };
 }
 
 /** Parse a plain-inch dimension (NGP cutouts use plain inches, not door-nominal). */
@@ -256,6 +270,7 @@ export function SpecOpeningBuilder({
   const [hwCatalog, setHwCatalog] = useState<HardwareCatalog | null>(null);
   const [hardwareCategories, setHardwareCategories] = useState<HardwareCategoryOption[]>([]);
   const [baseSignatures, setBaseSignatures] = useState<BaseSignatures>({ door: [], frame: [], panel: [] });
+  const [manufacturerCatalogs, setManufacturerCatalogs] = useState<ManufacturerCatalogOption[]>([]);
   const [ngpCatalog, setNgpCatalog] = useState<NgpCatalog>(() => emptyNgpCatalog());
   const [variantsByCategory, setVariantsByCategory] = useState<Record<string, VariantOption[]>>({});
   const [engineResult, setEngineResult] = useState<EngineResult | null>(null);
@@ -288,8 +303,9 @@ export function SpecOpeningBuilder({
       loadNgpCatalog(),
       loadHardwareCategories(),
       loadBaseSignatures(),
+      listPublishedManufacturerCatalogs(),
     ])
-      .then(([dict, cat, desc, ngp, hwCats, sigs]) => {
+      .then(([dict, cat, desc, ngp, hwCats, sigs, mfrCatalogs]) => {
         setSpecByEntity(dict.byEntity);
         setMappings(dict.mappings);
         setHwCatalog(cat);
@@ -297,6 +313,7 @@ export function SpecOpeningBuilder({
         setNgpCatalog(ngp);
         setHardwareCategories(hwCats);
         setBaseSignatures(sigs);
+        setManufacturerCatalogs(mfrCatalogs);
       })
       .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load catalog'))
       .finally(() => setLoading(false));
@@ -473,7 +490,20 @@ export function SpecOpeningBuilder({
   const spec = useMemo(() => buildNormalizedSpec(draft, mappings, ngpCatalog), [draft, mappings, ngpCatalog]);
   const ctx = useMemo(() => deriveBuilderContext(draft), [draft]);
   const hardwareIntel = useMemo(() => deriveHardwareIntelligence(draft, draft.hardware), [draft]);
-  const integrityIssues = useMemo(() => validateBuilderIntegrity(draft), [draft]);
+  const integrityIssues = useMemo(() => {
+    const base = validateBuilderIntegrity(draft);
+    const manufacturerIssues: IntegrityIssue[] = [];
+    for (const comp of [...draft.doors, ...draft.frames, ...draft.panels]) {
+      if (!comp.manufacturerId || !comp.priceBookDocumentId) {
+        manufacturerIssues.push({
+          code: `MANUFACTURER_BOOK_REQUIRED:${comp.id}`,
+          severity: 'block',
+          message: `${comp.label || comp.entityType}: select a manufacturer with a published price book.`,
+        });
+      }
+    }
+    return [...base, ...manufacturerIssues];
+  }, [draft]);
   const integrityBlocks = integrityIssues.filter((i) => i.severity === 'block');
   // NGP infill resolution per cutout (auto-select/filter/validate), for live preview + gating.
   const ngpIssues = useMemo(() => {
@@ -603,10 +633,19 @@ export function SpecOpeningBuilder({
     setSaving(true);
     setError(null);
     try {
-      // Pin the active Pioneer price-book version up front so the gate re-price
-      // and the persisted lines are priced against the SAME book (rather than
-      // "whatever is latest" resolved independently at each call).
-      const pinnedPriceBookId = await resolveActivePriceBookDocument();
+      // A single-manufacturer opening can keep the legacy estimate-level pin.
+      // Mixed-manufacturer openings are pinned per component in the snapshot
+      // and per estimate line, so the global column remains intentionally null.
+      const componentDocumentIds = [...new Set(
+        [...draft.doors, ...draft.frames, ...draft.panels]
+          .map((c) => c.priceBookDocumentId)
+          .filter((id): id is string => !!id),
+      )];
+      const pinnedPriceBookId = componentDocumentIds.length === 1
+        ? componentDocumentIds[0]
+        : componentDocumentIds.length > 1
+          ? null
+          : await resolveActivePriceBookDocument();
 
       // Authoritative price-and-gate: re-price now so we never persist an opening
       // that can't actually be priced unless the user explicitly acknowledges a
@@ -692,6 +731,7 @@ export function SpecOpeningBuilder({
             ngpIssues={ngpIssues}
             hardwareCategories={hardwareCategories}
             baseSignatures={baseSignatures}
+            manufacturerCatalogs={manufacturerCatalogs}
             specByEntity={specByEntity}
             variantsByCategory={variantsByCategory}
             prepRequirements={prepRequirements}
@@ -819,6 +859,7 @@ interface StepContentProps {
   ngpIssues: CompletenessIssue[];
   hardwareCategories: HardwareCategoryOption[];
   baseSignatures: BaseSignatures;
+  manufacturerCatalogs: ManufacturerCatalogOption[];
   specByEntity: Map<SpecFieldEntity, SpecFieldWithPath[]>;
   variantsByCategory: Record<string, VariantOption[]>;
   prepRequirements: PrepRequirement[];
@@ -980,7 +1021,11 @@ interface ComponentStepProps extends StepContentProps {
 }
 
 function ComponentStep(props: ComponentStepProps) {
-  const { draft, ctx, descriptors, specByEntity, baseSignatures, entity, specEntity, title, onAddComponent, onRemoveComponent, onUpdateComponentField, onUpdateComponentMeta } = props;
+  const {
+    draft, ctx, descriptors, specByEntity, baseSignatures, manufacturerCatalogs,
+    entity, specEntity, title, onAddComponent, onRemoveComponent,
+    onUpdateComponentField, onUpdateComponentMeta,
+  } = props;
   const key = entity === 'door' ? 'doors' : entity === 'frame' ? 'frames' : entity === 'panel' ? 'panels' : 'lites';
   const components = draft[key] as ComponentDraft[];
   const fields = fieldsFor(specByEntity, specEntity);
@@ -1002,6 +1047,7 @@ function ComponentStep(props: ComponentStepProps) {
       {components.map((comp) => (
         <ComponentCard key={comp.id} comp={comp} entity={entity} fields={fields}
           draft={draft} ctx={ctx} descriptors={descriptors} signatures={signatures}
+          manufacturerCatalogs={manufacturerCatalogs}
           onRemoveComponent={onRemoveComponent}
           onUpdateComponentField={onUpdateComponentField}
           onUpdateComponentMeta={onUpdateComponentMeta} />
@@ -1018,6 +1064,7 @@ interface ComponentCardProps {
   ctx: BuilderContext;
   descriptors: OptionDescriptors | null;
   signatures: BaseSignatures[keyof BaseSignatures];
+  manufacturerCatalogs: ManufacturerCatalogOption[];
   onRemoveComponent: (entity: RuleEntityType, id: string) => void;
   onUpdateComponentField: (entity: RuleEntityType, id: string, path: string, value: string) => void;
   onUpdateComponentMeta: (entity: RuleEntityType, id: string, p: Partial<ComponentDraft>) => void;
@@ -1025,12 +1072,21 @@ interface ComponentCardProps {
 
 function ComponentCard({
   comp, entity, fields, draft, ctx, descriptors, signatures,
+  manufacturerCatalogs,
   onRemoveComponent, onUpdateComponentField, onUpdateComponentMeta,
 }: ComponentCardProps) {
   const derived = ctx.derivedByComponent[comp.id] ?? {};
   const tierOf = (f: SpecFieldWithPath) => fieldTier(f, draft, ctx, comp);
   const essential = fields.filter((f) => tierOf(f) === 'essential');
   const advanced = fields.filter((f) => tierOf(f) === 'advanced');
+  const pricedEntity = (
+    entity === 'door' || entity === 'frame' || entity === 'panel'
+      ? entity
+      : null
+  ) as ManufacturerPricedEntity | null;
+  const availableManufacturers = pricedEntity
+    ? manufacturerCatalogs.filter((m) => !!m.documentIds[pricedEntity])
+    : [];
 
   const renderField = (f: SpecFieldWithPath) => (
     <SpecFieldInput key={f.id} field={f}
@@ -1069,6 +1125,42 @@ function ComponentCard({
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
       </div>
+
+      {pricedEntity && (
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          <div className="space-y-1">
+            <Label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Manufacturer / price book
+            </Label>
+            <Select
+              value={comp.manufacturerId ?? ''}
+              onValueChange={(manufacturerId) => {
+                const selected = availableManufacturers.find((m) => m.manufacturerId === manufacturerId);
+                onUpdateComponentMeta(entity, comp.id, {
+                  manufacturerId,
+                  priceBookDocumentId: selected?.documentIds[pricedEntity] ?? null,
+                });
+              }}
+            >
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue placeholder="Select manufacturer…" />
+              </SelectTrigger>
+              <SelectContent>
+                {availableManufacturers.map((m) => (
+                  <SelectItem key={m.manufacturerId} value={m.manufacturerId}>
+                    {m.manufacturerName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {comp.manufacturerId && comp.priceBookDocumentId && (
+              <p className="text-[10px] text-muted-foreground">
+                {availableManufacturers.find((m) => m.manufacturerId === comp.manufacturerId)?.titles[pricedEntity] ?? 'Published price book'}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {byCategory(essential)}
 

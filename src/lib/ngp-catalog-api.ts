@@ -57,8 +57,9 @@ export function emptyNgpCatalog(): NgpCatalog {
 export async function resolveActiveNgpDocument(): Promise<string | null> {
   const { data, error } = await supabase
     .from('ngp_product')
-    .select('price_book_document_id, price_book_document!inner(id, status, effective_date)')
+    .select('price_book_document_id, price_book_document!inner(id, status, source_verified, effective_date)')
     .eq('price_book_document.status', 'published')
+    .eq('price_book_document.source_verified', true)
     .order('effective_date', { ascending: false, foreignTable: 'price_book_document' })
     .limit(1)
     .maybeSingle();

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": "1.0",
+  "comparisonGroup": "36x84-18ga-honeycomb-lockseam-galvannealed-door",
+  "normalizedSpec": {
+    "entityType": "door",
+    "widthIn": 36,
+    "heightIn": 84,
+    "gauge": 18,
+    "coreType": "Honeycomb",
+    "edgeSeamConstruction": "Lockseam",
+    "material": "Galvannealed",
+    "quantity": 1
+  },
+  "currency": "USD",
+  "cases": [
+    {
+      "id": "pioneer-h-3070-18ga-galv",
+      "manufacturer": "Pioneer Industries",
+      "profileKey": "pioneer-steel-doors-frames",
+      "sourceFile": "Pioneer Pricing and Estimating Guide_2025 (4).pdf",
+      "physicalPage": 14,
+      "sourceTable": "H Series - Lockseam Edge - Glued Core",
+      "expected": {
+        "baseAmount": 584,
+        "adders": [
+          {
+            "code": "GALVANNEALED_MATERIAL",
+            "amount": 53
+          }
+        ],
+        "listTotal": 637
+      },
+      "includedScopeNotes": [
+        "Honeycomb core is N/C.",
+        "The printed chart states CYL/MP lock preparation and standard-weight 4-1/2 inch hinges at Pioneer standard location are included."
+      ]
+    },
+    {
+      "id": "ceco-ri-3070-18ga-a40",
+      "manufacturer": "CECO Door",
+      "profileKey": "ceco-steel-doors-frames",
+      "sourceFile": "Ceco Price Book - Effective April 20, 2026 (1).pdf",
+      "physicalPage": 15,
+      "printedPage": "R-2",
+      "sourceTable": "(RI) Regent Honeycomb Door",
+      "expected": {
+        "baseAmount": 1046,
+        "adders": [
+          {
+            "code": "A40",
+            "amount": 52
+          }
+        ],
+        "listTotal": 1098
+      },
+      "includedScopeNotes": [
+        "Non-handed option OI is No Add.",
+        "Hardware preparation and reinforcement inclusions must follow CECO-specific source rules rather than Pioneer assumptions."
+      ]
+    },
+    {
+      "id": "dlf-hc-3070-18ga-a40",
+      "manufacturer": "De La Fontaine",
+      "profileKey": "de-la-fontaine-steel-doors-frames",
+      "sourceFile": "Price-Book-2023-rev3.1.pdf",
+      "physicalPage": 22,
+      "printedPage": "D-4",
+      "sourceTable": "HC Series Honeycomb Doors",
+      "expected": {
+        "baseAmount": 595,
+        "adders": [
+          {
+            "code": "A40",
+            "priceStatus": "NO_CHARGE",
+            "amount": 0
+          }
+        ],
+        "listTotal": 595
+      },
+      "includedScopeNotes": [
+        "Standard Lock Seam Edge PA is N/C.",
+        "A40 galvannealed steel is N/C.",
+        "The printed chart explicitly excludes hardware reinforcement and preparation."
+      ]
+    }
+  ]
+}

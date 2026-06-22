@@ -10,7 +10,7 @@ function rule(partial: Partial<LoadedPriceRule>): LoadedPriceRule {
   return {
     id: partial.id ?? 'r1',
     ruleKey: null,
-    priceBookId: 'doc1',
+    priceBookId: partial.priceBookId ?? 'doc1',
     priceTableId: null,
     entityType: partial.entityType ?? 'door',
     chargeCategory: partial.chargeCategory ?? null,
@@ -91,6 +91,66 @@ describe('pricing engine core', () => {
     const spec = baseSpec({ components: [{ id: 'd1', entityType: 'door', label: 'Door', quantity: 3, code: 'H', fields: {} }] });
     const res = priceOpeningCore(spec, ruleSet, emptyCatalog, new Map(), opts);
     expect(res.lines.find((l) => l.lineType === 'BASE')?.sellPrice).toBe(600);
+  });
+
+  it('prices each component only from its pinned manufacturer document', () => {
+    const ruleSet: LoadedRuleSet = {
+      rules: [
+        rule({ id: 'pioneer', priceBookId: 'doc-pioneer', amount: 500 }),
+        rule({ id: 'ceco', priceBookId: 'doc-ceco', amount: 725 }),
+      ],
+      dependencyRules: [],
+    };
+    const spec = baseSpec({
+      components: [{
+        id: 'd1',
+        entityType: 'door',
+        label: 'Door',
+        quantity: 1,
+        code: null,
+        manufacturerId: 'ceco',
+        priceBookDocumentId: 'doc-ceco',
+        fields: {},
+      }],
+    });
+    const res = priceOpeningCore(spec, ruleSet, emptyCatalog, new Map(), {
+      priceBookDocumentId: null,
+      minConfidence: 0.5,
+    });
+    const priced = res.lines.filter((line) => line.lineType === 'BASE');
+    expect(priced).toHaveLength(1);
+    expect(priced[0].priceRuleId).toBe('ceco');
+    expect(priced[0].priceBookId).toBe('doc-ceco');
+    expect(priced[0].sellPrice).toBe(725);
+  });
+
+  it('does not match another manufacturer when a component has no resolvable document', () => {
+    const ruleSet: LoadedRuleSet = {
+      rules: [
+        rule({ id: 'pioneer', priceBookId: 'doc-pioneer', amount: 500 }),
+        rule({ id: 'ceco', priceBookId: 'doc-ceco', amount: 725 }),
+      ],
+      dependencyRules: [],
+    };
+    const spec = baseSpec({
+      components: [{
+        id: 'd1',
+        entityType: 'door',
+        label: 'Door',
+        quantity: 1,
+        code: null,
+        manufacturerId: 'unknown-manufacturer',
+        priceBookDocumentId: null,
+        fields: {},
+      }],
+    });
+    const res = priceOpeningCore(spec, ruleSet, emptyCatalog, new Map(), {
+      priceBookDocumentId: null,
+      priceBookDocumentIdsByManufacturer: {},
+      minConfidence: 0.5,
+    });
+    expect(res.lines.some((line) => line.lineType === 'BASE')).toBe(false);
+    expect(res.lines.some((line) => line.priceStatus === 'INVALID')).toBe(true);
   });
 
   it('routes CONTACT_FACTORY to the manual-quote queue', () => {

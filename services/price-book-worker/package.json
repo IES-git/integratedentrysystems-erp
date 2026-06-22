@@ -9,12 +9,14 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "audit:sources": "node scripts/audit-sources.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.95.3",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "pdf-lib": "^1.17.1",
     "xlsx": "^0.18.5"
   }
 }

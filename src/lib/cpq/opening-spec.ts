@@ -27,6 +27,10 @@ export interface ComponentDraft {
   label: string;
   familyCode: string | null;
   quantity: number;
+  /** User-selected manufacturer for this component. */
+  manufacturerId?: string | null;
+  /** Immutable published rule-book revision used for reproducible pricing. */
+  priceBookDocumentId?: string | null;
   /** Field values keyed by machine field_path. */
   fields: Record<string, string>;
 }
@@ -214,6 +218,8 @@ function buildComponent(
     label: draft.label,
     quantity: Math.max(1, draft.quantity),
     code: componentCode(draft, derived),
+    manufacturerId: draft.manufacturerId ?? null,
+    priceBookDocumentId: draft.priceBookDocumentId ?? null,
     fields,
   };
 }

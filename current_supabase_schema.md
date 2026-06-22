@@ -1,6 +1,6 @@
 # Current Supabase Schema
 
-Last updated: 2026-06-21 (Auth overhaul: invite-only flow, role enum simplified to admin/sales/ops, active-user gate, role-based route guards; blocked_field_labels and item_type_base_fields policies migrated to use is_admin())
+Last updated: 2026-06-21 (Added governed price-book source fingerprints, ingestion profiles, coverage reports, and publication-gate metadata.)
 
 ## Authentication Status
 
@@ -1632,9 +1632,13 @@ One row per uploaded vendor price book (manufacturer price list).
 - `extract_failed` (INTEGER, NOT NULL, DEFAULT 0) - Tables that errored in the current/last extract-all run (retryable individually or by re-running).
 - `extract_error` (TEXT, NULLABLE) - Fatal error message if the extract-all job itself failed.
 - `price_book_document_id` (UUID, NULLABLE, FK → price_book_document.id ON DELETE SET NULL) - CPQ v2 (Phase 2.0): the immutable published `price_book_document` version this staging book links to. A draft document is created when ingestion begins; publishing flips its `status` to `published`. Index `price_books_price_book_document_id_idx`.
+- `source_sha256` (TEXT, NULLABLE) - SHA-256 fingerprint of the exact uploaded bytes. CHECK requires 64 lowercase hex characters.
+- `source_page_count` (INTEGER, NULLABLE) - Recorded page count for governed PDF source verification.
+- `ingestion_profile_key` / `ingestion_profile_version` (TEXT, NULLABLE) - Versioned source-family contract selected by exact hash first, then conservative aliases.
+- `ingestion_coverage` (JSONB, NOT NULL, DEFAULT `{}`) - Catalog/workbook preflight report, including pass/fail state and unresolved coverage gaps.
 - `created_at` / `updated_at` (TIMESTAMPTZ, NOT NULL, DEFAULT NOW())
 
-**Indexes:** on `company_id`, `ocr_status`, `created_at DESC`, `price_book_document_id`
+**Indexes:** on `company_id`, `ocr_status`, `created_at DESC`, `price_book_document_id`, `source_sha256`, and `(ingestion_profile_key, ingestion_profile_version)`
 
 **RLS Policies:** ✅ enabled. Read/insert/update authenticated; delete own or admin. Trigger `set_price_books_updated_at`.
 
@@ -1749,7 +1753,7 @@ Greenfield rule-based pricing model from the Pioneer Spec Field Dictionary, Pion
 - All three are `SET search_path = public, pg_temp`.
 
 ### Raw evidence layer
-- **public.price_book_document** — one record per imported price-book revision. Cols: `id`, `manufacturer_id`→companies, `title`, `revision`, `effective_date`, `expiry_date`, `currency_code` (DEFAULT 'USD'), `source_file_path`, `source_file_hash`, `page_count`, `supersedes_id`→self, `status` CHECK('draft','published','superseded','archived'), `review_status` CHECK('UNREVIEWED','APPROVED','REJECTED','NEEDS_REVIEW'), `notes`, `created_by`→users, timestamps. (Folds in the legacy `price_books` concept.)
+- **public.price_book_document** — one record per imported price-book revision. Cols: `id`, `manufacturer_id`→companies, `title`, `revision`, `effective_date`, `expiry_date`, `currency_code` (DEFAULT 'USD'), `source_file_path`, `source_file_hash`, `page_count`, `ingestion_profile_key`, `ingestion_profile_version`, `supersedes_id`→self, `status` CHECK('draft','published','superseded','archived'), `review_status` CHECK('UNREVIEWED','APPROVED','REJECTED','NEEDS_REVIEW'), `notes`, `created_by`→users, timestamps. (Folds in the legacy `price_books` concept.)
 - **public.source_region** — provenance per page/table/note/cell. Cols: `id`, `price_book_id`→price_book_document CASCADE, `page_number`, `region_type` CHECK('page','table','note','cell','image'), `bbox` JSONB, `table_title`, `raw_text`, `extraction_confidence`, `created_at`.
 - **public.raw_table_cell** — raw extracted cell + hierarchical headers. Cols: `id`, `source_region_id` CASCADE, `price_book_id` CASCADE, `row_index`, `col_index`, `row_headers`/`col_headers` JSONB, `raw_value`, `normalized_value`, `created_at`.
 
@@ -1898,6 +1902,13 @@ Builder side (`builder-logic.ts` + `opening-spec.ts`): the **Core type** field (
 
 #### Hardware category slug identity (2026-06-21, migration `cpq_v2_hardware_category_slugs`)
 The hardware category *identity* is the snake_case slug (`butt_hinges`, `cylindrical_mortise_locks_and_deadbolts`, …) used by the builder `HW` constants, the `hardware_set_item` templates, the engine selection key, and the MISSING_PRICE messages. A prior normalization had set `hardware_product.category` to readable title-case ("Butt hinges", …), which broke `loadVariantsForCategory()` (an exact match on the slug) — so the builder showed "No catalog variants — route to manual quote" for every auto-suggested category and every required hardware line blocked as MISSING_PRICE. This re-keys `hardware_product.category` and `linear_hardware_rule.hardware_category` to the slug (deterministic, collision-free across the 14 categories); the readable label is derived in the UI (`loadHardwareCategories` title-cases the slug). The granular `hardware_prep_crosswalk.hardware_category` vocabulary is left alone (engine fuzzy-matches it). The worker (`services/price-book-worker/src/hardware.js`) now slugs the category at the `hardware_product` / `linear_hardware_rule` write boundary (`slugifyCategory`) while keeping internal title-case logic, so re-ingests stay consistent.
+
+Automatic pricing additionally requires `price_book_document.source_verified = true`.
+Only the governed QA publication path sets this flag, after exact source identity,
+profile coverage, rule/entity coverage, vocabulary, and value checks pass.
+Legacy documents may remain published for audit history, but they are not offered
+as manufacturer catalogs or selected by the pricing engine until re-ingested and
+verified.
 
 #### Seamless build-to-review flow (2026-06-21, migrations `cpq_v2_opening_spec_snapshot`, `cpq_v2_estimate_line_overrides_and_adjustment`)
 
