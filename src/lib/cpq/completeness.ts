@@ -23,6 +23,7 @@ export type CompletenessSeverity = 'block' | 'warn' | 'info';
  */
 export type BuilderStepTarget =
   | 'classify'
+  | 'ratings'
   | 'doors'
   | 'frame'
   | 'panels'

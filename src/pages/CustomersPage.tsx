@@ -196,6 +196,23 @@ export default function CustomersPage() {
     setIsDialogOpen(true);
   };
 
+  const copyBillingToShipping = (form: HTMLFormElement | null) => {
+    if (!form) return;
+    const billingStreet = form.elements.namedItem('billingStreet') as HTMLInputElement | null;
+    const billingCity = form.elements.namedItem('billingCity') as HTMLInputElement | null;
+    const billingState = form.elements.namedItem('billingState') as HTMLInputElement | null;
+    const billingZip = form.elements.namedItem('billingZip') as HTMLInputElement | null;
+    const shippingStreet = form.elements.namedItem('shippingStreet') as HTMLInputElement | null;
+    const shippingCity = form.elements.namedItem('shippingCity') as HTMLInputElement | null;
+    const shippingState = form.elements.namedItem('shippingState') as HTMLInputElement | null;
+    const shippingZip = form.elements.namedItem('shippingZip') as HTMLInputElement | null;
+
+    if (shippingStreet && billingStreet) shippingStreet.value = billingStreet.value;
+    if (shippingCity && billingCity) shippingCity.value = billingCity.value;
+    if (shippingState && billingState) shippingState.value = billingState.value;
+    if (shippingZip && billingZip) shippingZip.value = billingZip.value;
+  };
+
   const openContactDialog = () => {
     setContactCompanyId('');
     setIsContactDialogOpen(true);
@@ -468,7 +485,17 @@ export default function CustomersPage() {
               </div>
 
               <div className="space-y-2">
-                <Label className="text-sm font-medium">Shipping Address</Label>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Shipping Address</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={(event) => copyBillingToShipping(event.currentTarget.form)}
+                  >
+                    Copy Billing
+                  </Button>
+                </div>
                 <Input
                   name="shippingStreet"
                   defaultValue={editingCompany?.shippingAddress ?? ''}

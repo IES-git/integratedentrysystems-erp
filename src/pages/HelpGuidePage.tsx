@@ -384,7 +384,7 @@ function GuideScreenshot({
         <DialogContent className="flex h-[92vh] max-h-[92vh] w-[96vw] max-w-[96vw] flex-col gap-0 overflow-hidden p-0">
           <div className="flex flex-col gap-3 border-b px-4 py-3 pr-12 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
-              <DialogTitle className="font-display text-base tracking-wide">Screenshot Detail</DialogTitle>
+              <DialogTitle className="text-base font-semibold tracking-normal">Screenshot Detail</DialogTitle>
               <DialogDescription className="mt-1 text-xs leading-5">{caption}</DialogDescription>
             </div>
             <div className="flex shrink-0 items-center gap-1">
@@ -447,7 +447,7 @@ function ScreenshotGrid({ children }: { children: React.ReactNode }) {
 
 export default function HelpGuidePage() {
   return (
-    <div className="min-h-full p-4 sm:p-6 lg:p-8">
+    <div className="min-h-full p-4 font-sans [&_h1]:font-sans [&_h1]:font-semibold [&_h1]:tracking-normal [&_h2]:font-sans [&_h2]:font-semibold [&_h2]:tracking-normal [&_h3]:font-sans [&_h3]:font-semibold [&_h3]:tracking-normal sm:p-6 lg:p-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <div className="rounded-lg border bg-card px-5 py-5 shadow-sm sm:px-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -463,7 +463,7 @@ export default function HelpGuidePage() {
                   Go-Live
                 </Badge>
               </div>
-              <h1 className="font-display text-3xl tracking-wide sm:text-4xl">IES App Help Guide</h1>
+              <h1 className="text-3xl font-semibold tracking-normal sm:text-4xl">IES App Help Guide</h1>
               <p className="mt-2 text-sm leading-6 text-muted-foreground sm:text-base">
                 A practical operating manual for using the app day to day: customer setup, markup,
                 manufacturers, estimate creation, quote preparation, pricing administration, and user access.

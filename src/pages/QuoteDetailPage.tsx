@@ -306,14 +306,14 @@ export default function QuoteDetailPage() {
         company={company}
         primaryContact={primaryContact}
         aiSummary={aiSummary}
-        displayConfig={displayConfig.customer}
+        displayConfig={displayConfig}
       />
     ).toBlob();
 
     const name = company?.name ?? 'Customer';
     const date = new Date().toISOString().slice(0, 10);
     return { blob, fileName: `Quote-${name.replace(/\s+/g, '-')}-${date}.pdf` };
-  }, [quote, items, company, contacts, displayConfig.customer]);
+  }, [quote, items, company, contacts, displayConfig]);
 
   const buildManufacturerPdfBlob = useCallback(async (): Promise<{ blob: Blob; fileName: string }> => {
     if (!quote) throw new Error('Quote not loaded');
@@ -324,14 +324,14 @@ export default function QuoteDetailPage() {
         quote={quote}
         items={mfrItems}
         company={company}
-        displayConfig={displayConfig.manufacturer}
+        displayConfig={displayConfig}
       />
     ).toBlob();
 
     const name = company?.name ?? 'Manufacturer';
     const date = new Date().toISOString().slice(0, 10);
     return { blob, fileName: `RFQ-${name.replace(/\s+/g, '-')}-${date}.pdf` };
-  }, [quote, items, company, displayConfig.manufacturer]);
+  }, [quote, items, company, displayConfig]);
 
   // ── PDF downloads ──────────────────────────────────────────────────────────
 
@@ -553,14 +553,14 @@ export default function QuoteDetailPage() {
                     company={company}
                     primaryContact={primaryContact}
                     aiSummary={previewAiSummary}
-                    displayConfig={displayConfig.customer}
+                    displayConfig={displayConfig}
                   />
                 ) : (
                   <ManufacturerQuotePdf
                     quote={quote}
                     items={manufacturerPreviewItems}
                     company={company}
-                    displayConfig={displayConfig.manufacturer}
+                    displayConfig={displayConfig}
                   />
                 )}
               </PDFViewer>

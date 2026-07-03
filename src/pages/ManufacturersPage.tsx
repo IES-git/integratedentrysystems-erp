@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Plus,
   Search,
@@ -100,6 +101,23 @@ export default function ManufacturersPage() {
     setIsDialogOpen(true);
   };
 
+  const copyBillingToShipping = (form: HTMLFormElement | null) => {
+    if (!form) return;
+    const billingStreet = form.elements.namedItem('billingStreet') as HTMLInputElement | null;
+    const billingCity = form.elements.namedItem('billingCity') as HTMLInputElement | null;
+    const billingState = form.elements.namedItem('billingState') as HTMLInputElement | null;
+    const billingZip = form.elements.namedItem('billingZip') as HTMLInputElement | null;
+    const shippingStreet = form.elements.namedItem('shippingStreet') as HTMLInputElement | null;
+    const shippingCity = form.elements.namedItem('shippingCity') as HTMLInputElement | null;
+    const shippingState = form.elements.namedItem('shippingState') as HTMLInputElement | null;
+    const shippingZip = form.elements.namedItem('shippingZip') as HTMLInputElement | null;
+
+    if (shippingStreet && billingStreet) shippingStreet.value = billingStreet.value;
+    if (shippingCity && billingCity) shippingCity.value = billingCity.value;
+    if (shippingState && billingState) shippingState.value = billingState.value;
+    if (shippingZip && billingZip) shippingZip.value = billingZip.value;
+  };
+
   const handleSave = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -112,6 +130,10 @@ export default function ManufacturersPage() {
         billingCity: (fd.get('billingCity') as string) || null,
         billingState: (fd.get('billingState') as string) || null,
         billingZip: (fd.get('billingZip') as string) || null,
+        shippingAddress: (fd.get('shippingStreet') as string) || null,
+        shippingCity: (fd.get('shippingCity') as string) || null,
+        shippingState: (fd.get('shippingState') as string) || null,
+        shippingZip: (fd.get('shippingZip') as string) || null,
         notes: (fd.get('notes') as string) || null,
       };
 
@@ -246,7 +268,12 @@ export default function ManufacturersPage() {
                     <TableRow key={manufacturer.id}>
                       <TableCell>
                         <div>
-                          <p className="font-medium">{manufacturer.name}</p>
+                          <Link
+                            to={`/app/manufacturers/${manufacturer.id}`}
+                            className="font-medium transition-colors hover:text-primary"
+                          >
+                            {manufacturer.name}
+                          </Link>
                           <p className="text-sm text-muted-foreground">
                             Added {new Date(manufacturer.createdAt).toLocaleDateString()}
                           </p>
@@ -283,6 +310,11 @@ export default function ManufacturersPage() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
+                            <DropdownMenuItem asChild>
+                              <Link to={`/app/manufacturers/${manufacturer.id}`}>
+                                View Details
+                              </Link>
+                            </DropdownMenuItem>
                             <DropdownMenuItem onClick={() => openEditDialog(manufacturer)}>
                               Edit
                             </DropdownMenuItem>
@@ -331,7 +363,7 @@ export default function ManufacturersPage() {
               </div>
 
               <div className="space-y-2">
-                <Label className="text-sm font-medium">Address</Label>
+                <Label className="text-sm font-medium">Billing Address</Label>
                 <Input
                   name="billingStreet"
                   defaultValue={editingManufacturer?.billingAddress ?? ''}
@@ -355,6 +387,46 @@ export default function ManufacturersPage() {
                     className="col-span-2"
                     name="billingZip"
                     defaultValue={editingManufacturer?.billingZip ?? ''}
+                    placeholder="ZIP"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Shipping Address</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={(event) => copyBillingToShipping(event.currentTarget.form)}
+                  >
+                    Copy Billing
+                  </Button>
+                </div>
+                <Input
+                  name="shippingStreet"
+                  defaultValue={editingManufacturer?.shippingAddress ?? ''}
+                  placeholder="Street address"
+                />
+                <div className="grid grid-cols-6 gap-2">
+                  <Input
+                    className="col-span-3"
+                    name="shippingCity"
+                    defaultValue={editingManufacturer?.shippingCity ?? ''}
+                    placeholder="City"
+                  />
+                  <Input
+                    className="col-span-1"
+                    name="shippingState"
+                    defaultValue={editingManufacturer?.shippingState ?? ''}
+                    placeholder="ST"
+                    maxLength={2}
+                  />
+                  <Input
+                    className="col-span-2"
+                    name="shippingZip"
+                    defaultValue={editingManufacturer?.shippingZip ?? ''}
                     placeholder="ZIP"
                   />
                 </div>

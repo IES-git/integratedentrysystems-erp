@@ -71,6 +71,7 @@ const App = () => (
                   <Route path="customers" element={<CustomersPage />} />
                   <Route path="customers/:id" element={<CompanyDetailPage />} />
                   <Route path="manufacturers" element={<ManufacturersPage />} />
+                  <Route path="manufacturers/:id" element={<CompanyDetailPage />} />
                   <Route path="estimates" element={<EstimatesListPage />} />
                   <Route path="estimates/new" element={<EstimateUploadPage />} />
                   <Route path="estimates/create" element={<ManualEstimateWizardPage />} />

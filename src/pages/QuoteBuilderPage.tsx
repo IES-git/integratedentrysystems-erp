@@ -35,7 +35,7 @@ import { supabase } from '@/lib/supabase';
 import { getEstimateWithItems, updateEstimateOpening } from '@/lib/estimates-api';
 import { refreshEstimatePricing } from '@/lib/pricing-lookup';
 import { getCompany } from '@/lib/companies-api';
-import { createQuote, getQuoteWithItems, updateQuoteWithItems } from '@/lib/quotes-api';
+import { createQuote, getQuoteWithItems, updateQuoteWithItems, type CreateQuoteLineSnapshotInput } from '@/lib/quotes-api';
 import { getTemplate } from '@/lib/templates-api';
 import { assertEstimateBuildable, priceEstimate } from '@/lib/cpq/service';
 import { loadEstimateLinesByOpening } from '@/lib/cpq/estimate-lines-api';
@@ -47,6 +47,7 @@ import {
   QuotePresentationControls,
   type QuoteCopyGenerationRequest,
 } from '@/components/quotes/QuotePresentationControls';
+import { normalizeCompactNominalDimension } from '@/components/pricing/dimension-utils';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import { getMarkupOverrideMatch } from '@/lib/customer-markups';
 import {
@@ -651,6 +652,20 @@ const FRAME_SPEC_DISPLAY: { key: string; label: string }[] = [
   { key: 'frame.silencer_qty', label: 'Silencers' },
 ];
 
+const NOMINAL_SPEC_KEYS = new Set([
+  'door.nominal_door_width',
+  'door.nominal_door_height',
+  'frame.nominal_frame_width',
+  'frame.nominal_frame_height',
+]);
+
+function formatSpecValue(key: string, value: unknown): string {
+  const raw = String(value ?? '');
+  if (!raw) return raw;
+  if (!NOMINAL_SPEC_KEYS.has(key)) return raw;
+  return normalizeCompactNominalDimension(raw) ?? raw;
+}
+
 interface BuildSpecPanelProps {
   doorFields: Record<string, string>;
   frameFields: Record<string, string>;
@@ -676,7 +691,7 @@ function BuildSpecPanel({ doorFields, frameFields }: BuildSpecPanelProps) {
               {DOOR_SPEC_DISPLAY.filter(({ key }) => doorFields[key]).map(({ key, label }) => (
                 <div key={key} className="flex items-baseline gap-1.5 text-xs">
                   <dt className="text-muted-foreground shrink-0 min-w-[120px]">{label}</dt>
-                  <dd className="font-medium text-foreground">{doorFields[key]}</dd>
+                  <dd className="font-medium text-foreground">{formatSpecValue(key, doorFields[key])}</dd>
                 </div>
               ))}
             </dl>
@@ -693,7 +708,7 @@ function BuildSpecPanel({ doorFields, frameFields }: BuildSpecPanelProps) {
               {FRAME_SPEC_DISPLAY.filter(({ key }) => frameFields[key]).map(({ key, label }) => (
                 <div key={key} className="flex items-baseline gap-1.5 text-xs">
                   <dt className="text-muted-foreground shrink-0 min-w-[120px]">{label}</dt>
-                  <dd className="font-medium text-foreground">{frameFields[key]}</dd>
+                  <dd className="font-medium text-foreground">{formatSpecValue(key, frameFields[key])}</dd>
                 </div>
               ))}
             </dl>
@@ -720,20 +735,28 @@ const SPEC_FIELD_LABELS: Record<string, string> = {
   'frame.frame_gauge': 'Gauge',
   'frame.jamb_depth': 'Jamb',
   'frame.nominal_frame_width': 'Width',
+  'frame.nominal_frame_height': 'Height',
   'frame.frame_profile': 'Profile',
   'frame.wall_type': 'Wall',
+  'infill.cutout_width_in': 'Cutout W',
+  'infill.cutout_height_in': 'Cutout H',
+  'infill.order_width_in': 'Kit W',
+  'infill.order_height_in': 'Kit H',
+  'infill.visible_width_in': 'Glass W',
+  'infill.visible_height_in': 'Glass H',
+  'infill.glass_type': 'Glass',
 };
 
 /** Extract formatted spec chips from engine line matched_conditions. */
 function getSpecChips(conditions: Record<string, unknown>): { key: string; label: string; value: string }[] {
   return Object.entries(conditions)
     .filter(([key]) => SPEC_FIELD_LABELS[key])
-    .map(([key, val]) => ({ key, label: SPEC_FIELD_LABELS[key], value: String(val) }));
+    .map(([key, val]) => ({ key, label: SPEC_FIELD_LABELS[key], value: formatSpecValue(key, val) }));
 }
 
 /**
  * Build a one-line spec summary for the opening header from the door + frame
- * BASE line matched_conditions. E.g. "Series H · 3-0×7-0 · Galvannealed · Frame F · 16ga KD"
+ * BASE line matched_conditions. E.g. "Series H · 30×70 · Galvannealed · Frame F · 16ga KD"
  */
 function buildOpeningSpecSummary(lines: EstimateLine[]): string {
   const doorBase = lines.find((l) => l.entityType === 'door' && l.lineType === 'BASE');
@@ -747,7 +770,9 @@ function buildOpeningSpecSummary(lines: EstimateLine[]): string {
     const h = c['door.nominal_door_height'];
     const mat = c['door.door_material'];
     if (series) parts.push(`Series ${series}`);
-    if (w && h) parts.push(`${w}×${h}`);
+    if (w && h) {
+      parts.push(`${formatSpecValue('door.nominal_door_width', w)}×${formatSpecValue('door.nominal_door_height', h)}`);
+    }
     if (mat && String(mat).toLowerCase() !== 'steel') parts.push(String(mat));
   }
 
@@ -1553,6 +1578,105 @@ export default function QuoteBuilderPage() {
     [lineItems]
   );
 
+  const buildQuoteLineSnapshots = useCallback(
+    (): CreateQuoteLineSnapshotInput[] =>
+      lineItems.map((li, idx) => {
+        const item = li.estimateItem;
+        const isEngLine = item.isEngineLineDetail === true;
+        const openingQty = item.openingQuantity ?? 1;
+        const quoteQuantity = isEngLine ? item.quantity * openingQty : item.quantity;
+        const lineTotal = parseFloat((li.unitPrice * quoteQuantity).toFixed(2));
+        const displayKey = getLineItemDisplayKey(item);
+
+        if (isEngLine && item.engineLine) {
+          const line = item.engineLine;
+          return {
+            estimateId: estimateId ?? null,
+            estimateLineId: line.id,
+            estimateItemId: null,
+            openingId: line.openingId ?? item.openingId ?? null,
+            componentId: line.componentId ?? null,
+            sourceTable: 'estimate_line',
+            sourceLineType: line.lineType,
+            entityType: line.entityType,
+            chargeCategory: line.chargeCategory,
+            description: line.description ?? item.itemLabel,
+            selectedOptionCode: line.selectedOptionCode ?? item.canonicalCode ?? null,
+            quantity: quoteQuantity,
+            unitOfMeasure: line.unitOfMeasure,
+            unitListPrice: line.unitListPrice,
+            extendedListPrice: line.extendedListPrice,
+            discountMultiplier: line.discountMultiplier,
+            extendedNetPrice: line.extendedNetPrice,
+            sellPrice: line.sellPrice,
+            manualSellPrice: line.manualSellPrice ?? null,
+            unitSellPrice: li.unitPrice,
+            lineTotal,
+            priceStatus: line.priceStatus,
+            reviewStatus: line.reviewStatus,
+            sortOrder: idx,
+            snapshotJson: {
+              displayKey,
+              itemLabel: item.itemLabel,
+              canonicalCode: item.canonicalCode,
+              sourceQuantity: line.quantity,
+              openingQuantity: openingQty,
+              appliedMultiplier: li.multiplier,
+              unitCost: li.unitCost,
+              grossMargin: line.grossMargin,
+              grossMarginPct: line.grossMarginPct,
+              calculationExpression: line.calculationExpression,
+              matchedConditions: line.matchedConditions,
+              sourcePage: line.sourcePage,
+              sourceRegionId: line.sourceRegionId,
+              priceBookId: line.priceBookId,
+              exceptionMessage: line.exceptionMessage,
+            },
+          };
+        }
+
+        return {
+          estimateId: estimateId ?? null,
+          estimateLineId: null,
+          estimateItemId: item.id,
+          openingId: item.openingId ?? null,
+          componentId: item.parentItemId ?? null,
+          sourceTable: 'estimate_items',
+          sourceLineType: null,
+          entityType: item.itemType ?? null,
+          chargeCategory: item.chargeCategory ?? item.subcategory ?? item.itemType ?? null,
+          description: item.itemLabel,
+          selectedOptionCode: item.canonicalCode ?? null,
+          quantity: quoteQuantity,
+          unitOfMeasure: null,
+          unitListPrice: item.unitPrice,
+          extendedListPrice: item.unitPrice != null ? item.unitPrice * item.quantity : null,
+          discountMultiplier: null,
+          extendedNetPrice: li.unitCost * quoteQuantity,
+          sellPrice: li.unitPrice,
+          manualSellPrice: null,
+          unitSellPrice: li.unitPrice,
+          lineTotal,
+          priceStatus: item.unitPrice == null ? 'UNPRICED' : 'PRICED',
+          reviewStatus: item.priceSource ?? null,
+          sortOrder: idx,
+          snapshotJson: {
+            displayKey,
+            itemLabel: item.itemLabel,
+            canonicalCode: item.canonicalCode,
+            appliedMultiplier: li.multiplier,
+            unitCost: li.unitCost,
+            fields: item.fields.map((field) => ({
+              key: field.fieldKey,
+              label: field.fieldLabel,
+              value: field.fieldValue,
+            })),
+          },
+        };
+      }),
+    [estimateId, lineItems]
+  );
+
   // ── Save quote ─────────────────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
     if (!estimateId || !user) return;
@@ -1568,6 +1692,7 @@ export default function QuoteBuilderPage() {
             notes: notes.trim() || null,
             displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
             items: buildQuoteItems(),
+            snapshots: buildQuoteLineSnapshots(),
           })
         : await createQuote({
             estimateId,
@@ -1580,6 +1705,7 @@ export default function QuoteBuilderPage() {
             notes: notes.trim() || null,
             displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
             items: buildQuoteItems(),
+            snapshots: buildQuoteLineSnapshots(),
           });
       setSavedQuote(quote);
       toast({
@@ -1596,7 +1722,7 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [estimateId, user, savedQuote, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig, buildQuoteItems, customerId, quoteType, toast, navigate]);
+  }, [estimateId, user, savedQuote, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig, buildQuoteItems, buildQuoteLineSnapshots, customerId, quoteType, toast, navigate]);
 
   // ── PDF helpers ────────────────────────────────────────────────────────────
   const buildQuoteForPdf = useCallback((): Quote => {
@@ -1634,12 +1760,21 @@ export default function QuoteBuilderPage() {
     };
   }, [savedQuote, estimateId, customerId, user, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig]);
 
+  const openingNameById = useMemo(
+    () => new Map(openings.map((opening) => [opening.id, opening.name])),
+    [openings],
+  );
+
   const buildQuoteItemsForPdf = useCallback((): QuoteItem[] => {
     const now = new Date().toISOString();
     return lineItems.map((li, idx) => {
       const isEngLine = li.estimateItem.isEngineLineDetail === true;
       const openingQty = li.estimateItem.openingQuantity ?? 1;
       const saveQty = isEngLine ? li.estimateItem.quantity * openingQty : li.estimateItem.quantity;
+      const openingId = li.estimateItem.engineLine?.openingId ?? li.estimateItem.openingId ?? null;
+      const productGroup = li.estimateItem.engineLine
+        ? LAYER_LABELS[classifyEngineLayer(li.estimateItem.engineLine.entityType, li.estimateItem.engineLine.chargeCategory)]
+        : li.estimateItem.chargeCategory ?? li.estimateItem.subcategory ?? li.estimateItem.itemType ?? null;
       return {
         id: isEngLine ? (li.estimateItem.engineLine?.id ?? li.estimateItem.id) : li.estimateItem.id,
         quoteId: savedQuote?.id ?? 'preview',
@@ -1647,6 +1782,12 @@ export default function QuoteBuilderPage() {
         displayKey: getLineItemDisplayKey(li.estimateItem),
         itemLabel: li.estimateItem.itemLabel,
         canonicalCode: li.estimateItem.canonicalCode ?? null,
+        openingId,
+        openingName: openingId ? openingNameById.get(openingId) ?? null : null,
+        productGroup,
+        unitOfMeasure: li.estimateItem.engineLine?.unitOfMeasure ?? null,
+        grossMargin: li.estimateItem.engineLine?.grossMargin ?? parseFloat((li.unitPrice * saveQty - li.unitCost * saveQty).toFixed(2)),
+        grossMarginPct: li.estimateItem.engineLine?.grossMarginPct ?? null,
         quantity: saveQty,
         unitCost: li.unitCost,
         unitPrice: li.unitPrice,
@@ -1655,7 +1796,7 @@ export default function QuoteBuilderPage() {
         createdAt: now,
       };
     });
-  }, [lineItems, savedQuote]);
+  }, [lineItems, openingNameById, savedQuote]);
 
   // ── Reactive PDF data for live preview ────────────────────────────────────
   const pdfQuote = useMemo((): Quote => {
@@ -1699,6 +1840,10 @@ export default function QuoteBuilderPage() {
       const isEngLine = li.estimateItem.isEngineLineDetail === true;
       const openingQty = li.estimateItem.openingQuantity ?? 1;
       const saveQty = isEngLine ? li.estimateItem.quantity * openingQty : li.estimateItem.quantity;
+      const openingId = li.estimateItem.engineLine?.openingId ?? li.estimateItem.openingId ?? null;
+      const productGroup = li.estimateItem.engineLine
+        ? LAYER_LABELS[classifyEngineLayer(li.estimateItem.engineLine.entityType, li.estimateItem.engineLine.chargeCategory)]
+        : li.estimateItem.chargeCategory ?? li.estimateItem.subcategory ?? li.estimateItem.itemType ?? null;
       return {
         id: isEngLine ? (li.estimateItem.engineLine?.id ?? li.estimateItem.id) : li.estimateItem.id,
         quoteId: savedQuote?.id ?? 'preview',
@@ -1706,6 +1851,12 @@ export default function QuoteBuilderPage() {
         displayKey: getLineItemDisplayKey(li.estimateItem),
         itemLabel: li.estimateItem.itemLabel,
         canonicalCode: li.estimateItem.canonicalCode ?? null,
+        openingId,
+        openingName: openingId ? openingNameById.get(openingId) ?? null : null,
+        productGroup,
+        unitOfMeasure: li.estimateItem.engineLine?.unitOfMeasure ?? null,
+        grossMargin: li.estimateItem.engineLine?.grossMargin ?? parseFloat((li.unitPrice * saveQty - li.unitCost * saveQty).toFixed(2)),
+        grossMarginPct: li.estimateItem.engineLine?.grossMarginPct ?? null,
         quantity: saveQty,
         unitCost: li.unitCost,
         unitPrice: li.unitPrice,
@@ -1714,7 +1865,7 @@ export default function QuoteBuilderPage() {
         createdAt: now,
       };
     });
-  }, [lineItems, savedQuote?.id]);
+  }, [lineItems, openingNameById, savedQuote?.id]);
 
   const pdfManufacturerItems = useMemo(
     () =>
@@ -1876,7 +2027,7 @@ export default function QuoteBuilderPage() {
           items={items}
           company={company}
           aiSummary={aiSummary}
-          displayConfig={displayConfig.customer}
+          displayConfig={displayConfig}
         />
       ).toBlob();
       const name = company?.name ?? 'Customer';
@@ -1891,7 +2042,7 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsDownloadingCustomer(false);
     }
-  }, [buildQuoteForPdf, buildQuoteItemsForPdf, company, displayConfig.customer, toast]);
+  }, [buildQuoteForPdf, buildQuoteItemsForPdf, company, displayConfig, toast]);
 
   const handleDownloadManufacturer = useCallback(async () => {
     setIsDownloadingManufacturer(true);
@@ -1906,7 +2057,7 @@ export default function QuoteBuilderPage() {
           quote={quote}
           items={items}
           company={company}
-          displayConfig={displayConfig.manufacturer}
+          displayConfig={displayConfig}
         />
       ).toBlob();
       const name = company?.name ?? 'Manufacturer';
@@ -1921,7 +2072,7 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsDownloadingManufacturer(false);
     }
-  }, [buildQuoteForPdf, buildQuoteItemsForPdf, lineItems, company, displayConfig.manufacturer, toast]);
+  }, [buildQuoteForPdf, buildQuoteItemsForPdf, lineItems, company, displayConfig, toast]);
 
   const handleDownloadBoth = useCallback(async () => {
     await Promise.all([handleDownloadCustomer(), handleDownloadManufacturer()]);
@@ -1968,21 +2119,26 @@ export default function QuoteBuilderPage() {
 
         <div className="flex-1 min-h-0">
           {previewType !== null && (
-            <PDFViewer width="100%" height="100%" showToolbar>
+            <PDFViewer
+              key={`${previewType}-${serializeQuoteDisplayConfig(displayConfig)}-${pdfItems.length}-${pdfQuote.total}`}
+              width="100%"
+              height="100%"
+              showToolbar
+            >
               {previewType === 'customer' ? (
                 <CustomerQuotePdf
                   quote={pdfQuote}
                   items={pdfItems}
                   company={company}
                   aiSummary={previewAiSummary}
-                  displayConfig={displayConfig.customer}
+                  displayConfig={displayConfig}
                 />
               ) : (
                 <ManufacturerQuotePdf
                   quote={pdfQuote}
                   items={pdfManufacturerItems}
                   company={company}
-                  displayConfig={displayConfig.manufacturer}
+                  displayConfig={displayConfig}
                 />
               )}
             </PDFViewer>

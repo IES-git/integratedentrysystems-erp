@@ -16,7 +16,10 @@ import { Badge } from '@/components/ui/badge';
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
@@ -36,6 +39,39 @@ interface SpecFieldInputProps {
   options?: string[] | null;
   /** Display labels per option code, e.g. { H: "H — Honeycomb…" }. */
   optionLabels?: Record<string, string> | null;
+}
+
+function displayOptionLabel(value: string): string {
+  return value.replace(/\bLockseam\b/gi, 'Invisible seam');
+}
+
+const HAND_GROUPS = [
+  { label: 'Inswing', values: ['RH', 'LH'] },
+  { label: 'Outswing', values: ['RHR', 'LHR'] },
+  { label: 'Non-handed', values: ['NH'] },
+  { label: 'Frame pair', values: ['RHA', 'LHA', 'DA'] },
+];
+
+function isHandField(field: SpecFieldWithPath): boolean {
+  return field.fieldId === 'DOR-012' || field.fieldId === 'FRM-014';
+}
+
+function sortEnumOptions(field: SpecFieldWithPath, options: string[]): string[] {
+  if (!isHandField(field)) return options;
+  const rank = new Map<string, number>();
+  HAND_GROUPS.flatMap((group) => group.values).forEach((value, index) => rank.set(value, index));
+  return [...options].sort((a, b) => (rank.get(a) ?? 1000) - (rank.get(b) ?? 1000) || a.localeCompare(b));
+}
+
+function groupHandOptions(options: string[]): Array<{ label: string; options: string[] }> {
+  const optionSet = new Set(options);
+  const groups = HAND_GROUPS
+    .map((group) => ({ label: group.label, options: group.values.filter((value) => optionSet.has(value)) }))
+    .filter((group) => group.options.length > 0);
+  const known = new Set(HAND_GROUPS.flatMap((group) => group.values));
+  const other = options.filter((option) => !known.has(option));
+  if (other.length > 0) groups.push({ label: 'Other', options: other });
+  return groups;
 }
 
 function isRequired(field: SpecFieldWithPath): boolean {
@@ -73,6 +109,7 @@ export function SpecFieldInput({ field, value, onChange, locked, derivedValue, d
   const enumOptions = !isFreeformMeasurement && effectiveValue && !baseEnum.includes(effectiveValue)
     ? [effectiveValue, ...baseEnum]
     : baseEnum;
+  const sortedEnumOptions = sortEnumOptions(field, enumOptions);
   // Guided dimension suggestions (chart depths) shown in a datalist so the input
   // stays freeform.
   const measurementSuggestions = isGuidedMeasurement && options && options.length > 0 ? options : null;
@@ -85,7 +122,7 @@ export function SpecFieldInput({ field, value, onChange, locked, derivedValue, d
     if (pathKey.includes('lite_location')) return 'e.g. centered, 10" from top';
     if (pathKey.includes('glass_thickness') || pathKey.includes('kit_depth')) return 'e.g. 1/4"';
     if (pathKey.includes('jamb_depth') || pathKey.includes('wall_thickness')) return 'e.g. 5 3/4"';
-    return "e.g. 3-0 or 36\"";
+    return 'e.g. 30 or 70';
   })();
 
   return (
@@ -115,11 +152,25 @@ export function SpecFieldInput({ field, value, onChange, locked, derivedValue, d
             <SelectValue placeholder="Select…" />
           </SelectTrigger>
           <SelectContent>
-            {enumOptions.map((opt) => (
-              <SelectItem key={opt} value={opt} className="text-sm">
-                {optionLabels?.[opt] ?? opt}
-              </SelectItem>
-            ))}
+            {isHandField(field)
+              ? groupHandOptions(sortedEnumOptions).map((group, index) => (
+                <SelectGroup key={group.label}>
+                  {index > 0 && <SelectSeparator />}
+                  <SelectLabel className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {group.label}
+                  </SelectLabel>
+                  {group.options.map((opt) => (
+                    <SelectItem key={opt} value={opt} className="text-sm">
+                      {displayOptionLabel(optionLabels?.[opt] ?? opt)}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              ))
+              : sortedEnumOptions.map((opt) => (
+                <SelectItem key={opt} value={opt} className="text-sm">
+                  {displayOptionLabel(optionLabels?.[opt] ?? opt)}
+                </SelectItem>
+              ))}
           </SelectContent>
         </Select>
       ) : (

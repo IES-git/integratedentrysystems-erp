@@ -222,7 +222,7 @@ export async function listEstimates(): Promise<Estimate[]> {
  * PostgREST join resolution issues.
  */
 export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
-  const [estimatesRes, itemsRes, openingsRes] = await Promise.all([
+  const [estimatesRes, itemsRes, openingsRes, quotesRes] = await Promise.all([
     supabase
       .from('estimates')
       .select('*')
@@ -232,13 +232,19 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
       .select('id, estimate_id, canonical_code, item_label, item_type, subcategory'),
     supabase
       .from('estimate_openings')
-      .select('id, estimate_id, sort_order, spec_snapshot'),
+      .select('id, estimate_id, name, sort_order, spec_snapshot'),
+    supabase
+      .from('quotes')
+      .select('id, estimate_id, status, created_at')
+      .order('created_at', { ascending: false }),
   ]);
 
   if (estimatesRes.error)
     throw new Error(`Failed to list estimates: ${estimatesRes.error.message}`);
   if (itemsRes.error)
     throw new Error(`Failed to fetch estimate items: ${itemsRes.error.message}`);
+  if (quotesRes.error)
+    throw new Error(`Failed to fetch quote statuses: ${quotesRes.error.message}`);
 
   // Collect unique user IDs so we can fetch names in one query
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -278,6 +284,7 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
   // Count openings per estimate and collect their spec snapshots (for the
   // spec-driven quick-reference summary shown in the list).
   const openingsCountByEstimate = new Map<string, number>();
+  const openingNamesByEstimate = new Map<string, string[]>();
   const snapshotsByEstimate = new Map<string, OpeningSnapshotRow[]>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   for (const opening of (openingsRes.data || []) as any[]) {
@@ -285,6 +292,9 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
       opening.estimate_id,
       (openingsCountByEstimate.get(opening.estimate_id) ?? 0) + 1
     );
+    const names = openingNamesByEstimate.get(opening.estimate_id) ?? [];
+    if (opening.name) names.push(opening.name);
+    openingNamesByEstimate.set(opening.estimate_id, names);
     if (opening.spec_snapshot) {
       const list = snapshotsByEstimate.get(opening.estimate_id) ?? [];
       list.push({
@@ -295,12 +305,25 @@ export async function getEstimatesWithItems(): Promise<EstimateWithItems[]> {
     }
   }
 
+  const quoteSummaryByEstimate = new Map<string, { latestStatus: EstimateWithItems['latestQuoteStatus']; count: number }>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const quote of (quotesRes.data || []) as any[]) {
+    const current = quoteSummaryByEstimate.get(quote.estimate_id);
+    quoteSummaryByEstimate.set(quote.estimate_id, {
+      latestStatus: current?.latestStatus ?? quote.status ?? null,
+      count: (current?.count ?? 0) + 1,
+    });
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (estimatesRes.data || []).map((row: any) => ({
     ...mapEstimateRow(row),
     items: itemsByEstimate.get(row.id) ?? [],
     createdByUserName: userNameMap.get(row.uploaded_by_user_id) ?? null,
     openingsCount: openingsCountByEstimate.get(row.id) ?? 0,
+    openingNames: openingNamesByEstimate.get(row.id) ?? [],
+    latestQuoteStatus: quoteSummaryByEstimate.get(row.id)?.latestStatus ?? null,
+    quoteCount: quoteSummaryByEstimate.get(row.id)?.count ?? 0,
     specSummary: buildEstimateSpecSummary(snapshotsByEstimate.get(row.id) ?? []),
   }));
 }
@@ -321,6 +344,24 @@ export async function updateEstimate(
       | 'extractedCustomerEmail'
       | 'extractedCustomerPhone'
       | 'totalPrice'
+      | 'jobName'
+      | 'jobLocation'
+      | 'jobNumber'
+      | 'customerPo'
+      | 'quoteDate'
+      | 'shippingMethod'
+      | 'terms'
+      | 'delivery'
+      | 'shipToSource'
+      | 'shipToAddress'
+      | 'shipToCity'
+      | 'shipToState'
+      | 'shipToZip'
+      | 'customerContactId'
+      | 'customerRepName'
+      | 'customerRepPhone'
+      | 'customerRepEmail'
+      | 'internalNotes'
     >
   >
 ): Promise<Estimate> {
@@ -337,6 +378,24 @@ export async function updateEstimate(
     row.extracted_customer_phone = updates.extractedCustomerPhone;
   if (updates.totalPrice !== undefined)
     row.total_price = updates.totalPrice;
+  if (updates.jobName !== undefined) row.job_name = updates.jobName;
+  if (updates.jobLocation !== undefined) row.job_location = updates.jobLocation;
+  if (updates.jobNumber !== undefined) row.job_number = updates.jobNumber;
+  if (updates.customerPo !== undefined) row.customer_po = updates.customerPo;
+  if (updates.quoteDate !== undefined) row.quote_date = updates.quoteDate;
+  if (updates.shippingMethod !== undefined) row.shipping_method = updates.shippingMethod;
+  if (updates.terms !== undefined) row.terms = updates.terms;
+  if (updates.delivery !== undefined) row.delivery = updates.delivery;
+  if (updates.shipToSource !== undefined) row.ship_to_source = updates.shipToSource;
+  if (updates.shipToAddress !== undefined) row.ship_to_address = updates.shipToAddress;
+  if (updates.shipToCity !== undefined) row.ship_to_city = updates.shipToCity;
+  if (updates.shipToState !== undefined) row.ship_to_state = updates.shipToState;
+  if (updates.shipToZip !== undefined) row.ship_to_zip = updates.shipToZip;
+  if (updates.customerContactId !== undefined) row.customer_contact_id = updates.customerContactId;
+  if (updates.customerRepName !== undefined) row.customer_rep_name = updates.customerRepName;
+  if (updates.customerRepPhone !== undefined) row.customer_rep_phone = updates.customerRepPhone;
+  if (updates.customerRepEmail !== undefined) row.customer_rep_email = updates.customerRepEmail;
+  if (updates.internalNotes !== undefined) row.internal_notes = updates.internalNotes;
 
   const { data, error } = await supabase
     .from('estimates')
@@ -541,6 +600,24 @@ export async function duplicateEstimate(
       extracted_customer_phone: estimate.extractedCustomerPhone,
       customer_confidence: estimate.customerConfidence,
       total_price: estimate.totalPrice,
+      job_name: estimate.jobName,
+      job_location: estimate.jobLocation,
+      job_number: estimate.jobNumber,
+      customer_po: estimate.customerPo,
+      quote_date: estimate.quoteDate,
+      shipping_method: estimate.shippingMethod,
+      terms: estimate.terms,
+      delivery: estimate.delivery,
+      ship_to_source: estimate.shipToSource,
+      ship_to_address: estimate.shipToAddress,
+      ship_to_city: estimate.shipToCity,
+      ship_to_state: estimate.shipToState,
+      ship_to_zip: estimate.shipToZip,
+      customer_contact_id: estimate.customerContactId,
+      customer_rep_name: estimate.customerRepName,
+      customer_rep_phone: estimate.customerRepPhone,
+      customer_rep_email: estimate.customerRepEmail,
+      internal_notes: estimate.internalNotes,
       extracted_at: estimate.extractedAt,
     })
     .select('id')
@@ -2276,9 +2353,29 @@ function mapEstimateRow(row: any): Estimate {
     extractedCustomerPhone: row.extracted_customer_phone,
     customerConfidence: row.customer_confidence,
     totalPrice: row.total_price,
+    jobName: row.job_name ?? null,
+    jobLocation: row.job_location ?? null,
+    jobNumber: row.job_number ?? null,
+    customerPo: row.customer_po ?? null,
+    quoteDate: row.quote_date ?? null,
+    shippingMethod: row.shipping_method ?? null,
+    terms: row.terms ?? null,
+    delivery: row.delivery ?? null,
+    shipToSource: row.ship_to_source ?? null,
+    shipToAddress: row.ship_to_address ?? null,
+    shipToCity: row.ship_to_city ?? null,
+    shipToState: row.ship_to_state ?? null,
+    shipToZip: row.ship_to_zip ?? null,
+    customerContactId: row.customer_contact_id ?? null,
+    customerRepName: row.customer_rep_name ?? null,
+    customerRepPhone: row.customer_rep_phone ?? null,
+    customerRepEmail: row.customer_rep_email ?? null,
+    internalNotes: row.internal_notes ?? null,
     extractedAt: row.extracted_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    sellAdjustmentPct: row.sell_adjustment_pct ?? null,
+    estimateNotes: row.estimate_notes ?? null,
   };
 }
 

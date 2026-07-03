@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import {
   ChevronRight,
   Plus,
@@ -67,6 +67,7 @@ import type { Company, Contact, CompanySettings } from '@/types';
 export default function CompanyDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
 
   const [company, setCompany] = useState<Company | null>(null);
@@ -149,6 +150,23 @@ export default function CompanyDetailPage() {
     } finally {
       setIsSavingCompany(false);
     }
+  };
+
+  const copyBillingToShipping = (form: HTMLFormElement | null) => {
+    if (!form) return;
+    const billingStreet = form.elements.namedItem('billingStreet') as HTMLInputElement | null;
+    const billingCity = form.elements.namedItem('billingCity') as HTMLInputElement | null;
+    const billingState = form.elements.namedItem('billingState') as HTMLInputElement | null;
+    const billingZip = form.elements.namedItem('billingZip') as HTMLInputElement | null;
+    const shippingStreet = form.elements.namedItem('shippingStreet') as HTMLInputElement | null;
+    const shippingCity = form.elements.namedItem('shippingCity') as HTMLInputElement | null;
+    const shippingState = form.elements.namedItem('shippingState') as HTMLInputElement | null;
+    const shippingZip = form.elements.namedItem('shippingZip') as HTMLInputElement | null;
+
+    if (shippingStreet && billingStreet) shippingStreet.value = billingStreet.value;
+    if (shippingCity && billingCity) shippingCity.value = billingCity.value;
+    if (shippingState && billingState) shippingState.value = billingState.value;
+    if (shippingZip && billingZip) shippingZip.value = billingZip.value;
   };
 
   // ---- Contacts ----
@@ -259,13 +277,17 @@ export default function CompanyDetailPage() {
   }
 
   const primaryContact = contacts.find((c) => c.isPrimary);
+  const isManufacturerRoute =
+    location.pathname.includes('/manufacturers') || company.companyType === 'manufacturer';
+  const directoryPath = isManufacturerRoute ? '/app/manufacturers' : '/app/customers';
+  const directoryLabel = isManufacturerRoute ? 'Manufacturers' : 'Customers';
 
   return (
     <div className="p-4 sm:p-6 lg:p-8">
       {/* Breadcrumb */}
       <nav className="mb-6 flex items-center gap-1.5 text-sm text-muted-foreground">
-        <Link to="/app/customers" className="transition-colors hover:text-foreground">
-          Customers
+        <Link to={directoryPath} className="transition-colors hover:text-foreground">
+          {directoryLabel}
         </Link>
         <ChevronRight className="h-4 w-4" />
         <span className="font-medium text-foreground">{company.name}</span>
@@ -633,7 +655,17 @@ export default function CompanyDetailPage() {
               </div>
 
               <div className="space-y-2">
-                <Label className="text-sm font-medium">Shipping Address</Label>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Shipping Address</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={(event) => copyBillingToShipping(event.currentTarget.form)}
+                  >
+                    Copy Billing
+                  </Button>
+                </div>
                 <Input
                   name="shippingStreet"
                   defaultValue={company.shippingAddress ?? ''}

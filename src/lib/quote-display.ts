@@ -3,8 +3,12 @@ import type {
   QuoteDisplayBlock,
   QuoteDisplayBlockId,
   QuoteDisplayConfig,
+  QuoteDisplayConfigV2,
   QuoteDisplayDetailLevel,
+  QuoteDisplayDetailMode,
   QuoteItem,
+  QuoteOrganizationMode,
+  QuoteVisibleColumn,
   Template,
   TemplateAudience,
 } from '@/types';
@@ -22,13 +26,44 @@ export interface QuotePresentationLineOption {
 export interface QuoteDisplayRow {
   id: string;
   label: string;
+  mark: string | null;
+  productGroup: string | null;
   canonicalCode?: string | null;
   quantity: number;
+  unitOfMeasure: string | null;
   unitPrice: number;
   unitCost: number;
+  netCost: number;
+  grossMargin: number | null;
   lineTotal: number;
   sourceItemCount: number;
 }
+
+export interface QuoteDisplayRowOptions {
+  organizationMode?: QuoteOrganizationMode;
+  detailMode?: QuoteDisplayDetailMode;
+}
+
+export type QuoteDocumentDisplayConfigInput =
+  | QuoteDisplayConfig
+  | QuoteAudienceDisplayConfig
+  | null
+  | undefined;
+
+export interface ResolvedQuoteDocumentDisplayConfig {
+  documentConfig: QuoteDisplayConfigV2 | null;
+  audienceConfig: QuoteAudienceDisplayConfig;
+}
+
+export const CUSTOMER_SAFE_VISIBLE_COLUMNS: QuoteVisibleColumn[] = [
+  'mark',
+  'description',
+  'product_code',
+  'quantity',
+  'uom',
+  'unit_price',
+  'line_total',
+];
 
 const BLOCK_LABELS: Record<QuoteDisplayBlockId, string> = {
   project: 'Project Information',
@@ -62,6 +97,14 @@ const MANUFACTURER_BLOCKS: QuoteDisplayBlock[] = [
   block('notes', 50, 'standard', true),
   block('delivery', 60, 'standard', true),
   block('custom', 70, 'standard', false),
+];
+
+const DEFAULT_VISIBLE_COLUMNS: QuoteVisibleColumn[] = [
+  'mark',
+  'description',
+  'quantity',
+  'unit_price',
+  'line_total',
 ];
 
 function block(
@@ -121,7 +164,7 @@ export function createDefaultAudienceDisplayConfig(
     groupCustomerLineItems: true,
     summaryText: '',
     scopeText: 'Commercial door, frame, hardware, and related opening scope as priced from the source estimate.',
-    termsText: 'Pricing is valid for 30 days unless noted otherwise. Taxes, freight, field labor, and lead times are subject to final confirmation.',
+    termsText: 'Pricing is valid for 90 days unless noted otherwise. Taxes, freight, field labor, and lead times are subject to final confirmation.',
     customText: '',
   };
 }
@@ -138,7 +181,7 @@ export function createDefaultQuoteDisplayConfig(
       : null;
 
   return {
-    version: 1,
+    version: 2,
     customer:
       quoteType === 'manufacturer'
         ? createDefaultAudienceDisplayConfig('customer')
@@ -148,6 +191,14 @@ export function createDefaultQuoteDisplayConfig(
         ? createDefaultAudienceDisplayConfig('manufacturer')
         : manufacturerTemplate ??
           createDefaultAudienceDisplayConfig('manufacturer', template?.audience === 'manufacturer' ? template.name : null),
+    organizationMode: 'by_opening',
+    detailMode: 'summary',
+    customerTemplateKey: template?.audience === 'customer' ? template.id : null,
+    visibleColumns: DEFAULT_VISIBLE_COLUMNS,
+    validityDays: 90,
+    headerText: '',
+    footerText: '',
+    disclaimerText: '',
   };
 }
 
@@ -155,12 +206,8 @@ export function parseQuoteDisplayConfigJson(raw?: string | null): QuoteDisplayCo
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<QuoteDisplayConfig>;
-    if (parsed?.version === 1 && parsed.customer && parsed.manufacturer) {
-      return {
-        version: 1,
-        customer: normalizeAudienceDisplayConfig(parsed.customer, 'customer'),
-        manufacturer: normalizeAudienceDisplayConfig(parsed.manufacturer, 'manufacturer'),
-      };
+    if ((parsed?.version === 1 || parsed?.version === 2) && parsed.customer && parsed.manufacturer) {
+      return normalizeQuoteDisplayConfig(parsed as QuoteDisplayConfig);
     }
   } catch {
     return null;
@@ -176,7 +223,7 @@ export function parseAudienceDisplayConfig(
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<QuoteAudienceDisplayConfig | QuoteDisplayConfig>;
-    if ('version' in parsed && parsed.version === 1) {
+    if ('version' in parsed && (parsed.version === 1 || parsed.version === 2)) {
       const full = parsed as Partial<QuoteDisplayConfig>;
       const config = audience === 'customer' ? full.customer : full.manufacturer;
       return config ? normalizeAudienceDisplayConfig(config, audience, templateName) : null;
@@ -195,12 +242,127 @@ export function serializeAudienceDisplayConfig(config: QuoteAudienceDisplayConfi
   return JSON.stringify(normalizeAudienceDisplayConfig(config, config.audience));
 }
 
-export function normalizeQuoteDisplayConfig(config: QuoteDisplayConfig): QuoteDisplayConfig {
+export function normalizeQuoteDisplayConfig(config: QuoteDisplayConfig): QuoteDisplayConfigV2 {
+  const detailMode = 'detailMode' in config ? config.detailMode : 'summary';
+  const organizationMode = 'organizationMode' in config ? config.organizationMode : 'by_opening';
+  const visibleColumns = 'visibleColumns' in config && Array.isArray(config.visibleColumns)
+    ? config.visibleColumns
+    : DEFAULT_VISIBLE_COLUMNS;
+
   return {
-    version: 1,
+    version: 2,
     customer: normalizeAudienceDisplayConfig(config.customer, 'customer'),
     manufacturer: normalizeAudienceDisplayConfig(config.manufacturer, 'manufacturer'),
+    organizationMode: normalizeOrganizationMode(organizationMode),
+    detailMode: normalizeDetailMode(detailMode),
+    customerTemplateKey: 'customerTemplateKey' in config ? config.customerTemplateKey ?? null : null,
+    visibleColumns: normalizeVisibleColumns(visibleColumns),
+    validityDays:
+      'validityDays' in config && Number.isFinite(config.validityDays)
+        ? Math.max(1, Math.round(config.validityDays))
+        : 90,
+    headerText: 'headerText' in config ? config.headerText ?? '' : '',
+    footerText: 'footerText' in config ? config.footerText ?? '' : '',
+    disclaimerText: 'disclaimerText' in config ? config.disclaimerText ?? '' : '',
   };
+}
+
+export function resolveQuoteDocumentDisplayConfig(
+  config: QuoteDocumentDisplayConfigInput,
+  audience: TemplateAudience,
+): ResolvedQuoteDocumentDisplayConfig {
+  if (isFullQuoteDisplayConfig(config)) {
+    const documentConfig = normalizeQuoteDisplayConfig(config);
+    return {
+      documentConfig,
+      audienceConfig: audience === 'customer' ? documentConfig.customer : documentConfig.manufacturer,
+    };
+  }
+
+  return {
+    documentConfig: null,
+    audienceConfig: normalizeAudienceDisplayConfig(
+      config ?? createDefaultAudienceDisplayConfig(audience),
+      audience,
+    ),
+  };
+}
+
+export function getEffectiveQuoteDetailMode(
+  config: QuoteAudienceDisplayConfig,
+  documentConfig?: QuoteDisplayConfigV2 | null,
+): QuoteDisplayDetailMode {
+  if (documentConfig) return documentConfig.detailMode;
+
+  const lineBlock = getBlock(config, 'lineItems');
+  if (lineBlock.detailLevel === 'detailed') return 'per_item_sell';
+  if (lineBlock.detailLevel === 'standard') return 'rolled_up';
+  return 'summary';
+}
+
+export function getEffectiveVisibleColumns(
+  config: QuoteAudienceDisplayConfig,
+  documentConfig?: QuoteDisplayConfigV2 | null,
+): QuoteVisibleColumn[] {
+  if (documentConfig) {
+    const columns = documentConfig.visibleColumns.filter((column) =>
+      config.audience === 'customer'
+        ? CUSTOMER_SAFE_VISIBLE_COLUMNS.includes(column)
+        : true,
+    );
+    return columns.length > 0 ? columns : ['description'];
+  }
+
+  const columns: QuoteVisibleColumn[] = ['description'];
+  if (config.showProductCodes) columns.push('product_code');
+  if (config.showQuantities) columns.push('quantity');
+  if (config.showUnitPrices) columns.push('unit_price');
+  if (config.showLineTotals) columns.push('line_total');
+  if (config.audience !== 'customer' && config.showUnitCosts) columns.push('unit_cost');
+  return columns;
+}
+
+function isFullQuoteDisplayConfig(
+  config: QuoteDocumentDisplayConfigInput,
+): config is QuoteDisplayConfig {
+  return Boolean(
+    config &&
+      typeof config === 'object' &&
+      'customer' in config &&
+      'manufacturer' in config,
+  );
+}
+
+function normalizeOrganizationMode(value: unknown): QuoteOrganizationMode {
+  return value === 'by_product_group' ? 'by_product_group' : 'by_opening';
+}
+
+function normalizeDetailMode(value: unknown): QuoteDisplayDetailMode {
+  if (
+    value === 'rolled_up' ||
+    value === 'per_item_sell' ||
+    value === 'full_internal'
+  ) {
+    return value;
+  }
+  return 'summary';
+}
+
+function normalizeVisibleColumns(values: QuoteVisibleColumn[]): QuoteVisibleColumn[] {
+  const allowed = new Set<QuoteVisibleColumn>([
+    'mark',
+    'description',
+    'product_code',
+    'quantity',
+    'uom',
+    'unit_price',
+    'line_total',
+    'unit_cost',
+    'net_cost',
+    'gross_margin',
+  ]);
+  const normalized = values.filter((value) => allowed.has(value));
+  return normalized.length > 0 ? normalized : DEFAULT_VISIBLE_COLUMNS;
 }
 
 export function normalizeAudienceDisplayConfig(
@@ -294,36 +456,44 @@ export function isLineVisible(
 export function buildCustomerDisplayRows(
   items: QuoteItem[],
   config: QuoteAudienceDisplayConfig,
+  options: QuoteDisplayRowOptions = {},
 ): QuoteDisplayRow[] {
   const visibleItems = items.filter((item) => isLineVisible(item, config));
   const lineBlock = getBlock(config, 'lineItems');
-  const shouldGroup = config.groupCustomerLineItems || lineBlock.detailLevel === 'summary';
+  const detailMode =
+    options.detailMode ??
+    (lineBlock.detailLevel === 'detailed'
+      ? 'per_item_sell'
+      : lineBlock.detailLevel === 'standard'
+        ? 'rolled_up'
+        : 'summary');
+  const organizationMode = options.organizationMode ?? 'by_product_group';
+  const shouldGroup = options.detailMode
+    ? detailMode === 'summary' || detailMode === 'rolled_up'
+    : config.groupCustomerLineItems || lineBlock.detailLevel === 'summary';
 
   if (!shouldGroup) {
-    return visibleItems.map((item) => ({
-      id: getLineDisplayKey(item),
-      label: getLineDisplayLabel(item, config),
-      canonicalCode: item.canonicalCode,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-      unitCost: item.unitCost,
-      lineTotal: item.lineTotal,
-      sourceItemCount: 1,
-    }));
+    return visibleItems.map((item) => itemToDisplayRow(item, config));
   }
 
   const grouped = new Map<string, QuoteDisplayRow>();
   for (const item of visibleItems) {
-    const key = getLineOverride(config, getLineDisplayKey(item))?.section || classifyCustomerLine(item);
+    const group = getCustomerDisplayGroup(item, config, organizationMode);
+    const key = group.key;
     const existing = grouped.get(key);
     if (!existing) {
       grouped.set(key, {
         id: key,
-        label: key,
+        label: group.label,
+        mark: group.mark,
+        productGroup: group.productGroup,
         canonicalCode: null,
         quantity: item.quantity,
+        unitOfMeasure: item.unitOfMeasure ?? null,
         unitPrice: item.unitPrice,
         unitCost: item.unitCost,
+        netCost: item.unitCost * item.quantity,
+        grossMargin: item.lineTotal - item.unitCost * item.quantity,
         lineTotal: item.lineTotal,
         sourceItemCount: 1,
       });
@@ -333,8 +503,11 @@ export function buildCustomerDisplayRows(
     existing.quantity += item.quantity;
     existing.unitCost += item.unitCost;
     existing.unitPrice += item.unitPrice;
+    existing.netCost += item.unitCost * item.quantity;
+    existing.grossMargin = (existing.grossMargin ?? 0) + item.lineTotal - item.unitCost * item.quantity;
     existing.lineTotal += item.lineTotal;
     existing.sourceItemCount += 1;
+    if (!existing.unitOfMeasure && item.unitOfMeasure) existing.unitOfMeasure = item.unitOfMeasure;
   }
 
   return Array.from(grouped.values()).map((row) => ({
@@ -350,6 +523,7 @@ export function hasHiddenDisplayLines(items: QuoteItem[], config: QuoteAudienceD
 }
 
 function classifyCustomerLine(item: QuoteItem): string {
+  if (item.productGroup?.trim()) return item.productGroup.trim();
   const value = `${item.itemLabel} ${item.canonicalCode ?? ''}`.toLowerCase();
   if (/\b(freight|tax|install|labor|field|commission|delivery|shipping)\b/.test(value)) {
     return 'Services, freight, and project charges';
@@ -367,4 +541,50 @@ function classifyCustomerLine(item: QuoteItem): string {
     return 'Doors and door preparation';
   }
   return 'Quoted opening scope';
+}
+
+function itemToDisplayRow(
+  item: QuoteItem,
+  config: QuoteAudienceDisplayConfig,
+): QuoteDisplayRow {
+  return {
+    id: getLineDisplayKey(item),
+    label: getLineDisplayLabel(item, config),
+    mark: item.openingName ?? item.openingId ?? null,
+    productGroup: item.productGroup ?? classifyCustomerLine(item),
+    canonicalCode: item.canonicalCode,
+    quantity: item.quantity,
+    unitOfMeasure: item.unitOfMeasure ?? null,
+    unitPrice: item.unitPrice,
+    unitCost: item.unitCost,
+    netCost: item.unitCost * item.quantity,
+    grossMargin: item.grossMargin ?? item.lineTotal - item.unitCost * item.quantity,
+    lineTotal: item.lineTotal,
+    sourceItemCount: 1,
+  };
+}
+
+function getCustomerDisplayGroup(
+  item: QuoteItem,
+  config: QuoteAudienceDisplayConfig,
+  organizationMode: QuoteOrganizationMode,
+): { key: string; label: string; mark: string | null; productGroup: string | null } {
+  if (organizationMode === 'by_opening' && (item.openingId || item.openingName)) {
+    const mark = item.openingName ?? item.openingId ?? 'Opening';
+    return {
+      key: `opening:${item.openingId ?? mark}`,
+      label: mark,
+      mark,
+      productGroup: null,
+    };
+  }
+
+  const override = getLineOverride(config, getLineDisplayKey(item))?.section?.trim();
+  const productGroup = override || classifyCustomerLine(item);
+  return {
+    key: `group:${productGroup}`,
+    label: productGroup,
+    mark: item.openingName ?? item.openingId ?? null,
+    productGroup,
+  };
 }

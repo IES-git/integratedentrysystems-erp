@@ -95,6 +95,14 @@ function summarizeItems(items: EstimateLineItem[]) {
   return { doors, frames, others };
 }
 
+function formatQuoteStatus(status: EstimateWithItems['latestQuoteStatus']): string {
+  if (!status) return 'Not quoted';
+  return status
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 interface EstimatesTableProps {
   estimates: EstimateWithItems[];
   companies: Company[];
@@ -257,6 +265,9 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                 <span className="text-xs font-medium">Openings</span>
               </TableHead>
               <TableHead className="h-8">
+                <span className="text-xs font-medium">Quote Status</span>
+              </TableHead>
+              <TableHead className="h-8">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -299,11 +310,20 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
               const hasPrimary = doors.length > 0 || frames.length > 0;
               const visibleOthers = others.slice(0, 3);
               const hiddenOthers = others.slice(3);
+              const openingNames = estimate.openingNames ?? [];
+              const jobMeta = [estimate.customerPo ? `PO ${estimate.customerPo}` : null, estimate.jobNumber ? `Job ${estimate.jobNumber}` : null]
+                .filter(Boolean)
+                .join(' · ');
 
               return (
                 <TableRow key={estimate.id} className="h-10">
                   <TableCell className="py-1.5">
                     <div className="flex flex-col gap-0.5">
+                      {estimate.jobName && (
+                        <span className="max-w-[220px] truncate text-sm font-semibold text-foreground">
+                          {estimate.jobName}
+                        </span>
+                      )}
                       <span
                         className={`text-sm ${
                           estimate.companyId ? 'text-foreground font-medium' : 'text-muted-foreground italic'
@@ -311,6 +331,11 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                       >
                         {getCompanyName(estimate.companyId)}
                       </span>
+                      {jobMeta && (
+                        <span className="max-w-[220px] truncate text-[11px] text-muted-foreground">
+                          {jobMeta}
+                        </span>
+                      )}
                       <span className="font-mono text-[10px] text-muted-foreground">
                         {estimate.id.slice(-8)}
                       </span>
@@ -403,12 +428,29 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                   </TableCell>
                   <TableCell className="py-1.5">
                     {(estimate.openingsCount ?? 0) > 0 ? (
-                      <div className="flex items-center gap-1 text-sm text-foreground">
-                        <Layers className="h-3.5 w-3.5 text-muted-foreground" />
-                        {estimate.openingsCount} {estimate.openingsCount === 1 ? 'opening' : 'openings'}
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-1 text-sm text-foreground">
+                          <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                          {estimate.openingsCount} {estimate.openingsCount === 1 ? 'opening' : 'openings'}
+                        </div>
+                        {openingNames.length > 0 && (
+                          <p className="max-w-[180px] truncate text-[11px] text-muted-foreground">
+                            {openingNames.join(', ')}
+                          </p>
+                        )}
                       </div>
                     ) : (
                       <span className="text-muted-foreground text-sm">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="py-1.5">
+                    <Badge variant={estimate.latestQuoteStatus ? 'outline' : 'secondary'} className="h-6 rounded text-xs">
+                      {formatQuoteStatus(estimate.latestQuoteStatus)}
+                    </Badge>
+                    {(estimate.quoteCount ?? 0) > 1 && (
+                      <p className="mt-0.5 text-[10px] text-muted-foreground">
+                        {estimate.quoteCount} quotes
+                      </p>
                     )}
                   </TableCell>
                   <TableCell className="py-1.5">

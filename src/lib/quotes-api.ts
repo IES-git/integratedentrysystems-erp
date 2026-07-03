@@ -3,16 +3,47 @@
  */
 
 import { supabase } from './supabase';
-import type { Quote, QuoteItem, QuoteWithItems, QuoteStatus, QuoteType, HardwareSubcategory } from '@/types';
+import type { Quote, QuoteItem, QuoteLineSnapshot, QuoteWithItems, QuoteStatus, QuoteType, HardwareSubcategory } from '@/types';
 import type { EstimateItem, ItemField } from '@/types';
 
 let supportsQuoteDisplayConfig = true;
 let supportsQuoteItemDisplayKey = true;
+let supportsQuoteLineSnapshots = true;
 
 function isMissingColumnError(error: unknown, columnName: string): boolean {
   const maybeError = error as { code?: string; message?: string; details?: string };
   const text = `${maybeError?.message ?? ''} ${maybeError?.details ?? ''}`.toLowerCase();
   return maybeError?.code === 'PGRST204' && text.includes(columnName.toLowerCase());
+}
+
+function readSnapshotNumber(
+  snapshotJson: Record<string, unknown> | null | undefined,
+  key: string,
+): number | null {
+  const value = snapshotJson?.[key];
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function getSnapshotProductGroup(snapshot: QuoteLineSnapshot): string | null {
+  const source =
+    snapshot.chargeCategory ??
+    snapshot.entityType ??
+    snapshot.sourceLineType ??
+    null;
+  return source ? titleCaseToken(source) : null;
+}
+
+function titleCaseToken(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +107,35 @@ export interface CreateQuoteItemInput {
   sortOrder?: number;
 }
 
+export interface CreateQuoteLineSnapshotInput {
+  quoteItemId?: string | null;
+  estimateId?: string | null;
+  estimateLineId?: string | null;
+  estimateItemId?: string | null;
+  openingId?: string | null;
+  componentId?: string | null;
+  sourceTable: 'estimate_line' | 'estimate_items' | string;
+  sourceLineType?: string | null;
+  entityType?: string | null;
+  chargeCategory?: string | null;
+  description?: string | null;
+  selectedOptionCode?: string | null;
+  quantity?: number | null;
+  unitOfMeasure?: string | null;
+  unitListPrice?: number | null;
+  extendedListPrice?: number | null;
+  discountMultiplier?: number | null;
+  extendedNetPrice?: number | null;
+  sellPrice?: number | null;
+  manualSellPrice?: number | null;
+  unitSellPrice?: number | null;
+  lineTotal?: number | null;
+  priceStatus?: string | null;
+  reviewStatus?: string | null;
+  sortOrder?: number;
+  snapshotJson?: Record<string, unknown>;
+}
+
 export interface CreateQuoteInput {
   estimateId: string;
   companyId?: string | null;
@@ -88,6 +148,7 @@ export interface CreateQuoteInput {
   notes?: string | null;
   displayConfigJson?: string | null;
   items: CreateQuoteItemInput[];
+  snapshots?: CreateQuoteLineSnapshotInput[];
 }
 
 export interface UpdateQuoteInput {
@@ -98,6 +159,7 @@ export interface UpdateQuoteInput {
   total?: number;
   displayConfigJson?: string | null;
   items?: CreateQuoteItemInput[];
+  snapshots?: CreateQuoteLineSnapshotInput[];
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +239,15 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
     }
   }
 
+  if (input.snapshots && input.snapshots.length > 0) {
+    try {
+      await replaceQuoteLineSnapshots(quoteRow.id as string, input.snapshots);
+    } catch (err) {
+      await supabase.from('quotes').delete().eq('id', quoteRow.id);
+      throw err;
+    }
+  }
+
   return mapQuoteRow(quoteRow);
 }
 
@@ -208,6 +279,7 @@ export async function getQuote(id: string): Promise<Quote | null> {
 export async function getQuoteWithItems(id: string): Promise<{
   quote: Quote;
   items: (QuoteItem & { fields: ItemField[]; parentItemId: string | null; subcategory: HardwareSubcategory | null })[];
+  snapshots: QuoteLineSnapshot[];
 } | null> {
   const { data: quoteRow, error: quoteError } = await supabase
     .from('quotes')
@@ -228,6 +300,51 @@ export async function getQuoteWithItems(id: string): Promise<{
 
   if (itemsError) {
     throw new Error(`Failed to fetch quote items: ${itemsError.message}`);
+  }
+
+  let snapshotRows: unknown[] = [];
+  if (supportsQuoteLineSnapshots) {
+    const { data, error } = await supabase
+      .from('quote_line_snapshots')
+      .select('*')
+      .eq('quote_id', id)
+      .order('sort_order', { ascending: true });
+
+    if (error) {
+      supportsQuoteLineSnapshots = false;
+    } else {
+      snapshotRows = data ?? [];
+    }
+  }
+  const snapshots = snapshotRows.map((row) => mapQuoteLineSnapshotRow(row));
+  const snapshotByDisplayKey = new Map<string, QuoteLineSnapshot>();
+  for (const snapshot of snapshots) {
+    const displayKey = typeof snapshot.snapshotJson?.displayKey === 'string'
+      ? snapshot.snapshotJson.displayKey
+      : null;
+    if (displayKey && !snapshotByDisplayKey.has(displayKey)) {
+      snapshotByDisplayKey.set(displayKey, snapshot);
+    }
+    if (snapshot.estimateItemId) {
+      const estimateItemKey = `estimate-item:${snapshot.estimateItemId}`;
+      if (!snapshotByDisplayKey.has(estimateItemKey)) snapshotByDisplayKey.set(estimateItemKey, snapshot);
+    }
+    if (snapshot.estimateLineId) {
+      const estimateLineKey = `engine-line:${snapshot.estimateLineId}`;
+      if (!snapshotByDisplayKey.has(estimateLineKey)) snapshotByDisplayKey.set(estimateLineKey, snapshot);
+    }
+  }
+
+  const openingIds = Array.from(new Set(snapshots.map((snapshot) => snapshot.openingId).filter(Boolean))) as string[];
+  const openingNameById: Record<string, string> = {};
+  if (openingIds.length > 0) {
+    const { data: openingRows } = await supabase
+      .from('estimate_openings')
+      .select('id, name')
+      .in('id', openingIds);
+    for (const row of openingRows ?? []) {
+      openingNameById[row.id as string] = row.name as string;
+    }
   }
 
   // Fetch item_fields for each source estimate_item so the manufacturer PDF
@@ -271,16 +388,28 @@ export async function getQuoteWithItems(id: string): Promise<{
   }
 
   const items = (itemRows ?? []).map((row) => {
+    const base = mapQuoteItemRow(row);
+    const snapshot = base.displayKey ? snapshotByDisplayKey.get(base.displayKey) ?? null : null;
     const meta = row.estimate_item_id ? (estimateItemMetaById[row.estimate_item_id] ?? null) : null;
     return {
-      ...mapQuoteItemRow(row),
+      ...base,
       fields: row.estimate_item_id ? (fieldsByEstimateItemId[row.estimate_item_id] ?? []) : [],
       parentItemId: meta?.parentItemId ?? null,
       subcategory: meta?.subcategory ?? null,
+      openingId: snapshot?.openingId ?? null,
+      openingName: snapshot?.openingId ? openingNameById[snapshot.openingId] ?? null : null,
+      productGroup: snapshot ? getSnapshotProductGroup(snapshot) : null,
+      unitOfMeasure: snapshot?.unitOfMeasure ?? null,
+      grossMargin: readSnapshotNumber(snapshot?.snapshotJson, 'grossMargin'),
+      grossMarginPct: readSnapshotNumber(snapshot?.snapshotJson, 'grossMarginPct'),
     };
   });
 
-  return { quote: mapQuoteRow(quoteRow), items };
+  return {
+    quote: mapQuoteRow(quoteRow),
+    items,
+    snapshots,
+  };
 }
 
 /** List all quotes, most recent first. */
@@ -460,7 +589,38 @@ export async function updateQuoteWithItems(
     }
   }
 
+  if (updates.snapshots) {
+    await replaceQuoteLineSnapshots(id, updates.snapshots);
+  }
+
   return updatedQuote;
+}
+
+async function replaceQuoteLineSnapshots(
+  quoteId: string,
+  snapshots: CreateQuoteLineSnapshotInput[]
+): Promise<void> {
+  if (!supportsQuoteLineSnapshots) return;
+
+  const { error: deleteError } = await supabase
+    .from('quote_line_snapshots')
+    .delete()
+    .eq('quote_id', quoteId);
+
+  if (deleteError) {
+    supportsQuoteLineSnapshots = false;
+    return;
+  }
+
+  if (snapshots.length === 0) return;
+
+  const { error: insertError } = await supabase
+    .from('quote_line_snapshots')
+    .insert(snapshots.map((snapshot, idx) => quoteLineSnapshotInputToRow(quoteId, snapshot, idx)));
+
+  if (insertError) {
+    throw new Error(`Failed to save quote detail snapshots: ${insertError.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +675,77 @@ function mapQuoteItemRow(row: any): QuoteItem {
     lineTotal: row.line_total,
     sortOrder: row.sort_order,
     createdAt: row.created_at,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapQuoteLineSnapshotRow(row: any): QuoteLineSnapshot {
+  return {
+    id: row.id,
+    quoteId: row.quote_id,
+    quoteItemId: row.quote_item_id ?? null,
+    estimateId: row.estimate_id ?? null,
+    estimateLineId: row.estimate_line_id ?? null,
+    estimateItemId: row.estimate_item_id ?? null,
+    openingId: row.opening_id ?? null,
+    componentId: row.component_id ?? null,
+    sourceTable: row.source_table ?? 'estimate_line',
+    sourceLineType: row.source_line_type ?? null,
+    entityType: row.entity_type ?? null,
+    chargeCategory: row.charge_category ?? null,
+    description: row.description ?? null,
+    selectedOptionCode: row.selected_option_code ?? null,
+    quantity: row.quantity != null ? Number(row.quantity) : null,
+    unitOfMeasure: row.unit_of_measure ?? null,
+    unitListPrice: row.unit_list_price != null ? Number(row.unit_list_price) : null,
+    extendedListPrice: row.extended_list_price != null ? Number(row.extended_list_price) : null,
+    discountMultiplier: row.discount_multiplier != null ? Number(row.discount_multiplier) : null,
+    extendedNetPrice: row.extended_net_price != null ? Number(row.extended_net_price) : null,
+    sellPrice: row.sell_price != null ? Number(row.sell_price) : null,
+    manualSellPrice: row.manual_sell_price != null ? Number(row.manual_sell_price) : null,
+    unitSellPrice: row.unit_sell_price != null ? Number(row.unit_sell_price) : null,
+    lineTotal: row.line_total != null ? Number(row.line_total) : null,
+    priceStatus: row.price_status ?? null,
+    reviewStatus: row.review_status ?? null,
+    sortOrder: row.sort_order ?? 0,
+    snapshotJson: row.snapshot_json ?? {},
+    createdAt: row.created_at,
+  };
+}
+
+function quoteLineSnapshotInputToRow(
+  quoteId: string,
+  snapshot: CreateQuoteLineSnapshotInput,
+  idx: number
+): Record<string, unknown> {
+  return {
+    quote_id: quoteId,
+    quote_item_id: snapshot.quoteItemId ?? null,
+    estimate_id: snapshot.estimateId ?? null,
+    estimate_line_id: snapshot.estimateLineId ?? null,
+    estimate_item_id: snapshot.estimateItemId ?? null,
+    opening_id: snapshot.openingId ?? null,
+    component_id: snapshot.componentId ?? null,
+    source_table: snapshot.sourceTable,
+    source_line_type: snapshot.sourceLineType ?? null,
+    entity_type: snapshot.entityType ?? null,
+    charge_category: snapshot.chargeCategory ?? null,
+    description: snapshot.description ?? null,
+    selected_option_code: snapshot.selectedOptionCode ?? null,
+    quantity: snapshot.quantity ?? null,
+    unit_of_measure: snapshot.unitOfMeasure ?? null,
+    unit_list_price: snapshot.unitListPrice ?? null,
+    extended_list_price: snapshot.extendedListPrice ?? null,
+    discount_multiplier: snapshot.discountMultiplier ?? null,
+    extended_net_price: snapshot.extendedNetPrice ?? null,
+    sell_price: snapshot.sellPrice ?? null,
+    manual_sell_price: snapshot.manualSellPrice ?? null,
+    unit_sell_price: snapshot.unitSellPrice ?? null,
+    line_total: snapshot.lineTotal ?? null,
+    price_status: snapshot.priceStatus ?? null,
+    review_status: snapshot.reviewStatus ?? null,
+    sort_order: snapshot.sortOrder ?? idx,
+    snapshot_json: snapshot.snapshotJson ?? {},
   };
 }
 

@@ -311,13 +311,28 @@ function mapCompanyRow(row: any): Company {
     shippingZip: row.shipping_zip,
     notes: row.notes,
     active: row.active,
-    settings: row.settings ?? {
-      costMultiplier: 1.0,
-      paymentTerms: null,
-      defaultTemplateId: null,
-    },
+    settings: mapCompanySettings(row.settings),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapCompanySettings(raw: any): CompanySettings {
+  return {
+    costMultiplier: Number(raw?.costMultiplier ?? raw?.cost_multiplier ?? 1.0),
+    paymentTerms: raw?.paymentTerms ?? raw?.payment_terms ?? null,
+    defaultTemplateId: raw?.defaultTemplateId ?? raw?.default_template_id ?? null,
+    markupOverrides: raw?.markupOverrides ?? raw?.markup_overrides ?? undefined,
+    defaultQuoteTemplateKey: raw?.defaultQuoteTemplateKey ?? raw?.default_quote_template_key ?? null,
+    defaultQuoteDetailLevel: raw?.defaultQuoteDetailLevel ?? raw?.default_quote_detail_level ?? 'summary',
+    defaultQuoteOrganizationMode:
+      raw?.defaultQuoteOrganizationMode ?? raw?.default_quote_organization_mode ?? 'by_opening',
+    quoteValidityDays:
+      raw?.quoteValidityDays ?? raw?.quote_validity_days ?? null,
+    quoteHeaderText: raw?.quoteHeaderText ?? raw?.quote_header_text ?? null,
+    quoteFooterText: raw?.quoteFooterText ?? raw?.quote_footer_text ?? null,
+    quoteDisclaimerText: raw?.quoteDisclaimerText ?? raw?.quote_disclaimer_text ?? null,
   };
 }
 

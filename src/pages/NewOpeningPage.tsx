@@ -1074,8 +1074,8 @@ export default function NewOpeningPage() {
   const openingCount = parseInt(searchParams.get('count') ?? '0', 10);
 
   const backUrl = estimateId
-    ? `/app/estimates/create?id=${estimateId}&step=1`
-    : '/app/estimates/create?step=1';
+    ? `/app/estimates/create?id=${estimateId}&step=2`
+    : '/app/estimates/create?step=2';
 
   const [templateType, setTemplateType] = useState<OpeningTemplateType>(initialTemplateType);
   const [name, setName] = useState(`Opening ${openingCount + 1}`);
@@ -1638,7 +1638,7 @@ export default function NewOpeningPage() {
       }
 
       // Navigate back to the wizard with the (possibly newly created) estimate ID.
-      navigate(`/app/estimates/create?id=${eid}&step=1`);
+      navigate(`/app/estimates/create?id=${eid}&step=2`);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Failed to save opening.');
     } finally {

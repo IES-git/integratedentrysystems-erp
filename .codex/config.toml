@@ -1,0 +1,6 @@
+# Project-scoped Codex settings for integratedentrysystems-erp.
+# Codex loads this only when this project is trusted.
+
+[mcp_servers.supabase]
+url = "https://mcp.supabase.com/mcp?project_ref=osgxfggpqecspyvfrvqe"
+default_tools_approval_mode = "prompt"

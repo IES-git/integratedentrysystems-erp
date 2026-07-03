@@ -1,13 +1,17 @@
 import { Document, Page, Text, View, StyleSheet, Image } from '@react-pdf/renderer';
 import {
   createDefaultAudienceDisplayConfig,
+  getEffectiveQuoteDetailMode,
+  getEffectiveVisibleColumns,
   getEnabledBlocks,
   getLineDisplayKey,
   getLineDisplayLabel,
   hasHiddenDisplayLines,
   isLineVisible,
+  resolveQuoteDocumentDisplayConfig,
+  type QuoteDocumentDisplayConfigInput,
 } from '@/lib/quote-display';
-import type { Quote, QuoteItem, ItemField, Company, QuoteAudienceDisplayConfig } from '@/types';
+import type { Quote, QuoteItem, ItemField, Company } from '@/types';
 import iesLogo from '@/assets/ies-logo.png';
 
 const styles = StyleSheet.create({
@@ -359,7 +363,7 @@ interface ManufacturerQuotePdfProps {
   quote: Quote;
   items: ManufacturerQuoteItem[];
   company: Company | null;
-  displayConfig?: QuoteAudienceDisplayConfig | null;
+  displayConfig?: QuoteDocumentDisplayConfigInput;
 }
 
 export function ManufacturerQuotePdf({
@@ -368,7 +372,12 @@ export function ManufacturerQuotePdf({
   company,
   displayConfig,
 }: ManufacturerQuotePdfProps) {
-  const config = displayConfig ?? createDefaultAudienceDisplayConfig('manufacturer');
+  const { documentConfig, audienceConfig: config } = resolveQuoteDocumentDisplayConfig(
+    displayConfig ?? createDefaultAudienceDisplayConfig('manufacturer'),
+    'manufacturer',
+  );
+  const detailMode = getEffectiveQuoteDetailMode(config, documentConfig);
+  const visibleColumns = new Set(getEffectiveVisibleColumns(config, documentConfig));
   const enabledBlocks = getEnabledBlocks(config);
   const visibleItems = items.filter((item) => isLineVisible(item, config));
   const hiddenLines = hasHiddenDisplayLines(items, config);
@@ -440,10 +449,10 @@ export function ManufacturerQuotePdf({
           }
 
           if (block.id === 'openings') {
-            const isSummary = block.detailLevel === 'summary';
-            const isDetailed = block.detailLevel === 'detailed';
-            const showProductCodes = isDetailed || (!isSummary && config.showProductCodes);
-            const showCosts = isDetailed && config.showUnitCosts;
+            const isSummary = detailMode === 'summary';
+            const isDetailed = detailMode === 'per_item_sell' || detailMode === 'full_internal';
+            const showProductCodes = !isSummary && (visibleColumns.has('product_code') || (isDetailed && config.showProductCodes));
+            const showCosts = detailMode === 'full_internal' || visibleColumns.has('unit_cost') || visibleColumns.has('net_cost');
 
             return (
               <View key={block.id}>
@@ -477,13 +486,13 @@ export function ManufacturerQuotePdf({
           }
 
           if (block.id === 'lineItems') {
-            const isSummary = block.detailLevel === 'summary';
-            const isDetailed = block.detailLevel === 'detailed';
-            const showProductCodes = isDetailed || (!isSummary && config.showProductCodes);
-            const showQuantities = config.showQuantities;
-            const showUnitCosts = isDetailed || (!isSummary && config.showUnitCosts);
-            const showUnitPrices = isDetailed ? config.showUnitPrices : !isSummary && config.showUnitPrices;
-            const showLineTotals = config.showLineTotals;
+            const isSummary = detailMode === 'summary';
+            const isDetailed = detailMode === 'per_item_sell' || detailMode === 'full_internal';
+            const showProductCodes = !isSummary && (visibleColumns.has('product_code') || (isDetailed && config.showProductCodes));
+            const showQuantities = visibleColumns.has('quantity') || config.showQuantities;
+            const showUnitCosts = detailMode === 'full_internal' || visibleColumns.has('unit_cost') || visibleColumns.has('net_cost');
+            const showUnitPrices = !isSummary && (visibleColumns.has('unit_price') || (isDetailed && config.showUnitPrices));
+            const showLineTotals = visibleColumns.has('line_total') || config.showLineTotals;
             const showSpecFields = isDetailed || (!isSummary && config.showSpecFields);
 
             return (

@@ -3,7 +3,7 @@
  *
  * Pure, dependency-free logic that makes the spec opening builder smart:
  *   1. deriveBuilderContext — cascades shared values (leaf count, door/frame
- *      sizes, frame gauge/material/hand from the door, core/edge from the
+ *      sizes, frame material/hand from the door, core/edge from the
  *      series, fire labels) so the user enters each thing once.
  *   2. fieldTier — classifies every spec field as essential / advanced / hidden
  *      via a curated allowlist + conditional triggers (progressive disclosure).
@@ -17,7 +17,7 @@
  * stays the single source of truth: effective value = user override ?? derived.
  */
 
-import { parseDoorDimension, formatDimensionHyphen } from '@/components/pricing/dimension-utils';
+import { parseDoorDimension, formatCompactNominalDimension } from '@/components/pricing/dimension-utils';
 import { hingesPerLeaf } from '@/components/estimates/wizard/opening-rules';
 import type { OpeningConfigurationType, SpecFieldEntity } from '@/types';
 import type { SpecFieldWithPath, BaseSignature } from '@/lib/cpq-catalog-api';
@@ -291,7 +291,7 @@ function deriveDoorWidth(draft: OpeningDraft, leafCount: number): string | null 
   if (inches == null) return null;
   const per = inches / leafCount;
   if (!Number.isInteger(per)) return null; // non-even split → let the user enter it
-  return formatDimensionHyphen(per);
+  return formatCompactNominalDimension(per);
 }
 
 // ---------------------------------------------------------------------------
@@ -342,8 +342,8 @@ export function deriveBuilderContext(draft: OpeningDraft): BuilderContext {
     derivedByComponent[door.id] = dm;
   }
 
-  // Frames inherit shared attributes from the (first) door + opening.
-  const doorGauge = firstDoorVal(draft, PATH.door.gauge);
+  // Frames inherit shared attributes from the (first) door + opening. Gauge is
+  // intentionally independent because frame gauge is commonly different.
   const doorMaterial = firstDoorVal(draft, PATH.door.material);
   const doorHand = firstDoorVal(draft, PATH.door.hand);
   const doorThickness = firstDoorVal(draft, PATH.door.thickness);
@@ -360,7 +360,6 @@ export function deriveBuilderContext(draft: OpeningDraft): BuilderContext {
     const fm: DerivedMap = {};
     if (openingWidth) fm[PATH.frame.width] = { value: openingWidth, reason: 'from opening size' };
     if (openingHeight) fm[PATH.frame.height] = { value: openingHeight, reason: 'from opening size' };
-    if (doorGauge) fm[PATH.frame.gauge] = { value: doorGauge, reason: 'matches door gauge' };
     if (doorMaterial) fm[PATH.frame.material] = { value: doorMaterial, reason: 'matches door material' };
     if (doorHand) fm[PATH.frame.hand] = { value: doorHand, reason: 'matches door hand' };
     if (doorThickness) fm[PATH.frame.rabbetDoorThickness] = { value: doorThickness, reason: 'matches door thickness' };
@@ -515,12 +514,25 @@ const CURATED_OPTION_LABELS: Record<string, Record<string, string>> = {
     fiberglass: 'Fiberglass core',
     specialty: 'Specialty core',
   },
+  'DOR-006': {
+    CRS: 'Cold rolled steel',
+    Galvannealed: 'Generic galvannealed',
+    A40: 'A40 galvannealed',
+    A60: 'A60 galvannealed',
+  },
   // Door hand (DOR-012) / Frame hand (FRM-014)
   'DOR-012': {
     RH: 'Right hand', LH: 'Left hand', RHR: 'Right hand reverse', LHR: 'Left hand reverse', NH: 'Non-handed',
   },
+  'FRM-004': {
+    CRS: 'Cold rolled steel',
+    Galvannealed: 'Generic galvannealed',
+    A40: 'A40 galvannealed',
+    A60: 'A60 galvannealed',
+  },
   'FRM-014': {
-    RH: 'Right hand', LH: 'Left hand', NH: 'Non-handed', RHA: 'Right hand active', LHA: 'Left hand active', DA: 'Double acting',
+    RH: 'Right hand', LH: 'Left hand', RHR: 'Right hand reverse', LHR: 'Left hand reverse', NH: 'Non-handed',
+    RHA: 'Right hand active', LHA: 'Left hand active', DA: 'Double acting',
   },
   // Frame rabbet / profile (FRM-007)
   'FRM-007': {
@@ -883,8 +895,18 @@ export function validateBuilderIntegrity(draft: OpeningDraft): IntegrityIssue[] 
 // Priceable-combination filtering (only offer values that have a base price)
 // ---------------------------------------------------------------------------
 
-function normVal(v: string): string {
-  return String(v ?? '').trim().toLowerCase();
+function normVal(v: string, fieldPath?: string): string {
+  const text = String(v ?? '').trim().toLowerCase();
+  if (
+    fieldPath &&
+    ['door.door_material', 'frame.frame_material', 'panel.panel_material'].includes(fieldPath)
+  ) {
+    const compact = text.replace(/[\s_-]+/g, '');
+    if (compact === 'a40' || compact === 'a60' || compact === 'galvannealed' || compact === 'galvanized') {
+      return 'galvannealed';
+    }
+  }
+  return text;
 }
 
 /** All enumerable field_paths that appear in a set of base-rule signatures. */
@@ -919,7 +941,7 @@ export function availableBaseValues(
     let ok = true;
     for (const [k, v] of Object.entries(selection)) {
       if (k === fieldPath || !v) continue;
-      if (sig[k] != null && normVal(sig[k]) !== normVal(v)) { ok = false; break; }
+      if (sig[k] != null && normVal(sig[k], k) !== normVal(v, k)) { ok = false; break; }
     }
     if (ok) consistent.add(val);
   }
@@ -972,8 +994,8 @@ export function priceableEnumOptions(
     // text box. Sorted so dimension-like values read in ascending order.
     return priceable.length > 0 ? sortDimensionLike(priceable) : base;
   }
-  const allowed = new Set(priceable.map(normVal));
-  const filtered = candidates.filter((o) => allowed.has(normVal(o)));
+  const allowed = new Set(priceable.map((value) => normVal(value, field.fieldPath ?? undefined)));
+  const filtered = candidates.filter((o) => allowed.has(normVal(o, field.fieldPath ?? undefined)));
   // Safeguard: never hide everything (avoids an un-pickable field on odd data).
   return filtered.length > 0 ? filtered : (base ?? candidates);
 }
@@ -1050,7 +1072,7 @@ export function autoFillBaseValues(
   if (seriesPath && !selection[seriesPath]) return {};
 
   const matches = (working: Record<string, string>) => signatures.filter((sig) =>
-    Object.entries(working).every(([k, v]) => !v || sig[k] == null || normVal(sig[k]) === normVal(v)));
+    Object.entries(working).every(([k, v]) => !v || sig[k] == null || normVal(sig[k], k) === normVal(v, k)));
   if (matches(selection).length === 0) return {};
 
   const out: Record<string, string> = {};

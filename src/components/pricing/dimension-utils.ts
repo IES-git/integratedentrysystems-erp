@@ -203,6 +203,28 @@ export function formatDimensionHyphen(inches: number): string {
 }
 
 /**
+ * Format whole inches as compact nominal door/frame notation.
+ *
+ * Examples:
+ *   36" -> "30"
+ *   42" -> "36"
+ *   84" -> "70"
+ *   34" -> "210"
+ */
+export function formatCompactNominalDimension(inches: number): string {
+  const feet = Math.floor(inches / 12);
+  const rem = inches % 12;
+  return `${feet}${String(rem).padStart(rem >= 10 ? 2 : 1, '0')}`;
+}
+
+/** Parses any supported door dimension and returns compact nominal notation. */
+export function normalizeCompactNominalDimension(raw: string | number | null | undefined): string | null {
+  const inches = parseDoorDimension(raw);
+  if (inches == null || !Number.isInteger(inches) || inches <= 0) return null;
+  return formatCompactNominalDimension(inches);
+}
+
+/**
  * Format inches using feet-quote notation unconditionally (door-height style).
  * e.g. 80 → "6'8\"", 84 → "7'0\""
  */

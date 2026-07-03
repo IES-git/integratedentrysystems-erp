@@ -84,11 +84,11 @@ export interface ResolveOptions {
 interface BaseSeries { edge: string; stiffened: boolean; label: string }
 
 const BASE_SERIES_CONSTRUCTION: Record<string, BaseSeries> = {
-  H: { edge: 'Lockseam', stiffened: false, label: 'Honeycomb glued core, lockseam' },
+  H: { edge: 'Lockseam', stiffened: false, label: 'Honeycomb glued core, invisible seam' },
   HF: { edge: 'seamless tack-and-fill', stiffened: false, label: 'Honeycomb glued core, seamless edge' },
   CH: { edge: 'continuous weld', stiffened: false, label: 'Continuous-weld seamless' },
   EH: { edge: 'embossed', stiffened: false, label: 'Embossed' },
-  LW: { edge: 'Lockseam', stiffened: true, label: 'Steel-stiffened, lockseam' },
+  LW: { edge: 'Lockseam', stiffened: true, label: 'Steel-stiffened, invisible seam' },
   C: { edge: 'continuous weld', stiffened: true, label: 'Steel-stiffened, continuous weld' },
 };
 

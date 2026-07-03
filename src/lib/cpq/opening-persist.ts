@@ -30,8 +30,9 @@ import {
 } from './opening-spec';
 import { deriveBuilderContext, type BuilderContext } from './builder-logic';
 import type { NgpCatalog } from '@/lib/ngp-catalog-api';
+import { parsePlainInches } from '@/components/pricing/dimension-utils';
 import { RESOLVER_VERSION, type EstimateOpening, type SpecFieldMapping } from '@/types';
-import type { NgpInfillType } from './ngp-infill';
+import { resolveInfill, type NgpInfillType } from './ngp-infill';
 
 async function saveComponentItems(
   estimateId: string,
@@ -73,28 +74,57 @@ async function saveComponentItems(
 }
 
 /** Persists the NGP infill cutouts for an opening (selections, not resolved lines). */
-async function saveOpeningCutouts(estimateId: string, openingId: string, cutouts: CutoutDraft[]): Promise<void> {
-  const rows = cutouts
+async function saveOpeningCutouts(
+  estimateId: string,
+  openingId: string,
+  draft: OpeningDraft,
+  ngpCatalog?: NgpCatalog | null,
+): Promise<void> {
+  const rows = (draft.cutouts ?? [])
     .filter((c) => c.infillType !== 'NONE')
-    .map((c, i) => ({
-      opening_id: openingId,
-      estimate_id: estimateId,
-      door_ref: c.doorId,
-      infill_type: c.infillType,
-      cutout_width: c.cutoutWidth || null,
-      cutout_height: c.cutoutHeight || null,
-      door_thickness_in: c.doorThicknessIn,
-      fire_rating_minutes: c.fireRatingMinutes,
-      kit_model: c.kitModel,
-      louver_model: c.louverModel,
-      glass_model: c.glassModel,
-      tape_model: c.tapeModel,
-      glass_thickness_in: c.glassThicknessIn,
-      finish_code: c.finishCode,
-      option_codes: c.optionCodes ?? [],
-      prefer_assembly: c.preferAssembly,
-      sort_order: i,
-    }));
+    .map((c, i) => {
+      const resolved = ngpCatalog
+        ? resolveInfill(ngpCatalog, {
+            infillType: c.infillType,
+            cutoutWidthIn: parsePlainInches(c.cutoutWidth),
+            cutoutHeightIn: parsePlainInches(c.cutoutHeight),
+            doorThicknessIn: c.doorThicknessIn,
+            fireRatingMinutes: c.fireRatingMinutes,
+            kitModel: c.kitModel,
+            louverModel: c.louverModel,
+            glassModel: c.glassModel,
+            tapeModel: c.tapeModel,
+            glassThicknessIn: c.glassThicknessIn,
+            finishCode: c.finishCode,
+            optionCodes: c.optionCodes,
+            preferAssembly: c.preferAssembly,
+          })
+        : null;
+      return {
+        opening_id: openingId,
+        estimate_id: estimateId,
+        door_ref: c.doorId,
+        infill_type: c.infillType,
+        cutout_width: c.cutoutWidth || null,
+        cutout_height: c.cutoutHeight || null,
+        order_width_in: c.orderWidthIn ?? resolved?.orderWidthIn ?? null,
+        order_height_in: c.orderHeightIn ?? resolved?.orderHeightIn ?? null,
+        visible_width_in: c.visibleWidthIn ?? resolved?.exposedWidthIn ?? null,
+        visible_height_in: c.visibleHeightIn ?? resolved?.exposedHeightIn ?? null,
+        glass_type: c.glassType ?? resolved?.glass?.model ?? c.glassModel ?? null,
+        door_thickness_in: c.doorThicknessIn,
+        fire_rating_minutes: c.fireRatingMinutes,
+        kit_model: c.kitModel,
+        louver_model: c.louverModel,
+        glass_model: c.glassModel,
+        tape_model: c.tapeModel,
+        glass_thickness_in: c.glassThicknessIn,
+        finish_code: c.finishCode,
+        option_codes: c.optionCodes ?? [],
+        prefer_assembly: c.preferAssembly,
+        sort_order: i,
+      };
+    });
   if (rows.length === 0) return;
   const { error } = await supabase.from('opening_cutout').insert(rows);
   if (error) throw new Error(`Failed to save cutouts: ${error.message}`);
@@ -114,6 +144,11 @@ export async function loadOpeningCutouts(openingId: string): Promise<CutoutDraft
     infillType: (r.infill_type as NgpInfillType) ?? 'LITE',
     cutoutWidth: (r.cutout_width as string | null) ?? '',
     cutoutHeight: (r.cutout_height as string | null) ?? '',
+    orderWidthIn: r.order_width_in != null ? Number(r.order_width_in) : null,
+    orderHeightIn: r.order_height_in != null ? Number(r.order_height_in) : null,
+    visibleWidthIn: r.visible_width_in != null ? Number(r.visible_width_in) : null,
+    visibleHeightIn: r.visible_height_in != null ? Number(r.visible_height_in) : null,
+    glassType: (r.glass_type as string | null) ?? null,
     doorThicknessIn: r.door_thickness_in != null ? Number(r.door_thickness_in) : null,
     fireRatingMinutes: r.fire_rating_minutes != null ? Number(r.fire_rating_minutes) : null,
     kitModel: (r.kit_model as string | null) ?? null,
@@ -430,7 +465,7 @@ export async function saveOpeningDraft(
   }
 
   // NGP infill cutouts (selections) so the build round-trips on edit.
-  await saveOpeningCutouts(estimateId, opening.id, draft.cutouts ?? []);
+  await saveOpeningCutouts(estimateId, opening.id, draft, ngpCatalog ?? null);
 
   // Auditable engine lines (+ manual-quote routes) via the rule engine. The NGP
   // catalog expands cutouts into priceable lite_kit/glass/tape/louver components.

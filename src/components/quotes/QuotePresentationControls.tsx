@@ -34,6 +34,7 @@ import {
   getBlockLabel,
   getLineOverride,
   normalizeAudienceDisplayConfig,
+  normalizeQuoteDisplayConfig,
   type QuotePresentationLineOption,
 } from '@/lib/quote-display';
 import { cn } from '@/lib/utils';
@@ -41,7 +42,11 @@ import type {
   QuoteAudienceDisplayConfig,
   QuoteDisplayBlockId,
   QuoteDisplayConfig,
+  QuoteDisplayConfigV2,
+  QuoteDisplayDetailMode,
   QuoteDisplayDetailLevel,
+  QuoteOrganizationMode,
+  QuoteVisibleColumn,
   QuoteLineDisplayOverride,
   QuoteType,
   TemplateAudience,
@@ -72,6 +77,74 @@ const DETAIL_LABELS: Record<QuoteDisplayDetailLevel, string> = {
   detailed: 'Detailed',
 };
 
+const ORGANIZATION_LABELS: Record<QuoteOrganizationMode, string> = {
+  by_opening: 'By opening',
+  by_product_group: 'By product group',
+};
+
+const DETAIL_MODE_LABELS: Record<QuoteDisplayDetailMode, string> = {
+  summary: 'Summary',
+  rolled_up: 'Rolled up',
+  per_item_sell: 'Per item sell',
+  full_internal: 'Full internal',
+};
+
+const COLUMN_LABELS: Record<QuoteVisibleColumn, string> = {
+  mark: 'Mark',
+  description: 'Description',
+  product_code: 'Product code',
+  quantity: 'Qty',
+  uom: 'UOM',
+  unit_price: 'Unit price',
+  line_total: 'Line total',
+  unit_cost: 'Unit cost',
+  net_cost: 'Net cost',
+  gross_margin: 'Gross margin',
+};
+
+function detailModeToBlockDetailLevel(mode: QuoteDisplayDetailMode): QuoteDisplayDetailLevel {
+  if (mode === 'summary') return 'summary';
+  if (mode === 'rolled_up') return 'standard';
+  return 'detailed';
+}
+
+function blockDetailLevelToDetailMode(
+  level: QuoteDisplayDetailLevel,
+  currentMode: QuoteDisplayDetailMode,
+): QuoteDisplayDetailMode {
+  if (level === 'summary') return 'summary';
+  if (level === 'standard') return 'rolled_up';
+  return currentMode === 'full_internal' ? 'full_internal' : 'per_item_sell';
+}
+
+function getLineItemsDetailLevel(config: QuoteAudienceDisplayConfig): QuoteDisplayDetailLevel | null {
+  return config.blocks.find((block) => block.id === 'lineItems')?.detailLevel ?? null;
+}
+
+function syncLineItemsBlockDetail(
+  config: QuoteAudienceDisplayConfig,
+  detailLevel: QuoteDisplayDetailLevel,
+): QuoteAudienceDisplayConfig {
+  return {
+    ...config,
+    blocks: config.blocks.map((block) =>
+      block.id === 'lineItems' ? { ...block, detailLevel } : block,
+    ),
+    ...(config.audience === 'customer'
+      ? {
+          groupCustomerLineItems: detailLevel === 'summary',
+          showQuantities: detailLevel !== 'summary',
+          showProductCodes: detailLevel === 'detailed',
+          showUnitPrices: detailLevel === 'detailed',
+        }
+      : {
+          showProductCodes: detailLevel !== 'summary',
+          showUnitCosts: detailLevel !== 'summary',
+          showSpecFields: detailLevel === 'detailed',
+        }),
+  };
+}
+
 export function QuotePresentationControls({
   value,
   quoteType,
@@ -85,6 +158,7 @@ export function QuotePresentationControls({
     [quoteType],
   );
   const [activeAudience, setActiveAudience] = useState<TemplateAudience>(audiences[0]);
+  const fullConfig = useMemo(() => normalizeQuoteDisplayConfig(value), [value]);
 
   useEffect(() => {
     if (!audiences.includes(activeAudience)) {
@@ -92,13 +166,24 @@ export function QuotePresentationControls({
     }
   }, [activeAudience, audiences]);
 
-  const config = value[activeAudience];
+  const config = fullConfig[activeAudience];
 
   const updateAudience = (nextAudience: QuoteAudienceDisplayConfig) => {
-    onChange({
-      ...value,
-      [activeAudience]: normalizeAudienceDisplayConfig(nextAudience, activeAudience),
-    });
+    const previousLineItemsLevel = getLineItemsDetailLevel(config);
+    const normalizedAudience = normalizeAudienceDisplayConfig(nextAudience, activeAudience);
+    const nextLineItemsLevel = getLineItemsDetailLevel(normalizedAudience);
+    const nextConfig: QuoteDisplayConfigV2 = {
+      ...fullConfig,
+      [activeAudience]: normalizedAudience,
+    };
+    if (nextLineItemsLevel && nextLineItemsLevel !== previousLineItemsLevel) {
+      nextConfig.detailMode = blockDetailLevelToDetailMode(nextLineItemsLevel, fullConfig.detailMode);
+    }
+    onChange(normalizeQuoteDisplayConfig(nextConfig));
+  };
+
+  const updateDocument = (nextConfig: QuoteDisplayConfigV2) => {
+    onChange(normalizeQuoteDisplayConfig(nextConfig));
   };
 
   return (
@@ -127,6 +212,8 @@ export function QuotePresentationControls({
         </Tabs>
       )}
 
+      <DocumentSettingsControls config={fullConfig} onChange={updateDocument} />
+      <Separator />
       <BlockControls config={config} onChange={updateAudience} />
       <Separator />
       <DetailControls config={config} onChange={updateAudience} />
@@ -137,6 +224,124 @@ export function QuotePresentationControls({
         config={config}
         lineOptions={lineOptions}
         onChange={updateAudience}
+      />
+    </div>
+  );
+}
+
+function DocumentSettingsControls({
+  config,
+  onChange,
+}: {
+  config: QuoteDisplayConfigV2;
+  onChange: (config: QuoteDisplayConfigV2) => void;
+}) {
+  const update = (updates: Partial<QuoteDisplayConfigV2>) => onChange({ ...config, ...updates });
+  const toggleColumn = (column: QuoteVisibleColumn, checked: boolean) => {
+    const next = checked
+      ? [...new Set([...config.visibleColumns, column])]
+      : config.visibleColumns.filter((value) => value !== column);
+    update({ visibleColumns: next.length ? next : ['description'] });
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+        <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Quote Settings
+        </Label>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Organize</Label>
+          <Select
+            value={config.organizationMode}
+            onValueChange={(organizationMode) => update({ organizationMode: organizationMode as QuoteOrganizationMode })}
+          >
+            <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {(Object.keys(ORGANIZATION_LABELS) as QuoteOrganizationMode[]).map((mode) => (
+                <SelectItem key={mode} value={mode}>{ORGANIZATION_LABELS[mode]}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Detail mode</Label>
+          <Select
+            value={config.detailMode}
+            onValueChange={(detailMode) => {
+              const nextDetailMode = detailMode as QuoteDisplayDetailMode;
+              const detailLevel = detailModeToBlockDetailLevel(nextDetailMode);
+              update({
+                detailMode: nextDetailMode,
+                customer: syncLineItemsBlockDetail(config.customer, detailLevel),
+                manufacturer: syncLineItemsBlockDetail(config.manufacturer, detailLevel),
+              });
+            }}
+          >
+            <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {(Object.keys(DETAIL_MODE_LABELS) as QuoteDisplayDetailMode[]).map((mode) => (
+                <SelectItem key={mode} value={mode}>{DETAIL_MODE_LABELS[mode]}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Validity days</Label>
+          <Input
+            type="number"
+            min={1}
+            value={config.validityDays}
+            onChange={(e) => update({ validityDays: Math.max(1, Number(e.target.value) || 1) })}
+            className="h-8 text-xs"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Customer template key</Label>
+          <Input
+            value={config.customerTemplateKey ?? ''}
+            onChange={(e) => update({ customerTemplateKey: e.target.value.trim() || null })}
+            className="h-8 text-xs"
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label className="text-xs text-muted-foreground">Visible columns</Label>
+        <div className="grid grid-cols-2 gap-2">
+          {(Object.keys(COLUMN_LABELS) as QuoteVisibleColumn[]).map((column) => (
+            <label key={column} className="flex items-center gap-2 rounded border bg-background px-2 py-1.5 text-xs">
+              <Checkbox
+                checked={config.visibleColumns.includes(column)}
+                onCheckedChange={(checked) => toggleColumn(column, checked === true)}
+              />
+              <span>{COLUMN_LABELS[column]}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <FieldTextarea
+        label="Header"
+        field="customText"
+        value={config.headerText}
+        onChange={(headerText) => update({ headerText })}
+      />
+      <FieldTextarea
+        label="Footer"
+        field="customText"
+        value={config.footerText}
+        onChange={(footerText) => update({ footerText })}
+      />
+      <FieldTextarea
+        label="Disclaimer"
+        field="termsText"
+        value={config.disclaimerText}
+        onChange={(disclaimerText) => update({ disclaimerText })}
       />
     </div>
   );

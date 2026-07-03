@@ -337,7 +337,10 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
       components.push({
         entityType: 'louver', code: louver.model ?? 'louver', quantity: cores,
         label: `NGP louver ${louver.model} (${orderW}×${orderH})`,
-        fields: ngpFields(pt.priceTableId, orderW, orderH, input),
+        fields: {
+          ...ngpFields(pt.priceTableId, orderW, orderH, input),
+          ...ngpDisplayFields(input, base, null),
+        },
       });
     }
     return base;
@@ -402,7 +405,10 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
     components.push({
       entityType: 'lite_kit', code: kitModel, quantity: 1,
       label: `NGP lite kit ${kitModel} (${orderW}×${orderH})${pt.assembly ? ' assembly' : ''}`,
-      fields: ngpFields(pt.priceTableId, orderW, orderH, input),
+      fields: {
+        ...ngpFields(pt.priceTableId, orderW, orderH, input),
+        ...ngpDisplayFields(input, base, glass?.model ?? input.glassModel ?? null),
+      },
     });
   }
 
@@ -415,7 +421,12 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
       components.push({
         entityType: 'glass', code: glass.model ?? 'glass', quantity: 1,
         label: `NGP glass ${glass.model} (${orderW}×${orderH})`,
-        fields: { 'infill.price_table_id': gpt, 'infill.order_width_in': orderW, 'infill.order_height_in': orderH },
+        fields: {
+          'infill.price_table_id': gpt,
+          'infill.order_width_in': orderW,
+          'infill.order_height_in': orderH,
+          ...ngpDisplayFields(input, base, glass.model ?? input.glassModel ?? null),
+        },
       });
     } else if (!gpt) {
       // Glass may be priced by a direct rule (round/polycarbonate) — opt-in code.
@@ -470,6 +481,20 @@ function ngpFields(priceTableId: string, orderW: number, orderH: number, input: 
   };
   if (input.finishCode) fields['infill.finish_code'] = input.finishCode;
   if (input.optionCodes && input.optionCodes.length) fields['infill.options'] = input.optionCodes.join(',');
+  return fields;
+}
+
+function ngpDisplayFields(
+  input: InfillSelectionInput,
+  resolved: Pick<ResolvedInfill, 'exposedWidthIn' | 'exposedHeightIn'>,
+  glassType: string | null,
+): Record<string, string | number> {
+  const fields: Record<string, string | number> = {};
+  if (input.cutoutWidthIn != null) fields['infill.cutout_width_in'] = input.cutoutWidthIn;
+  if (input.cutoutHeightIn != null) fields['infill.cutout_height_in'] = input.cutoutHeightIn;
+  if (resolved.exposedWidthIn != null) fields['infill.visible_width_in'] = resolved.exposedWidthIn;
+  if (resolved.exposedHeightIn != null) fields['infill.visible_height_in'] = resolved.exposedHeightIn;
+  if (glassType) fields['infill.glass_type'] = glassType;
   return fields;
 }
 

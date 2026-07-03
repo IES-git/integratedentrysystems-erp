@@ -23,6 +23,13 @@ export interface CompanySettings {
   paymentTerms: string | null;
   defaultTemplateId: string | null;
   markupOverrides?: Record<string, number>;
+  defaultQuoteTemplateKey?: string | null;
+  defaultQuoteDetailLevel?: QuoteDisplayDetailMode;
+  defaultQuoteOrganizationMode?: QuoteOrganizationMode;
+  quoteValidityDays?: number | null;
+  quoteHeaderText?: string | null;
+  quoteFooterText?: string | null;
+  quoteDisclaimerText?: string | null;
 }
 
 export type CompanyType = 'customer' | 'manufacturer' | 'both';
@@ -76,7 +83,30 @@ export interface Manufacturer {
 // Estimate Types (PDF Intake)
 export type OcrStatus = 'pending' | 'processing' | 'done' | 'error';
 
-export interface Estimate {
+export type EstimateShipToSource = 'customer_shipping' | 'customer_billing' | 'override' | 'will_call';
+
+export interface EstimateJobInfo {
+  jobName: string | null;
+  jobLocation: string | null;
+  jobNumber: string | null;
+  customerPo: string | null;
+  quoteDate: string | null;
+  shippingMethod: string | null;
+  terms: string | null;
+  delivery: string | null;
+  shipToSource: EstimateShipToSource | null;
+  shipToAddress: string | null;
+  shipToCity: string | null;
+  shipToState: string | null;
+  shipToZip: string | null;
+  customerContactId: string | null;
+  customerRepName: string | null;
+  customerRepPhone: string | null;
+  customerRepEmail: string | null;
+  internalNotes: string | null;
+}
+
+export interface Estimate extends EstimateJobInfo {
   id: string;
   companyId: string | null;
   uploadedByUserId: string;
@@ -223,6 +253,9 @@ export interface EstimateWithItems extends Estimate {
   items: Pick<EstimateItem, 'id' | 'canonicalCode' | 'itemLabel' | 'itemType' | 'subcategory'>[];
   createdByUserName?: string | null;
   openingsCount?: number;
+  openingNames?: string[];
+  latestQuoteStatus?: QuoteStatus | null;
+  quoteCount?: number;
   /** Spec-driven quick-reference summary (null for legacy / un-spec'd estimates). */
   specSummary?: EstimateSpecSummary | null;
 }
@@ -422,6 +455,19 @@ export type QuoteStatus = 'draft' | 'sent' | 'approved' | 'rejected' | 'converte
 export type QuoteType = 'customer' | 'manufacturer' | 'both';
 
 export type QuoteDisplayDetailLevel = 'summary' | 'standard' | 'detailed';
+export type QuoteOrganizationMode = 'by_opening' | 'by_product_group';
+export type QuoteDisplayDetailMode = 'summary' | 'rolled_up' | 'per_item_sell' | 'full_internal';
+export type QuoteVisibleColumn =
+  | 'mark'
+  | 'description'
+  | 'product_code'
+  | 'quantity'
+  | 'uom'
+  | 'unit_price'
+  | 'line_total'
+  | 'unit_cost'
+  | 'net_cost'
+  | 'gross_margin';
 
 export type QuoteDisplayBlockId =
   | 'project'
@@ -468,11 +514,27 @@ export interface QuoteAudienceDisplayConfig {
   customText: string;
 }
 
-export interface QuoteDisplayConfig {
+export interface QuoteDisplayConfigV1 {
   version: 1;
   customer: QuoteAudienceDisplayConfig;
   manufacturer: QuoteAudienceDisplayConfig;
 }
+
+export interface QuoteDisplayConfigV2 {
+  version: 2;
+  customer: QuoteAudienceDisplayConfig;
+  manufacturer: QuoteAudienceDisplayConfig;
+  organizationMode: QuoteOrganizationMode;
+  detailMode: QuoteDisplayDetailMode;
+  customerTemplateKey: string | null;
+  visibleColumns: QuoteVisibleColumn[];
+  validityDays: number;
+  headerText: string;
+  footerText: string;
+  disclaimerText: string;
+}
+
+export type QuoteDisplayConfig = QuoteDisplayConfigV1 | QuoteDisplayConfigV2;
 
 export interface Quote {
   id: string;
@@ -521,10 +583,49 @@ export interface QuoteItem {
   itemLabel: string;
   canonicalCode: string | null;
   quantity: number;
+  /** Optional renderer metadata restored from live estimate lines or quote snapshots. */
+  openingId?: string | null;
+  openingName?: string | null;
+  productGroup?: string | null;
+  unitOfMeasure?: string | null;
+  grossMargin?: number | null;
+  grossMarginPct?: number | null;
   unitCost: number;
   unitPrice: number;
   lineTotal: number;
   sortOrder: number;
+  createdAt: string;
+}
+
+export interface QuoteLineSnapshot {
+  id: string;
+  quoteId: string;
+  quoteItemId: string | null;
+  estimateId: string | null;
+  estimateLineId: string | null;
+  estimateItemId: string | null;
+  openingId: string | null;
+  componentId: string | null;
+  sourceTable: 'estimate_line' | 'estimate_items' | string;
+  sourceLineType: string | null;
+  entityType: string | null;
+  chargeCategory: string | null;
+  description: string | null;
+  selectedOptionCode: string | null;
+  quantity: number | null;
+  unitOfMeasure: string | null;
+  unitListPrice: number | null;
+  extendedListPrice: number | null;
+  discountMultiplier: number | null;
+  extendedNetPrice: number | null;
+  sellPrice: number | null;
+  manualSellPrice: number | null;
+  unitSellPrice: number | null;
+  lineTotal: number | null;
+  priceStatus: string | null;
+  reviewStatus: string | null;
+  sortOrder: number;
+  snapshotJson: Record<string, unknown>;
   createdAt: string;
 }
 

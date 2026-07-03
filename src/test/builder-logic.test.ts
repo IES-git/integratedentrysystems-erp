@@ -93,24 +93,24 @@ describe('deriveBuilderContext size cascade', () => {
     const draft = createOpeningDraft({
       configurationType: 'pair',
       openingWidth: '6-0', // 72"
-      openingHeight: '7-0',
+      openingHeight: '70',
       doors: [d],
     });
     const ctx = deriveBuilderContext(draft);
     expect(ctx.leafCount).toBe(2);
-    expect(ctx.derivedByComponent[d.id]['door.nominal_door_width'].value).toBe('3-0'); // 36"
-    expect(ctx.derivedByComponent[d.id]['door.nominal_door_height'].value).toBe('7-0');
+    expect(ctx.derivedByComponent[d.id]['door.nominal_door_width'].value).toBe('30'); // 36"
+    expect(ctx.derivedByComponent[d.id]['door.nominal_door_height'].value).toBe('70');
     expect(ctx.astragalApplies).toBe(true);
   });
 });
 
 describe('deriveBuilderContext shared attributes + series', () => {
-  it('inherits frame gauge/material/hand from the door and core/edge from series', () => {
+  it('keeps frame gauge independent while inheriting material/hand and core/edge from series', () => {
     const d = door({ 'door.door_gauge': '16', 'door.door_material': 'galvannealed', 'door.door_hand': 'LH' }, 'HF');
     const f = frame();
     const draft = createOpeningDraft({ doors: [d], frames: [f], openingWidth: '36', openingHeight: '84' });
     const ctx = deriveBuilderContext(draft);
-    expect(ctx.derivedByComponent[f.id]['frame.frame_gauge'].value).toBe('16');
+    expect(ctx.derivedByComponent[f.id]['frame.frame_gauge']).toBeUndefined();
     expect(ctx.derivedByComponent[f.id]['frame.frame_material'].value).toBe('galvannealed');
     expect(ctx.derivedByComponent[f.id]['frame.frame_hand'].value).toBe('LH');
     expect(ctx.derivedByComponent[d.id]['door.core_type'].value).toBe('Honeycomb');
@@ -567,6 +567,13 @@ describe('priceable-combination filtering (only offer values that price)', () =>
     // Unknown field path → unchanged.
     const other = makeField('DOR-099', 'door', { fieldPath: 'door.unrelated' });
     expect(priceableEnumOptions(['a', 'b'], other, comp, signatures)).toEqual(['a', 'b']);
+  });
+
+  it('keeps A40/A60 as selectable material aliases for Galvannealed pricing', () => {
+    const matField = makeField('DOR-007', 'door', { fieldPath: 'door.door_material' });
+    const comp = door({ 'door.door_series_construction': 'H' });
+    expect(priceableEnumOptions(['CRS', 'Galvannealed', 'A40', 'A60', 'Stainless'], matField, comp, signatures))
+      .toEqual(['CRS', 'Galvannealed', 'A40', 'A60']);
   });
 
   it('ignores signature metadata when computing base-driving fields', () => {

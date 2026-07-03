@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   buildCustomerDisplayRows,
   createDefaultAudienceDisplayConfig,
+  createDefaultQuoteDisplayConfig,
+  getEffectiveVisibleColumns,
   getBlock,
   getLineDisplayKey,
   hasHiddenDisplayLines,
   normalizeAudienceDisplayConfig,
+  resolveQuoteDocumentDisplayConfig,
 } from '@/lib/quote-display';
 import type { QuoteItem } from '@/types';
 
@@ -142,5 +145,69 @@ describe('quote display helpers', () => {
         }),
       ),
     ).toBe('estimate-item:abc');
+  });
+
+  it('uses v2 detail mode to switch between rolled-up and per-item rows', () => {
+    const config = createDefaultAudienceDisplayConfig('customer');
+    const items = [
+      quoteItem({ itemLabel: 'butt hinges', canonicalCode: '49', lineTotal: 50 }),
+      quoteItem({
+        id: 'quote-item-2',
+        estimateItemId: 'estimate-item-2',
+        displayKey: 'estimate-item:estimate-item-2',
+        itemLabel: 'closer hardware',
+        canonicalCode: '4040',
+        lineTotal: 125,
+      }),
+    ];
+
+    const summaryRows = buildCustomerDisplayRows(items, config, {
+      detailMode: 'summary',
+      organizationMode: 'by_product_group',
+    });
+    const perItemRows = buildCustomerDisplayRows(items, config, {
+      detailMode: 'per_item_sell',
+      organizationMode: 'by_product_group',
+    });
+
+    expect(summaryRows).toHaveLength(1);
+    expect(summaryRows[0].label).toBe('Hardware package');
+    expect(perItemRows.map((row) => row.label)).toEqual(['butt hinges', 'closer hardware']);
+  });
+
+  it('uses v2 organization mode to group customer rows by opening', () => {
+    const config = createDefaultAudienceDisplayConfig('customer');
+    const items = [
+      quoteItem({ openingId: 'opening-1', openingName: 'A101', itemLabel: '18ga steel door', lineTotal: 500 }),
+      quoteItem({
+        id: 'quote-item-2',
+        estimateItemId: 'estimate-item-2',
+        displayKey: 'estimate-item:estimate-item-2',
+        openingId: 'opening-2',
+        openingName: 'B202',
+        itemLabel: '16ga steel frame',
+        lineTotal: 300,
+      }),
+    ];
+
+    const rows = buildCustomerDisplayRows(items, config, {
+      detailMode: 'rolled_up',
+      organizationMode: 'by_opening',
+    });
+
+    expect(rows.map((row) => row.label)).toEqual(['A101', 'B202']);
+  });
+
+  it('keeps internal cost columns out of customer document settings', () => {
+    const fullConfig = {
+      ...createDefaultQuoteDisplayConfig(null, 'customer'),
+      visibleColumns: ['description', 'unit_cost', 'net_cost', 'gross_margin', 'line_total'] as const,
+    };
+    const resolved = resolveQuoteDocumentDisplayConfig(fullConfig, 'customer');
+
+    expect(getEffectiveVisibleColumns(resolved.audienceConfig, resolved.documentConfig)).toEqual([
+      'description',
+      'line_total',
+    ]);
   });
 });

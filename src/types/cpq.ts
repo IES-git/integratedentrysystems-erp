@@ -8,6 +8,7 @@
 
 // ===== Shared enums =====
 export type ReviewStatus = 'UNREVIEWED' | 'APPROVED' | 'REJECTED' | 'NEEDS_REVIEW';
+export type HardwareApprovalState = 'draft' | 'needs_review' | 'approved' | 'inactive' | 'rejected';
 
 export type PriceStatus =
   | 'PRICED'
@@ -506,8 +507,13 @@ export interface HardwareProduct {
   model: string | null;
   description: string | null;
   active: boolean;
+  approvalState?: HardwareApprovalState;
   sourceRowRef: string | null;
+  sourceRowNumber?: number | null;
   sourceConfidence: number | null;
+  taxonomyNotes?: string | null;
+  updatedBy?: string | null;
+  lastReviewedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -524,6 +530,12 @@ export interface HardwareVariant {
   rating: string | null;
   material: string | null;
   optionAttributes: Record<string, unknown>;
+  active?: boolean;
+  approvalState?: HardwareApprovalState;
+  sourceRowNumber?: number | null;
+  taxonomyNotes?: string | null;
+  updatedBy?: string | null;
+  lastReviewedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -566,6 +578,11 @@ export interface HardwarePrice {
   minimumQuantity: number | null;
   sourceRowRef: string | null;
   reviewStatus: ReviewStatus;
+  active?: boolean;
+  approvalState?: HardwareApprovalState;
+  discountChain?: string | null;
+  updatedBy?: string | null;
+  lastReviewedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

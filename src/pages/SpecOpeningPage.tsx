@@ -29,7 +29,7 @@ export default function SpecOpeningPage() {
 
   const backUrl = useCallback(
     (id: string | null) =>
-      id ? `/app/estimates/create?id=${id}&step=1` : '/app/estimates/create?step=1',
+      id ? `/app/estimates/create?id=${id}&step=2` : '/app/estimates/create?step=2',
     [],
   );
 

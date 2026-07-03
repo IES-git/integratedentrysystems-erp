@@ -61,6 +61,11 @@ export interface CutoutDraft {
   infillType: NgpInfillType;
   cutoutWidth: string;
   cutoutHeight: string;
+  orderWidthIn: number | null;
+  orderHeightIn: number | null;
+  visibleWidthIn: number | null;
+  visibleHeightIn: number | null;
+  glassType: string | null;
   /** Resolved from the door/opening, but overridable. */
   doorThicknessIn: number | null;
   fireRatingMinutes: number | null;
@@ -107,6 +112,11 @@ export function createCutoutDraft(partial: Partial<CutoutDraft> = {}): CutoutDra
     infillType: partial.infillType ?? 'LITE',
     cutoutWidth: partial.cutoutWidth ?? '',
     cutoutHeight: partial.cutoutHeight ?? '',
+    orderWidthIn: partial.orderWidthIn ?? null,
+    orderHeightIn: partial.orderHeightIn ?? null,
+    visibleWidthIn: partial.visibleWidthIn ?? null,
+    visibleHeightIn: partial.visibleHeightIn ?? null,
+    glassType: partial.glassType ?? null,
     doorThicknessIn: partial.doorThicknessIn ?? null,
     fireRatingMinutes: partial.fireRatingMinutes ?? null,
     kitModel: partial.kitModel ?? null,

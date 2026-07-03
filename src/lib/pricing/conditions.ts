@@ -59,12 +59,27 @@ function normText(value: SpecValue): string {
   return String(value ?? '').trim().toLowerCase();
 }
 
+function normalizeMaterialToken(value: SpecValue): string {
+  const text = normText(value).replace(/[\s_-]+/g, '');
+  if (text === 'a40' || text === 'a60' || text === 'galvannealed' || text === 'galvanized') {
+    return 'galvannealed';
+  }
+  return normText(value);
+}
+
+function normConditionText(key: string, value: SpecValue): string {
+  if (key === 'door.door_material' || key === 'frame.frame_material' || key === 'panel.panel_material') {
+    return normalizeMaterialToken(value);
+  }
+  return normText(value);
+}
+
 /** Split a multi-value condition operand ("A | B, C") into normalized tokens. */
-function splitList(raw: string | null): string[] {
+function splitList(key: string, raw: string | null): string[] {
   if (!raw) return [];
   return raw
     .split(/[|,]/)
-    .map((s) => s.trim().toLowerCase())
+    .map((s) => normConditionText(key, s))
     .filter(Boolean);
 }
 
@@ -84,14 +99,14 @@ function evalOne(
     case 'MISSING':
       return { ok: !present, value, missing: false };
     case 'EQ':
-      return { ok: present && normText(value) === normText(cond.value1), value, missing: !present };
+      return { ok: present && normConditionText(key, value) === normConditionText(key, cond.value1), value, missing: !present };
     case 'NE':
       // NE is satisfied by a present, differing value (missing != not-equal).
-      return { ok: present && normText(value) !== normText(cond.value1), value, missing: !present };
+      return { ok: present && normConditionText(key, value) !== normConditionText(key, cond.value1), value, missing: !present };
     case 'IN':
-      return { ok: present && splitList(cond.value1).includes(normText(value)), value, missing: !present };
+      return { ok: present && splitList(key, cond.value1).includes(normConditionText(key, value)), value, missing: !present };
     case 'NOT_IN':
-      return { ok: present && !splitList(cond.value1).includes(normText(value)), value, missing: !present };
+      return { ok: present && !splitList(key, cond.value1).includes(normConditionText(key, value)), value, missing: !present };
     case 'GT':
     case 'GTE':
     case 'LT':

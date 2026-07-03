@@ -2,10 +2,14 @@ import { Document, Page, Text, View, StyleSheet, Font, Image } from '@react-pdf/
 import {
   buildCustomerDisplayRows,
   createDefaultAudienceDisplayConfig,
+  getEffectiveQuoteDetailMode,
+  getEffectiveVisibleColumns,
   getEnabledBlocks,
   hasHiddenDisplayLines,
+  resolveQuoteDocumentDisplayConfig,
+  type QuoteDocumentDisplayConfigInput,
 } from '@/lib/quote-display';
-import type { Quote, QuoteItem, Company, Contact, QuoteAudienceDisplayConfig } from '@/types';
+import type { Quote, QuoteItem, Company, Contact } from '@/types';
 import iesLogo from '@/assets/ies-logo.png';
 
 Font.register({
@@ -122,7 +126,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#f9fafb',
   },
   colDescription: { flex: 4 },
+  colMark: { flex: 1.2 },
+  colCode: { flex: 1.5 },
   colQty: { flex: 1, textAlign: 'center' },
+  colUom: { flex: 0.9, textAlign: 'center' },
   colUnitPrice: { flex: 2, textAlign: 'right' },
   colTotal: { flex: 2, textAlign: 'right' },
   cellText: {
@@ -276,6 +283,26 @@ const styles = StyleSheet.create({
     color: '#374151',
     lineHeight: 1.45,
   },
+  documentMessageSection: {
+    marginBottom: 16,
+    padding: 10,
+    backgroundColor: '#f9fafb',
+    borderRadius: 3,
+    borderLeft: '3pt solid #9ca3af',
+  },
+  documentMessageLabel: {
+    fontSize: 7,
+    fontFamily: 'Helvetica-Bold',
+    color: '#6b7280',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  documentMessageText: {
+    fontSize: 8,
+    color: '#374151',
+    lineHeight: 1.45,
+  },
   tableNotice: {
     marginTop: 6,
     fontSize: 7.5,
@@ -292,7 +319,7 @@ interface CustomerQuotePdfProps {
   company: Company | null;
   primaryContact?: Contact | null;
   aiSummary?: string | null;
-  displayConfig?: QuoteAudienceDisplayConfig | null;
+  displayConfig?: QuoteDocumentDisplayConfigInput;
 }
 
 export function CustomerQuotePdf({
@@ -303,16 +330,31 @@ export function CustomerQuotePdf({
   aiSummary,
   displayConfig,
 }: CustomerQuotePdfProps) {
-  const config = displayConfig ?? createDefaultAudienceDisplayConfig('customer');
+  const { documentConfig, audienceConfig: config } = resolveQuoteDocumentDisplayConfig(
+    displayConfig ?? createDefaultAudienceDisplayConfig('customer'),
+    'customer',
+  );
+  const detailMode = getEffectiveQuoteDetailMode(config, documentConfig);
+  const visibleColumns = new Set(getEffectiveVisibleColumns(config, documentConfig));
   const enabledBlocks = getEnabledBlocks(config);
-  const displayRows = buildCustomerDisplayRows(items, config);
+  const displayRows = buildCustomerDisplayRows(items, config, {
+    organizationMode: documentConfig?.organizationMode,
+    detailMode,
+  });
   const hiddenLines = hasHiddenDisplayLines(items, config);
   const quoteNumber = `Q-${quote.id.slice(-8).toUpperCase()}`;
-  const quoteDate = new Date(quote.createdAt).toLocaleDateString('en-US', {
+  const createdDate = new Date(quote.createdAt);
+  const quoteDate = createdDate.toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'long',
     day: 'numeric',
   });
+  const validUntilDate = documentConfig
+    ? new Date(createdDate.getTime() + documentConfig.validityDays * 24 * 60 * 60 * 1000)
+    : null;
+  const validUntil = validUntilDate
+    ? validUntilDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+    : null;
 
   const billingLines = [
     company?.billingAddress,
@@ -328,7 +370,12 @@ export function CustomerQuotePdf({
 
   const paymentTerms = company?.settings?.paymentTerms ?? 'Net 30';
   const overviewText = config.summaryText.trim() || aiSummary || '';
-  const termsText = config.termsText.trim() || paymentTerms;
+  const termsText =
+    config.termsText.trim() ||
+    (documentConfig ? `Pricing is valid for ${documentConfig.validityDays} days.` : paymentTerms);
+  const headerText = documentConfig?.headerText.trim() ?? '';
+  const footerText = documentConfig?.footerText.trim() || 'Thank you for your business!';
+  const disclaimerText = documentConfig?.disclaimerText.trim() ?? '';
 
   return (
     <Document
@@ -346,8 +393,16 @@ export function CustomerQuotePdf({
             <Text style={styles.quoteTitle}>QUOTE</Text>
             <Text style={styles.quoteNumber}>Quote No: {quoteNumber}</Text>
             <Text style={styles.quoteDate}>Date: {quoteDate}</Text>
+            {validUntil && <Text style={styles.quoteDate}>Valid Until: {validUntil}</Text>}
           </View>
         </View>
+
+        {headerText && (
+          <View style={styles.documentMessageSection}>
+            <Text style={styles.documentMessageLabel}>Header</Text>
+            <Text style={styles.documentMessageText}>{headerText}</Text>
+          </View>
+        )}
 
         {enabledBlocks.map((block) => {
           if (block.id === 'project') {
@@ -391,24 +446,41 @@ export function CustomerQuotePdf({
           }
 
           if (block.id === 'lineItems') {
-            const isSummary = block.detailLevel === 'summary';
-            const isDetailed = block.detailLevel === 'detailed';
-            const showProductCodes = isDetailed || (!isSummary && config.showProductCodes);
-            const showUnitPrices = isDetailed || (!isSummary && config.showUnitPrices);
-            const showQuantities = !isSummary && config.showQuantities;
-            const showLineTotals = config.showLineTotals;
+            const isSummary = detailMode === 'summary';
+            const showMark = visibleColumns.has('mark');
+            const showDescription = visibleColumns.has('description') || !showMark;
+            const showProductCodes = !isSummary && visibleColumns.has('product_code');
+            const showQuantities = !isSummary && visibleColumns.has('quantity');
+            const showUom = !isSummary && visibleColumns.has('uom');
+            const showUnitPrices = !isSummary && visibleColumns.has('unit_price');
+            const showLineTotals = visibleColumns.has('line_total');
 
             return (
               <View key={block.id} style={styles.table}>
                 <View style={styles.tableHeader}>
-                  <View style={[styles.colDescription]}>
-                    <Text style={styles.tableHeaderCell}>Description</Text>
-                  </View>
+                  {showMark && (
+                    <View style={styles.colMark}>
+                      <Text style={styles.tableHeaderCell}>Mark</Text>
+                    </View>
+                  )}
+                  {showDescription && (
+                    <View style={styles.colDescription}>
+                      <Text style={styles.tableHeaderCell}>Description</Text>
+                    </View>
+                  )}
+                  {showProductCodes && (
+                    <View style={styles.colCode}>
+                      <Text style={styles.tableHeaderCell}>Code</Text>
+                    </View>
+                  )}
                   {showQuantities && (
                     <View style={[styles.colQty]}>
-                      <Text style={[styles.tableHeaderCell, { textAlign: 'center' }]}>
-                        {isSummary ? 'Items' : 'Qty'}
-                      </Text>
+                      <Text style={[styles.tableHeaderCell, { textAlign: 'center' }]}>Qty</Text>
+                    </View>
+                  )}
+                  {showUom && (
+                    <View style={styles.colUom}>
+                      <Text style={[styles.tableHeaderCell, { textAlign: 'center' }]}>UOM</Text>
                     </View>
                   )}
                   {showUnitPrices && (
@@ -424,21 +496,40 @@ export function CustomerQuotePdf({
                 </View>
                 {displayRows.map((item, idx) => (
                   <View key={item.id} style={idx % 2 === 0 ? styles.tableRow : styles.tableRowAlt}>
-                    <View style={styles.colDescription}>
-                      <Text style={styles.cellTextBold}>{item.label}</Text>
-                      {showProductCodes && item.canonicalCode && (
-                        <Text style={styles.cellText}>Item Code: {item.canonicalCode}</Text>
-                      )}
-                      {isDetailed && item.sourceItemCount > 1 && (
-                        <Text style={styles.cellText}>
-                          Includes {item.sourceItemCount} priced source line items.
-                        </Text>
-                      )}
-                    </View>
+                    {showMark && (
+                      <View style={styles.colMark}>
+                        <Text style={styles.cellText}>{item.mark ?? '-'}</Text>
+                      </View>
+                    )}
+                    {showDescription && (
+                      <View style={styles.colDescription}>
+                        <Text style={styles.cellTextBold}>{item.label}</Text>
+                        {!showProductCodes && item.canonicalCode && (
+                          <Text style={styles.cellText}>Item Code: {item.canonicalCode}</Text>
+                        )}
+                        {detailMode === 'full_internal' && item.sourceItemCount > 1 && (
+                          <Text style={styles.cellText}>
+                            Includes {item.sourceItemCount} priced source line items.
+                          </Text>
+                        )}
+                      </View>
+                    )}
+                    {showProductCodes && (
+                      <View style={styles.colCode}>
+                        <Text style={styles.cellText}>{item.canonicalCode ?? '-'}</Text>
+                      </View>
+                    )}
                     {showQuantities && (
                       <View style={styles.colQty}>
                         <Text style={[styles.cellText, { textAlign: 'center' }]}>
-                          {item.sourceItemCount > 1 ? item.sourceItemCount : item.quantity}
+                          {item.quantity}
+                        </Text>
+                      </View>
+                    )}
+                    {showUom && (
+                      <View style={styles.colUom}>
+                        <Text style={[styles.cellText, { textAlign: 'center' }]}>
+                          {item.unitOfMeasure ?? 'ea'}
                         </Text>
                       </View>
                     )}
@@ -514,12 +605,19 @@ export function CustomerQuotePdf({
           return null;
         })}
 
+        {disclaimerText && (
+          <View style={styles.documentMessageSection}>
+            <Text style={styles.documentMessageLabel}>Disclaimer</Text>
+            <Text style={styles.documentMessageText}>{disclaimerText}</Text>
+          </View>
+        )}
+
         {/* ── Footer ── */}
         <View style={styles.footer} fixed>
           <Text style={styles.footerText}>
             {quoteNumber} · {quoteDate}
           </Text>
-          <Text style={styles.footerThankYou}>Thank you for your business!</Text>
+          <Text style={styles.footerThankYou}>{footerText}</Text>
           <Text style={styles.footerText}>Integrated Entry Systems</Text>
         </View>
       </Page>

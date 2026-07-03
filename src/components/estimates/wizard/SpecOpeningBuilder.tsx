@@ -3,7 +3,7 @@
  *
  * Replaces the two legacy builders (BuildOpeningDialog + NewOpeningPage) with a
  * single configurator driven by the `opening_spec_field` dictionary. Step flow:
- *   Classify → Door(s) → Frame → Panel(s) → Lites/Louvers/Glass →
+ *   Classify → Labels/Ratings → Door(s) → Frame → Panel(s) → Lites/Louvers/Glass →
  *   Preparations → Hardware → Keying → Access Control → Review.
  *
  * Hardware starts from a hardware-set template (auto-populated categories +
@@ -12,11 +12,11 @@
  * crosswalk. Live pricing + dependency validation run through the Phase 3 engine.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Loader2, AlertCircle, DoorOpen, Square, LayoutPanelLeft, GlassWater,
   Wrench, KeyRound, ShieldCheck, ClipboardList, Plus, Trash2, CheckCircle2, Layers,
-  ChevronDown, ChevronRight, ArrowLeft, Wand2, DollarSign,
+  ChevronDown, ChevronRight, ArrowLeft, Wand2, DollarSign, RefreshCw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -52,10 +52,14 @@ import { resolveOpeningSpecFromDb, withTimeout } from '@/lib/cpq/resolver';
 import {
   listPublishedManufacturerCatalogs,
   type ManufacturerCatalogOption,
-  type ManufacturerPricedEntity,
 } from '@/lib/price-rules-api';
+import {
+  resolveVendorPackageCandidates,
+  type VendorCandidateResult,
+  type VendorPackageCandidate,
+} from '@/lib/cpq/vendor-candidates';
 import { resolveInfill, type NgpInfillType, type ResolvedInfill } from '@/lib/cpq/ngp-infill';
-import { parsePlainInches } from '@/components/pricing/dimension-utils';
+import { normalizeCompactNominalDimension, parsePlainInches } from '@/components/pricing/dimension-utils';
 import {
   deriveBuilderContext, fieldTier, allowedEnumOptions, isStepVisible,
   doorHand, isHandedCategory, isFireRating, optionLabelsForField, deriveHardwareIntelligence,
@@ -81,6 +85,7 @@ type StepId = BuilderStepTarget;
 // OUTPUT chosen in the "Construction" step — never entered up front.
 const STEPS: { id: StepId; label: string; icon: typeof DoorOpen }[] = [
   { id: 'classify', label: 'Opening', icon: ClipboardList },
+  { id: 'ratings', label: 'Labels & Ratings', icon: ShieldCheck },
   { id: 'doors', label: 'Door construction', icon: DoorOpen },
   { id: 'frame', label: 'Frame & wall', icon: Square },
   { id: 'hardware', label: 'Hardware', icon: Wrench },
@@ -616,7 +621,6 @@ export function SpecOpeningBuilder({
     setDraft((prev) => {
       let changed = false;
       const derivedContext = deriveBuilderContext(prev);
-      const doorGauge = prev.doors[0]?.fields['door.door_gauge'] ?? '';
       const doorMaterial = prev.doors[0]?.fields['door.door_material'] ?? '';
       const apply = (list: ComponentDraft[], entity: RuleEntityType) => list.map((c) => {
         const forced = autoFillBaseValues({ ...c, entityType: entity }, sigFor(entity, c));
@@ -625,10 +629,6 @@ export function SpecOpeningBuilder({
         let componentChanged = false;
         if (entity === 'frame' && prev.doors.length > 0) {
           const next = { ...fields };
-          if (doorGauge && next['frame.frame_gauge'] && next['frame.frame_gauge'] !== doorGauge) {
-            delete next['frame.frame_gauge'];
-            componentChanged = true;
-          }
           if (doorMaterial && next['frame.frame_material'] && next['frame.frame_material'] !== doorMaterial) {
             delete next['frame.frame_material'];
             componentChanged = true;
@@ -637,15 +637,12 @@ export function SpecOpeningBuilder({
         }
         const add: Record<string, string> = {};
         for (const [fp, v] of Object.entries(forced)) {
-          // Frame gauge/material should inherit from the selected door spec
-          // when available. Never let base-rule defaults silently replace that
-          // with a different valid price row (e.g. CECO F 14ga CRS instead of
-          // the 18ga galvannealed frame implied by an 18ga galvannealed door).
+          // Frame material can stay aligned with the selected door spec when
+          // available, while frame gauge remains independently selectable.
           if (
             entity === 'frame'
             && (
-              fp === 'frame.frame_gauge'
-              || fp === 'frame.frame_material'
+              fp === 'frame.frame_material'
               || fp === 'frame.jamb_depth'
             )
           ) continue;
@@ -669,20 +666,7 @@ export function SpecOpeningBuilder({
   const spec = useMemo(() => buildNormalizedSpec(draft, mappings, ngpCatalog), [draft, mappings, ngpCatalog]);
   const ctx = useMemo(() => deriveBuilderContext(draft), [draft]);
   const hardwareIntel = useMemo(() => deriveHardwareIntelligence(draft, draft.hardware), [draft]);
-  const integrityIssues = useMemo(() => {
-    const base = validateBuilderIntegrity(draft);
-    const manufacturerIssues: IntegrityIssue[] = [];
-    for (const comp of [...draft.doors, ...draft.frames, ...draft.panels]) {
-      if (!comp.manufacturerId || !comp.priceBookDocumentId) {
-        manufacturerIssues.push({
-          code: `MANUFACTURER_BOOK_REQUIRED:${comp.id}`,
-          severity: 'block',
-          message: `${comp.label || comp.entityType}: select a manufacturer with a published price book.`,
-        });
-      }
-    }
-    return [...base, ...manufacturerIssues];
-  }, [draft]);
+  const integrityIssues = useMemo(() => validateBuilderIntegrity(draft), [draft]);
   const integrityBlocks = integrityIssues.filter((i) => i.severity === 'block');
   // NGP infill resolution per cutout (auto-select/filter/validate), for live preview + gating.
   const ngpIssues = useMemo(() => {
@@ -959,6 +943,7 @@ export function SpecOpeningBuilder({
             ngpIssues={ngpIssues}
             hardwareCategories={hardwareCategories}
             baseSignatures={baseSignatures}
+            mappings={mappings}
             manufacturerCatalogs={manufacturerCatalogs}
             specByEntity={specByEntity}
             variantsByCategory={variantsByCategory}
@@ -1090,6 +1075,7 @@ interface StepContentProps {
   ngpIssues: CompletenessIssue[];
   hardwareCategories: HardwareCategoryOption[];
   baseSignatures: BaseSignatures;
+  mappings: SpecFieldMapping[];
   manufacturerCatalogs: ManufacturerCatalogOption[];
   specByEntity: Map<SpecFieldEntity, SpecFieldWithPath[]>;
   variantsByCategory: Record<string, VariantOption[]>;
@@ -1125,6 +1111,7 @@ function StepContent(props: StepContentProps) {
   const { step } = props;
   switch (step) {
     case 'classify': return <ClassifyStep {...props} />;
+    case 'ratings': return <RatingsStep {...props} />;
     case 'doors': return <ComponentStep {...props} entity="door" specEntity="door" title="Doors" />;
     case 'frame': return <ComponentStep {...props} entity="frame" specEntity="frame" title="Frame" />;
     case 'panels': return <ComponentStep {...props} entity="panel" specEntity="panel" title="Panels" />;
@@ -1148,17 +1135,44 @@ const LEAF_FIXED_CONFIGS: OpeningConfigurationType[] = [
   'single', 'pair', 'double_egress', 'communicating', 'dutch',
 ];
 
+function nominalSegmentFromDigits(value: string): string | null {
+  const digits = value.replace(/\D/g, '');
+  if (digits.length === 2 || digits.length === 3) return normalizeCompactNominalDimension(digits);
+  return null;
+}
+
+function parseNominalSizeCode(value: string): { width: string; height: string } | null {
+  const digits = value.replace(/\D/g, '');
+  if (digits.length !== 4) return null;
+  const width = nominalSegmentFromDigits(digits.slice(0, 2));
+  const height = nominalSegmentFromDigits(digits.slice(2));
+  return width && height ? { width, height } : null;
+}
+
 function ClassifyStep({ draft, ctx, descriptors, specByEntity, onPatch, onSetOpeningField }: StepContentProps) {
   const opening = fieldsFor(specByEntity, 'opening').filter(
     // Drop Configuration (handled by dedicated controls), the fire-label boolean
     // (its own switch), and quantity (the dedicated "Quantity of identical
-    // openings" input at the top of this step) to avoid duplicate fields.
-    (f) => f.category !== 'Configuration' && f.fieldId !== 'OPN-013' && f.fieldId !== 'OPN-002',
+    // openings" input at the top of this step), plus Performance fields that
+    // now live in the early Labels & Ratings step, to avoid duplicate fields.
+    (f) => f.category !== 'Configuration' && f.category !== 'Performance' && f.fieldId !== 'OPN-013' && f.fieldId !== 'OPN-002',
   );
   const visible = opening.filter((f) => fieldTier(f, draft, ctx) !== 'hidden');
   const essential = visible.filter((f) => fieldTier(f, draft, ctx) === 'essential');
   const advanced = visible.filter((f) => fieldTier(f, draft, ctx) === 'advanced');
   const leafFixed = LEAF_FIXED_CONFIGS.includes(draft.configurationType);
+  const handleOpeningWidthChange = (value: string) => {
+    const parsed = parseNominalSizeCode(value);
+    if (parsed) {
+      onPatch({ openingWidth: parsed.width, openingHeight: parsed.height });
+      return;
+    }
+    onPatch({ openingWidth: nominalSegmentFromDigits(value) ?? value });
+  };
+
+  const handleOpeningHeightChange = (value: string) => {
+    onPatch({ openingHeight: nominalSegmentFromDigits(value) ?? value });
+  };
 
   const renderOpeningField = (f: SpecFieldWithPath) => (
     <SpecFieldInput key={f.id} field={f}
@@ -1205,24 +1219,19 @@ function ClassifyStep({ draft, ctx, descriptors, specByEntity, onPatch, onSetOpe
         </div>
         <div className="space-y-1">
           <Label className="text-xs text-muted-foreground">Nominal opening width</Label>
-          <Input value={draft.openingWidth} onChange={(e) => onPatch({ openingWidth: e.target.value })}
-            placeholder="e.g. 3-0" className="h-8 text-sm" />
+          <Input value={draft.openingWidth} onChange={(e) => handleOpeningWidthChange(e.target.value)}
+            placeholder="e.g. 3070 or 30" className="h-8 text-sm" />
         </div>
         <div className="space-y-1">
           <Label className="text-xs text-muted-foreground">Nominal opening height</Label>
-          <Input value={draft.openingHeight} onChange={(e) => onPatch({ openingHeight: e.target.value })}
-            placeholder="e.g. 7-0" className="h-8 text-sm" />
+          <Input value={draft.openingHeight} onChange={(e) => handleOpeningHeightChange(e.target.value)}
+            placeholder="e.g. 70" className="h-8 text-sm" />
         </div>
-      </div>
-
-      <div className="flex items-center gap-3 rounded-md border p-3">
-        <Switch checked={draft.fireLabelRequired} onCheckedChange={(v) => onPatch({ fireLabelRequired: v })} />
-        <Label className="text-sm">Fire label required</Label>
       </div>
 
       {essential.length > 0 && (
         <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Performance &amp; logistics</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Opening details</p>
           <div className="grid grid-cols-2 gap-3">{essential.map(renderOpeningField)}</div>
         </div>
       )}
@@ -1230,6 +1239,52 @@ function ClassifyStep({ draft, ctx, descriptors, specByEntity, onPatch, onSetOpe
       <AdvancedFields count={advanced.length}>
         <div className="grid grid-cols-2 gap-3">{advanced.map(renderOpeningField)}</div>
       </AdvancedFields>
+    </div>
+  );
+}
+
+function RatingsStep({ draft, ctx, descriptors, specByEntity, onPatch, onSetOpeningField }: StepContentProps) {
+  const performance = fieldsFor(specByEntity, 'opening', 'Performance').filter((f) => f.fieldId !== 'OPN-013');
+  const isFireField = (f: SpecFieldWithPath) => {
+    const text = `${f.fieldLabel} ${f.fieldPath ?? ''} ${f.fieldId}`.toLowerCase();
+    return text.includes('fire') || text.includes('label') || ['OPN-014', 'OPN-015', 'OPN-016'].includes(f.fieldId);
+  };
+  const renderOpeningField = (f: SpecFieldWithPath) => (
+    <SpecFieldInput key={f.id} field={f}
+      value={f.fieldPath ? draft.openingFields[f.fieldPath] ?? '' : ''}
+      onChange={onSetOpeningField}
+      derivedValue={f.fieldPath ? ctx.derivedOpeningFields[f.fieldPath]?.value ?? null : null}
+      derivedReason={f.fieldPath ? ctx.derivedOpeningFields[f.fieldPath]?.reason ?? null : null}
+      options={allowedEnumOptions(f, draft, ctx)}
+      optionLabels={optionLabelsForField(f, descriptors)} />
+  );
+  const fireFields = performance.filter(isFireField).filter((f) => fieldTier(f, draft, ctx) !== 'hidden');
+  const specialtyFields = performance.filter((f) => !isFireField(f)).filter((f) => fieldTier(f, draft, ctx) !== 'hidden');
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center gap-3 rounded-md border p-3">
+        <Switch checked={draft.fireLabelRequired} onCheckedChange={(v) => onPatch({ fireLabelRequired: v })} />
+        <Label className="text-sm">Fire label required</Label>
+      </div>
+
+      {draft.fireLabelRequired && fireFields.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Fire label</p>
+          <div className="grid grid-cols-2 gap-3">{fireFields.map(renderOpeningField)}</div>
+        </div>
+      )}
+
+      {specialtyFields.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Ratings</p>
+          <div className="grid grid-cols-2 gap-3">{specialtyFields.map(renderOpeningField)}</div>
+        </div>
+      )}
+
+      {!draft.fireLabelRequired && specialtyFields.length === 0 && (
+        <p className="text-sm text-muted-foreground italic">No additional rating fields are configured.</p>
+      )}
     </div>
   );
 }
@@ -1259,8 +1314,8 @@ interface ComponentStepProps extends StepContentProps {
 
 function ComponentStep(props: ComponentStepProps) {
   const {
-    draft, ctx, descriptors, specByEntity, baseSignatures, manufacturerCatalogs,
-    entity, specEntity, title, onAddComponent, onRemoveComponent,
+    draft, ctx, descriptors, specByEntity, baseSignatures, mappings, ngpCatalog, manufacturerCatalogs,
+    entity, specEntity, title, liteMode, onAddComponent, onRemoveComponent,
     onUpdateComponentField, onUpdateComponentMeta,
   } = props;
   const key = entity === 'door' ? 'doors' : entity === 'frame' ? 'frames' : entity === 'panel' ? 'panels' : 'lites';
@@ -1284,11 +1339,21 @@ function ComponentStep(props: ComponentStepProps) {
       {components.map((comp) => (
         <ComponentCard key={comp.id} comp={comp} entity={entity} fields={fields}
           draft={draft} ctx={ctx} descriptors={descriptors} signatures={signatures}
-          manufacturerCatalogs={manufacturerCatalogs}
           onRemoveComponent={onRemoveComponent}
           onUpdateComponentField={onUpdateComponentField}
           onUpdateComponentMeta={onUpdateComponentMeta} />
       ))}
+
+      {!liteMode && (entity === 'door' || entity === 'frame' || entity === 'panel') && (
+        <VendorPackageCandidatesPanel
+          draft={draft}
+          mappings={mappings}
+          ngpCatalog={ngpCatalog}
+          manufacturerCatalogs={manufacturerCatalogs}
+          onUpdateComponentField={onUpdateComponentField}
+          onUpdateComponentMeta={onUpdateComponentMeta}
+        />
+      )}
     </div>
   );
 }
@@ -1301,7 +1366,6 @@ interface ComponentCardProps {
   ctx: BuilderContext;
   descriptors: OptionDescriptors | null;
   signatures: BaseSignature[];
-  manufacturerCatalogs: ManufacturerCatalogOption[];
   onRemoveComponent: (entity: RuleEntityType, id: string) => void;
   onUpdateComponentField: (entity: RuleEntityType, id: string, path: string, value: string) => void;
   onUpdateComponentMeta: (entity: RuleEntityType, id: string, p: Partial<ComponentDraft>) => void;
@@ -1309,21 +1373,12 @@ interface ComponentCardProps {
 
 function ComponentCard({
   comp, entity, fields, draft, ctx, descriptors, signatures,
-  manufacturerCatalogs,
   onRemoveComponent, onUpdateComponentField, onUpdateComponentMeta,
 }: ComponentCardProps) {
   const derived = ctx.derivedByComponent[comp.id] ?? {};
   const tierOf = (f: SpecFieldWithPath) => fieldTier(f, draft, ctx, comp);
   const essential = fields.filter((f) => tierOf(f) === 'essential');
   const advanced = fields.filter((f) => tierOf(f) === 'advanced');
-  const pricedEntity = (
-    entity === 'door' || entity === 'frame' || entity === 'panel'
-      ? entity
-      : null
-  ) as ManufacturerPricedEntity | null;
-  const availableManufacturers = pricedEntity
-    ? manufacturerCatalogs.filter((m) => !!m.documentIds[pricedEntity])
-    : [];
   const signaturesForComponent = comp.priceBookDocumentId
     ? signatures.filter((sig) => sig.__priceBookId === comp.priceBookDocumentId)
     : signatures;
@@ -1377,47 +1432,230 @@ function ComponentCard({
         </Button>
       </div>
 
-      {pricedEntity && (
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          <div className="space-y-1">
-            <Label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Manufacturer / price book
-            </Label>
-            <Select
-              value={comp.manufacturerId ?? ''}
-              onValueChange={(manufacturerId) => {
-                const selected = availableManufacturers.find((m) => m.manufacturerId === manufacturerId);
-                onUpdateComponentMeta(entity, comp.id, {
-                  manufacturerId,
-                  priceBookDocumentId: selected?.documentIds[pricedEntity] ?? null,
-                });
-              }}
-            >
-              <SelectTrigger className="h-8 text-sm">
-                <SelectValue placeholder="Select manufacturer…" />
-              </SelectTrigger>
-              <SelectContent>
-                {availableManufacturers.map((m) => (
-                  <SelectItem key={m.manufacturerId} value={m.manufacturerId}>
-                    {m.manufacturerName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {comp.manufacturerId && comp.priceBookDocumentId && (
-              <p className="text-[10px] text-muted-foreground">
-                {availableManufacturers.find((m) => m.manufacturerId === comp.manufacturerId)?.titles[pricedEntity] ?? 'Published price book'}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
       {byCategory(essential)}
 
       <AdvancedFields count={advanced.length}>
         <div className="space-y-3">{byCategory(advanced)}</div>
       </AdvancedFields>
+    </div>
+  );
+}
+
+function packageCurrency(n: number): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+}
+
+function VendorPackageCandidatesPanel({
+  draft,
+  mappings,
+  ngpCatalog,
+  manufacturerCatalogs,
+  onUpdateComponentField,
+  onUpdateComponentMeta,
+}: Pick<StepContentProps,
+  'draft' | 'mappings' | 'ngpCatalog' | 'manufacturerCatalogs' | 'onUpdateComponentField' | 'onUpdateComponentMeta'
+>) {
+  const [result, setResult] = useState<VendorCandidateResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshIndex, setRefreshIndex] = useState(0);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const candidateKey = useMemo(() => JSON.stringify({
+    configurationType: draft.configurationType,
+    leafCount: draft.leafCount,
+    openingWidth: draft.openingWidth,
+    openingHeight: draft.openingHeight,
+    fireLabelRequired: draft.fireLabelRequired,
+    openingFields: draft.openingFields,
+    doors: draft.doors.map((d) => ({ fields: d.fields, qty: d.quantity })),
+    frames: draft.frames.map((f) => ({ fields: f.fields, qty: f.quantity })),
+    panels: draft.panels.map((p) => ({ fields: p.fields, qty: p.quantity })),
+    cutouts: draft.cutouts,
+  }), [draft]);
+
+  const loadCandidates = useCallback(async () => {
+    if (mappings.length === 0 || manufacturerCatalogs.length === 0) {
+      setResult({
+        status: 'incomplete',
+        message: 'No published manufacturer catalogs are available yet.',
+        candidates: [],
+      });
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await resolveVendorPackageCandidates({
+        draft,
+        mappings,
+        ngpCatalog,
+        manufacturerCatalogs,
+      });
+      setResult(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to resolve vendor packages.');
+    } finally {
+      setLoading(false);
+    }
+  }, [draft, mappings, ngpCatalog, manufacturerCatalogs]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void loadCandidates(); }, 650);
+    return () => window.clearTimeout(timer);
+  }, [candidateKey, refreshIndex, loadCandidates]);
+
+  const applyPackage = (candidate: VendorPackageCandidate) => {
+    const apply = (
+      entity: RuleEntityType,
+      components: ComponentDraft[],
+      seriesPath: string,
+      series: string | null | undefined,
+      priceBookDocumentId: string | null | undefined,
+    ) => {
+      if (!priceBookDocumentId) return;
+      for (const component of components) {
+        onUpdateComponentMeta(entity, component.id, {
+          manufacturerId: candidate.manufacturerId,
+          priceBookDocumentId,
+        });
+        if (series) onUpdateComponentField(entity, component.id, seriesPath, series);
+      }
+    };
+    apply('door', draft.doors, 'door.door_series_construction', candidate.resolvedSeries.door, candidate.priceBookDocumentIds.door);
+    apply('frame', draft.frames, 'frame.frame_series', candidate.resolvedSeries.frame, candidate.priceBookDocumentIds.frame);
+    apply('panel', draft.panels, 'panel.panel_construction_series', candidate.resolvedSeries.panel, candidate.priceBookDocumentIds.panel);
+  };
+
+  const isSelected = (candidate: VendorPackageCandidate): boolean => {
+    const match = (
+      components: ComponentDraft[],
+      entity: 'door' | 'frame' | 'panel',
+      seriesPath: string,
+    ) => components.every((component) =>
+      component.manufacturerId === candidate.manufacturerId &&
+      component.priceBookDocumentId === candidate.priceBookDocumentIds[entity] &&
+      (!candidate.resolvedSeries[entity] || component.fields[seriesPath] === candidate.resolvedSeries[entity]),
+    );
+    return match(draft.doors, 'door', 'door.door_series_construction') &&
+      match(draft.frames, 'frame', 'frame.frame_series') &&
+      match(draft.panels, 'panel', 'panel.panel_construction_series');
+  };
+
+  const candidates = result?.candidates ?? [];
+  const priced = candidates.filter((c) => c.status === 'priced');
+  const exceptions = candidates.filter((c) => c.status !== 'priced').slice(0, 6);
+  const displayCandidates = [...priced.slice(0, 6), ...exceptions];
+
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Matching vendor packages</h3>
+          <p className="text-[11px] text-muted-foreground">
+            Derived from the configured door, frame, panel, labels, and cutouts.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => setRefreshIndex((v) => v + 1)} disabled={loading}>
+          {loading ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1" />}
+          Refresh
+        </Button>
+      </div>
+
+      {error && (
+        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {!error && result?.message && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/50 bg-amber-50/60 p-2 text-xs text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/10 dark:text-amber-300">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>{result.message}</span>
+        </div>
+      )}
+
+      {loading && !result && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Checking published price books…
+        </div>
+      )}
+
+      {!loading && displayCandidates.length === 0 && !result?.message && (
+        <p className="text-sm text-muted-foreground italic">Complete required spec fields to see vendor packages.</p>
+      )}
+
+      {displayCandidates.length > 0 && (
+        <div className="space-y-2">
+          {displayCandidates.map((candidate) => {
+            const selected = isSelected(candidate);
+            const isOpen = expanded[candidate.id] ?? false;
+            return (
+              <div key={candidate.id} className={cn(
+                'rounded-md border bg-background p-3 space-y-2',
+                selected && 'border-primary ring-1 ring-primary',
+              )}>
+                <div className="flex items-start gap-3">
+                  <button
+                    type="button"
+                    className="mt-0.5 text-muted-foreground hover:text-foreground"
+                    onClick={() => setExpanded((prev) => ({ ...prev, [candidate.id]: !isOpen }))}
+                  >
+                    {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">{candidate.manufacturerName}</span>
+                      <Badge variant={candidate.status === 'priced' ? 'secondary' : candidate.status === 'invalid' ? 'destructive' : 'outline'} className="text-[10px]">
+                        {candidate.status.replace(/_/g, ' ')}
+                      </Badge>
+                      {selected && <Badge className="text-[10px]">Selected</Badge>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {candidate.resolvedSeries.door && <Badge variant="outline" className="text-[10px]">Door {candidate.resolvedSeries.door}</Badge>}
+                      {candidate.resolvedSeries.frame && <Badge variant="outline" className="text-[10px]">Frame {candidate.resolvedSeries.frame}</Badge>}
+                      {candidate.resolvedSeries.panel && <Badge variant="outline" className="text-[10px]">Panel {candidate.resolvedSeries.panel}</Badge>}
+                    </div>
+                    {candidate.manualQuoteReason && (
+                      <p className="mt-1 text-[11px] text-muted-foreground">{candidate.manualQuoteReason}</p>
+                    )}
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="text-sm font-semibold tabular-nums">{packageCurrency(candidate.totalSell)}</div>
+                    <div className="text-[10px] text-muted-foreground">sell total</div>
+                  </div>
+                  <Button
+                    size="sm"
+                    disabled={candidate.status !== 'priced' || selected}
+                    variant={selected ? 'secondary' : 'default'}
+                    onClick={() => applyPackage(candidate)}
+                  >
+                    {selected ? 'Applied' : 'Apply'}
+                  </Button>
+                </div>
+                {isOpen && (
+                  <div className="grid gap-2 border-t pt-2 sm:grid-cols-2">
+                    {candidate.components.map((component) => (
+                      <div key={`${candidate.id}-${component.entityType}`} className="rounded border bg-muted/20 px-2 py-1.5 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium capitalize">{component.entityType}</span>
+                          <span className="tabular-nums">{packageCurrency(component.sellTotal)}</span>
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-muted-foreground">
+                          {component.resolvedSeries ? `${component.resolvedSeries} · ` : ''}
+                          {component.priceBookTitle ?? 'Published price book'}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1589,8 +1827,9 @@ function CutoutCard({
         )}
         {resolved.orderWidthIn != null && (
           <div className="text-muted-foreground">
-            Order size {resolved.orderWidthIn}×{resolved.orderHeightIn}"
+            Cutout {cutout.cutoutWidth || '—'}×{cutout.cutoutHeight || '—'}" · order kit {resolved.orderWidthIn}×{resolved.orderHeightIn}"
             {resolved.exposedWidthIn != null && ` · exposed glass ${resolved.exposedWidthIn}×${resolved.exposedHeightIn}"`}
+            {isLite && (resolved.glass?.model ?? cutout.glassType ?? cutout.glassModel) && ` · glass ${resolved.glass?.model ?? cutout.glassType ?? cutout.glassModel}`}
           </div>
         )}
         {resolved.components.length > 0 && (

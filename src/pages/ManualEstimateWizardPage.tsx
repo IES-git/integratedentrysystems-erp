@@ -4,11 +4,13 @@ import { ArrowLeft, PenLine, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { WizardSteps, type WizardStep } from '@/components/estimates/wizard/WizardSteps';
 import { CustomerStep } from '@/components/estimates/wizard/CustomerStep';
+import { JobSetupStep } from '@/components/estimates/wizard/JobSetupStep';
 import { OpeningsStep } from '@/components/estimates/wizard/OpeningsStep';
 import { ReviewStep } from '@/components/estimates/wizard/ReviewStep';
 import { useToast } from '@/hooks/use-toast';
 import {
   createManualEstimate,
+  getEstimate,
   updateEstimate as apiUpdateEstimate,
   getEstimateOpenings,
 } from '@/lib/estimates-api';
@@ -18,13 +20,91 @@ import {
 import { estimateGrandTotal } from '@/lib/cpq/opening-totals';
 import type { BuilderStepTarget } from '@/lib/cpq/completeness';
 import { supabase } from '@/lib/supabase';
-import type { Company } from '@/types';
+import type { Company, Estimate, EstimateJobInfo } from '@/types';
 
 const WIZARD_STEPS: WizardStep[] = [
   { id: 'customer', title: 'Customer', description: 'Assign a customer' },
+  { id: 'job', title: 'Job Setup', description: 'Project details' },
   { id: 'openings', title: 'Openings', description: 'Build door and frame openings' },
   { id: 'review', title: 'Review', description: 'Review pricing and totals' },
 ];
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function emptyJobInfo(): EstimateJobInfo {
+  return {
+    jobName: null,
+    jobLocation: null,
+    jobNumber: null,
+    customerPo: null,
+    quoteDate: todayIsoDate(),
+    shippingMethod: null,
+    terms: null,
+    delivery: null,
+    shipToSource: 'customer_shipping',
+    shipToAddress: null,
+    shipToCity: null,
+    shipToState: null,
+    shipToZip: null,
+    customerContactId: null,
+    customerRepName: null,
+    customerRepPhone: null,
+    customerRepEmail: null,
+    internalNotes: null,
+  };
+}
+
+function jobInfoFromEstimate(estimate: Estimate): EstimateJobInfo {
+  return {
+    jobName: estimate.jobName,
+    jobLocation: estimate.jobLocation,
+    jobNumber: estimate.jobNumber,
+    customerPo: estimate.customerPo,
+    quoteDate: estimate.quoteDate ?? todayIsoDate(),
+    shippingMethod: estimate.shippingMethod,
+    terms: estimate.terms,
+    delivery: estimate.delivery,
+    shipToSource: estimate.shipToSource ?? 'customer_shipping',
+    shipToAddress: estimate.shipToAddress,
+    shipToCity: estimate.shipToCity,
+    shipToState: estimate.shipToState,
+    shipToZip: estimate.shipToZip,
+    customerContactId: estimate.customerContactId,
+    customerRepName: estimate.customerRepName,
+    customerRepPhone: estimate.customerRepPhone,
+    customerRepEmail: estimate.customerRepEmail,
+    internalNotes: estimate.internalNotes,
+  };
+}
+
+function cleanJobInfo(jobInfo: EstimateJobInfo): EstimateJobInfo {
+  const cleanText = (value: string | null) => {
+    const trimmed = value?.trim() ?? '';
+    return trimmed ? trimmed : null;
+  };
+  return {
+    jobName: cleanText(jobInfo.jobName),
+    jobLocation: cleanText(jobInfo.jobLocation),
+    jobNumber: cleanText(jobInfo.jobNumber),
+    customerPo: cleanText(jobInfo.customerPo),
+    quoteDate: cleanText(jobInfo.quoteDate),
+    shippingMethod: cleanText(jobInfo.shippingMethod),
+    terms: cleanText(jobInfo.terms),
+    delivery: cleanText(jobInfo.delivery),
+    shipToSource: jobInfo.shipToSource ?? 'customer_shipping',
+    shipToAddress: cleanText(jobInfo.shipToAddress),
+    shipToCity: cleanText(jobInfo.shipToCity),
+    shipToState: cleanText(jobInfo.shipToState),
+    shipToZip: cleanText(jobInfo.shipToZip),
+    customerContactId: cleanText(jobInfo.customerContactId),
+    customerRepName: cleanText(jobInfo.customerRepName),
+    customerRepPhone: cleanText(jobInfo.customerRepPhone),
+    customerRepEmail: cleanText(jobInfo.customerRepEmail),
+    internalNotes: cleanText(jobInfo.internalNotes),
+  };
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapCompanyRow(row: any): Company {
@@ -61,11 +141,13 @@ export default function ManualEstimateWizardPage() {
   const parsedStepParam = explicitStepParam !== null ? parseInt(explicitStepParam, 10) : NaN;
   const inferredStep = existingId
     ? location.pathname.endsWith('/review')
-      ? 2
-      : 1
+      ? 3
+      : 2
     : 0;
   const initialStep =
-    Number.isFinite(parsedStepParam) && parsedStepParam >= 0 ? parsedStepParam : inferredStep;
+    Number.isFinite(parsedStepParam) && parsedStepParam >= 0
+      ? Math.min(parsedStepParam, WIZARD_STEPS.length - 1)
+      : inferredStep;
   const isEditingEstimate = Boolean(existingId);
 
   const [loading, setLoading] = useState(true);
@@ -74,6 +156,7 @@ export default function ManualEstimateWizardPage() {
   const [currentStepIndex, setCurrentStepIndex] = useState(initialStep);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [noCustomer, setNoCustomer] = useState(false);
+  const [jobInfo, setJobInfo] = useState<EstimateJobInfo>(() => emptyJobInfo());
   const [companies, setCompanies] = useState<Company[]>([]);
   const [saving, setSaving] = useState(false);
   // When the user clicks "Edit configuration" on the Review step, we store the
@@ -98,12 +181,8 @@ export default function ManualEstimateWizardPage() {
 
         if (existingId) {
           // Load the existing estimate to pre-populate customer selection
-          const [estimateResult, companiesResult] = await Promise.all([
-            supabase
-              .from('estimates')
-              .select('id, company_id')
-              .eq('id', existingId)
-              .single(),
+          const [estimate, companiesResult] = await Promise.all([
+            getEstimate(existingId),
             supabase
               .from('companies')
               .select('*')
@@ -112,21 +191,21 @@ export default function ManualEstimateWizardPage() {
               .order('name'),
           ]);
 
-          if (estimateResult.error || !estimateResult.data) {
+          if (!estimate) {
             throw new Error('Estimate not found');
           }
 
           setEstimateId(existingId);
-          setSelectedCustomerId(estimateResult.data.company_id ?? null);
-          setNoCustomer(!estimateResult.data.company_id);
+          setSelectedCustomerId(estimate.companyId ?? null);
+          setNoCustomer(!estimate.companyId);
+          setJobInfo(jobInfoFromEstimate(estimate));
 
           if (companiesResult.data) {
             setCompanies(companiesResult.data.map(mapCompanyRow));
           }
         } else {
-          // New estimate — just load companies. The estimate record will be
-          // created lazily when the user advances to the Openings step so
-          // that abandoning the Customer step does not leave orphan records.
+          // New estimate — just load companies. The estimate record is created
+          // after Job Setup so abandoning Customer selection does not leave an orphan.
           const companiesResult = await supabase
             .from('companies')
             .select('*')
@@ -156,9 +235,51 @@ export default function ManualEstimateWizardPage() {
     setNoCustomer(isNoCustomer);
   }, []);
 
-  const handleNextStep = () => {
-    // No DB write here — estimate is created lazily the first time the user
-    // opens an add-opening dialog (inside OpeningsStep via createEstimate).
+  const saveEstimateShell = useCallback(async (): Promise<string> => {
+    const cleanedJobInfo = cleanJobInfo(jobInfo);
+    if (!cleanedJobInfo.jobName) {
+      throw new Error('Job name is required.');
+    }
+
+    let finalId = estimateId ?? existingId ?? null;
+    if (!finalId) {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        navigate('/login');
+        throw new Error('Not authenticated');
+      }
+      const created = await createManualEstimate(user.id);
+      finalId = created.estimateId;
+      setEstimateId(finalId);
+    }
+
+    await apiUpdateEstimate(finalId, {
+      companyId: noCustomer ? null : selectedCustomerId,
+      ...cleanedJobInfo,
+    });
+    setJobInfo(cleanedJobInfo);
+    return finalId;
+  }, [estimateId, existingId, jobInfo, navigate, noCustomer, selectedCustomerId]);
+
+  const handleNextStep = async () => {
+    if (currentStepIndex === 1) {
+      setSaving(true);
+      try {
+        await saveEstimateShell();
+      } catch (err) {
+        toast({
+          title: 'Job setup required',
+          description: err instanceof Error ? err.message : 'Please complete the job setup fields.',
+          variant: 'destructive',
+        });
+        setSaving(false);
+        return;
+      }
+      setSaving(false);
+    }
+
     if (currentStepIndex < WIZARD_STEPS.length - 1) {
       setCurrentStepIndex((prev) => prev + 1);
     }
@@ -175,15 +296,9 @@ export default function ManualEstimateWizardPage() {
   // OpeningsStep's useEffect deps stay stable.
   const createEstimate = useCallback(async (): Promise<string> => {
     if (estimateId) return estimateId;
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) { navigate('/login'); throw new Error('Not authenticated'); }
-    const { estimateId: id } = await createManualEstimate(user.id);
-    setEstimateId(id);
-    return id;
+    return saveEstimateShell();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [estimateId]);
+  }, [estimateId, saveEstimateShell]);
 
   // Called from OpeningsStep — advances to Review step
   const handleAdvanceToReview = async () => {
@@ -196,13 +311,26 @@ export default function ManualEstimateWizardPage() {
       });
       return;
     }
-    // Save customer assignment on the way through
+    if (!cleanJobInfo(jobInfo).jobName) {
+      toast({
+        title: 'Job setup required',
+        description: 'Add a job name before reviewing pricing.',
+        variant: 'destructive',
+      });
+      setCurrentStepIndex(1);
+      return;
+    }
+
+    // Save customer/job assignment on the way through
     setSaving(true);
     try {
-      await apiUpdateEstimate(finalId, { companyId: noCustomer ? null : selectedCustomerId });
+      await apiUpdateEstimate(finalId, {
+        companyId: noCustomer ? null : selectedCustomerId,
+        ...cleanJobInfo(jobInfo),
+      });
       // Store the ID so ReviewStep can use it
       if (!estimateId && finalId) setEstimateId(finalId);
-      setCurrentStepIndex(2);
+      setCurrentStepIndex(3);
     } catch (err) {
       toast({
         title: 'Error',
@@ -243,6 +371,7 @@ export default function ManualEstimateWizardPage() {
 
       await apiUpdateEstimate(finalId, {
         companyId: noCustomer ? null : selectedCustomerId,
+        ...cleanJobInfo(jobInfo),
         totalPrice,
       });
       toast({
@@ -339,11 +468,22 @@ export default function ManualEstimateWizardPage() {
           )}
 
           {currentStepIndex === 1 && (
+            <JobSetupStep
+              value={jobInfo}
+              selectedCompany={companies.find((company) => company.id === selectedCustomerId) ?? null}
+              onChange={setJobInfo}
+              onBack={handlePrevStep}
+              onNext={handleNextStep}
+              saving={saving}
+            />
+          )}
+
+          {currentStepIndex === 2 && (
             <OpeningsStep
               estimateId={estimateId ?? existingId}
               createEstimate={!existingId ? createEstimate : undefined}
-              onBack={isEditingEstimate ? () => navigate('/app/estimates') : handlePrevStep}
-              backLabel={isEditingEstimate ? 'Back to Estimates' : 'Back to Customer'}
+              onBack={handlePrevStep}
+              backLabel="Back to Job Setup"
               onFinish={handleAdvanceToReview}
               finishLabel={saving ? 'Saving...' : 'Review & Pricing'}
               finishLoading={saving}
@@ -353,10 +493,10 @@ export default function ManualEstimateWizardPage() {
             />
           )}
 
-          {currentStepIndex === 2 && (
+          {currentStepIndex === 3 && (
             <ReviewStep
               estimateId={(estimateId ?? existingId)!}
-              onBack={() => setCurrentStepIndex(1)}
+              onBack={() => setCurrentStepIndex(2)}
               onFinish={handleFinish}
               finishLoading={saving}
               finishLabel={
@@ -371,7 +511,7 @@ export default function ManualEstimateWizardPage() {
               onEditOpening={(opening, target) => {
                 setPendingEditOpening(opening);
                 setPendingEditStep(target ?? null);
-                setCurrentStepIndex(1);
+                setCurrentStepIndex(2);
               }}
             />
           )}

@@ -218,6 +218,36 @@ describe('pricing engine core', () => {
     expect(res.lines.find((l) => l.lineType === 'BASE')?.sellPrice).toBe(500);
   });
 
+  it('matches A40 and A60 material selections against Galvannealed rules', () => {
+    const ruleSet: LoadedRuleSet = {
+      rules: [rule({
+        id: 'base', amount: 625,
+        conditions: [{
+          id: 'c1', priceRuleId: 'base', conditionGroup: 0, fieldId: null,
+          fieldPath: 'door.door_material', operator: 'EQ', valueType: 'TEXT',
+          value1: 'Galvannealed', value2: null, unit: null, inclusiveMin: null, inclusiveMax: null,
+          normalizedValue: null, sourcePhrase: null, derivedFlag: false, nullBehavior: 'FAIL', createdAt: '',
+        }],
+      })],
+      dependencyRules: [],
+    };
+
+    for (const material of ['A40', 'A60']) {
+      const spec = baseSpec({
+        components: [{
+          id: `d-${material}`,
+          entityType: 'door',
+          label: 'Door',
+          quantity: 1,
+          code: 'H',
+          fields: { 'door.door_material': material },
+        }],
+      });
+      const res = priceOpeningCore(spec, ruleSet, emptyCatalog, new Map(), opts);
+      expect(res.lines.find((l) => l.lineType === 'BASE')?.sellPrice).toBe(625);
+    }
+  });
+
   it('matches frame jamb-depth LTE conditions against mixed fractional inch values', () => {
     const ruleSet: LoadedRuleSet = {
       rules: [rule({

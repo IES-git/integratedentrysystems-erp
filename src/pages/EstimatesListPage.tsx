@@ -112,8 +112,18 @@ export default function EstimatesListPage() {
     if (!query) return true;
     const companyName = getCompanyName(estimate?.companyId || null) || '';
     const itemCodes = estimate.items.map((i) => i.canonicalCode).filter(Boolean);
+    const openingNames = estimate.openingNames ?? [];
+    const spec = estimate.specSummary;
     return (
       companyName.toLowerCase().includes(query) ||
+      (estimate.jobName ?? '').toLowerCase().includes(query) ||
+      (estimate.customerPo ?? '').toLowerCase().includes(query) ||
+      (estimate.jobNumber ?? '').toLowerCase().includes(query) ||
+      (estimate.latestQuoteStatus ?? '').toLowerCase().includes(query) ||
+      openingNames.some((name) => name.toLowerCase().includes(query)) ||
+      [spec?.door, spec?.frame, spec?.size, spec?.config, spec?.wall]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(query)) ||
       itemCodes.some((code) => code.toLowerCase().includes(query))
     );
   });
@@ -154,7 +164,7 @@ export default function EstimatesListPage() {
             <div className="relative w-full sm:w-56">
               <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Search..."
+                placeholder="Search jobs, PO, customer..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="h-8 pl-8 text-sm"
