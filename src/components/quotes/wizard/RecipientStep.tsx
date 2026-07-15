@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Search, User, Building2, CheckCircle2, Users, ArrowLeft, UserPlus, Plus, Loader2, AlertCircle } from 'lucide-react';
+import { Search, User, CheckCircle2, Users, ArrowLeft, Plus, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -13,10 +13,9 @@ interface RecipientStepProps {
   companies: Company[];
   useCurrentRecipients: boolean;
   selectedCustomerId: string | null;
-  selectedManufacturerId: string | null;
+  customerRequired: boolean;
   onUseCurrentChange: (value: boolean) => void;
   onCustomerChange: (id: string | null) => void;
-  onManufacturerChange: (id: string | null) => void;
   onBack: () => void;
   onNext: () => void;
 }
@@ -26,15 +25,13 @@ export function RecipientStep({
   companies,
   useCurrentRecipients,
   selectedCustomerId,
-  selectedManufacturerId,
+  customerRequired,
   onUseCurrentChange,
   onCustomerChange,
-  onManufacturerChange,
   onBack,
   onNext,
 }: RecipientStepProps) {
   const [customerSearch, setCustomerSearch] = useState('');
-  const [manufacturerSearch, setManufacturerSearch] = useState('');
 
   // Inline create state — shared local list
   const [localCompanies, setLocalCompanies] = useState<Company[]>([]);
@@ -45,21 +42,11 @@ export function RecipientStep({
   const [isCreatingCustomer, setIsCreatingCustomer] = useState(false);
   const [createCustomerError, setCreateCustomerError] = useState<string | null>(null);
 
-  // Manufacturer inline create
-  const [showCreateManufacturer, setShowCreateManufacturer] = useState(false);
-  const [newManufacturerName, setNewManufacturerName] = useState('');
-  const [isCreatingManufacturer, setIsCreatingManufacturer] = useState(false);
-  const [createManufacturerError, setCreateManufacturerError] = useState<string | null>(null);
-
   const allCompanies = useMemo(() => [...companies, ...localCompanies], [companies, localCompanies]);
 
-  // Customers are companies we sell to; manufacturers are companies we source product from.
+  // Customers are companies we sell to.
   const allCustomers = useMemo(
     () => allCompanies.filter((c) => c.companyType === 'customer' || c.companyType === 'both'),
-    [allCompanies]
-  );
-  const allManufacturers = useMemo(
-    () => allCompanies.filter((c) => c.companyType === 'manufacturer' || c.companyType === 'both'),
     [allCompanies]
   );
 
@@ -69,16 +56,8 @@ export function RecipientStep({
     return allCustomers.filter((c) => c.name.toLowerCase().includes(query));
   }, [allCustomers, customerSearch]);
 
-  const filteredManufacturers = useMemo(() => {
-    if (!manufacturerSearch.trim()) return allManufacturers;
-    const query = manufacturerSearch.toLowerCase();
-    return allManufacturers.filter((m) => m.name.toLowerCase().includes(query));
-  }, [allManufacturers, manufacturerSearch]);
-
   const selectedCustomer = allCompanies.find((c) => c.id === selectedCustomerId);
-  const selectedManufacturer = allCompanies.find((m) => m.id === selectedManufacturerId);
-
-  const canProceed = selectedCustomerId || selectedManufacturerId;
+  const canProceed = !customerRequired || Boolean(selectedCustomerId);
 
   const handleCreateCustomer = async () => {
     const name = newCustomerName.trim();
@@ -95,24 +74,6 @@ export function RecipientStep({
       setCreateCustomerError(err instanceof Error ? err.message : 'Failed to create customer');
     } finally {
       setIsCreatingCustomer(false);
-    }
-  };
-
-  const handleCreateManufacturer = async () => {
-    const name = newManufacturerName.trim();
-    if (!name) return;
-    setIsCreatingManufacturer(true);
-    setCreateManufacturerError(null);
-    try {
-      const newCompany = await createCompany({ name, companyType: 'manufacturer' });
-      setLocalCompanies((prev) => [...prev, newCompany]);
-      onManufacturerChange(newCompany.id);
-      setShowCreateManufacturer(false);
-      setNewManufacturerName('');
-    } catch (err) {
-      setCreateManufacturerError(err instanceof Error ? err.message : 'Failed to create manufacturer');
-    } finally {
-      setIsCreatingManufacturer(false);
     }
   };
 
@@ -140,7 +101,7 @@ export function RecipientStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Select the customer and/or manufacturer for this quote.
+        Confirm the customer for this quote. Manufacturer routing is handled separately.
       </p>
 
       {/* Use Current Customer Option */}
@@ -184,7 +145,7 @@ export function RecipientStep({
         </div>
       </div>
 
-      {/* Select Different Recipients */}
+      {/* Select Different Customer */}
       <div
         onClick={() => onUseCurrentChange(false)}
         className={cn(
@@ -199,7 +160,7 @@ export function RecipientStep({
           <div className="flex-1">
             <div className="flex items-center gap-2">
               <Users className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium">Select Different Recipients</span>
+              <span className="font-medium">Select Different Customer</span>
             </div>
 
             {!useCurrentRecipients && (
@@ -298,96 +259,6 @@ export function RecipientStep({
                   )}
                 </div>
 
-                {/* Manufacturer Selection */}
-                <div className="space-y-2">
-                  <Label className="text-xs font-medium text-muted-foreground">
-                    Manufacturer (Optional)
-                  </Label>
-                  <div className="relative">
-                    <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                    <Input
-                      placeholder="Search manufacturers..."
-                      value={manufacturerSearch}
-                      onChange={(e) => setManufacturerSearch(e.target.value)}
-                      className="pl-8 h-9"
-                    />
-                  </div>
-                  <ScrollArea className="h-32 rounded-md border bg-background">
-                    <div className="p-1">
-                      <button
-                        onClick={() => onManufacturerChange(null)}
-                        className={cn(
-                          'w-full flex items-center gap-2 rounded px-3 py-2 text-left text-sm transition-colors',
-                          selectedManufacturerId === null
-                            ? 'bg-primary text-primary-foreground'
-                            : 'hover:bg-muted text-muted-foreground italic'
-                        )}
-                      >
-                        No manufacturer
-                      </button>
-                      {filteredManufacturers.map((manufacturer) => (
-                        <button
-                          key={manufacturer.id}
-                          onClick={() => onManufacturerChange(manufacturer.id)}
-                          className={cn(
-                            'w-full flex items-center gap-2 rounded px-3 py-2 text-left transition-colors',
-                            selectedManufacturerId === manufacturer.id
-                              ? 'bg-primary text-primary-foreground'
-                              : 'hover:bg-muted'
-                          )}
-                        >
-                          <span className="truncate text-sm font-medium">
-                            {manufacturer.name}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </ScrollArea>
-
-                  {/* Create New Manufacturer inline form */}
-                  {showCreateManufacturer ? (
-                    <div className="rounded-md border border-dashed p-3 space-y-2 bg-muted/30">
-                      <Label className="text-xs">New Manufacturer Name <span className="text-destructive">*</span></Label>
-                      <Input
-                        placeholder="e.g. Steelcraft"
-                        value={newManufacturerName}
-                        onChange={(e) => setNewManufacturerName(e.target.value)}
-                        className="h-8 text-sm"
-                        autoFocus
-                        onKeyDown={(e) => { if (e.key === 'Enter') handleCreateManufacturer(); if (e.key === 'Escape') setShowCreateManufacturer(false); }}
-                      />
-                      {createManufacturerError && (
-                        <p className="text-xs text-destructive flex items-center gap-1">
-                          <AlertCircle className="h-3 w-3" />
-                          {createManufacturerError}
-                        </p>
-                      )}
-                      <div className="flex gap-2">
-                        <Button size="sm" onClick={handleCreateManufacturer} disabled={!newManufacturerName.trim() || isCreatingManufacturer} className="flex-1">
-                          {isCreatingManufacturer ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Create & Select'}
-                        </Button>
-                        <Button size="sm" variant="ghost" onClick={() => { setShowCreateManufacturer(false); setNewManufacturerName(''); setCreateManufacturerError(null); }}>
-                          Cancel
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setShowCreateManufacturer(true)}
-                      className="w-full flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-primary hover:bg-primary/5 transition-colors border border-dashed border-primary/30"
-                    >
-                      <UserPlus className="h-3.5 w-3.5" />
-                      Create New Manufacturer
-                    </button>
-                  )}
-
-                  {selectedManufacturer && (
-                    <p className="text-xs text-muted-foreground flex items-center gap-1">
-                      <CheckCircle2 className="h-3 w-3 text-success" />
-                      {selectedManufacturer.name}
-                    </p>
-                  )}
-                </div>
               </div>
             )}
           </div>

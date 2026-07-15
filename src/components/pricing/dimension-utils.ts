@@ -217,6 +217,39 @@ export function formatCompactNominalDimension(inches: number): string {
   return `${feet}${String(rem).padStart(rem >= 10 ? 2 : 1, '0')}`;
 }
 
+/**
+ * Format a nominal door/frame dimension in architectural feet-inch notation.
+ * This is the human-facing companion to the compact catalog code: `30` is
+ * stored/entered compactly and rendered as `3-0` on estimates and quotes.
+ */
+export function formatArchitecturalDimension(inches: number): string {
+  const feet = Math.floor(inches / 12);
+  const remainder = inches - (feet * 12);
+  const displayInches = Number.isInteger(remainder)
+    ? String(remainder)
+    : remainder.toFixed(2).replace(/\.?0+$/, '');
+  return `${feet}-${displayInches}`;
+}
+
+/** Parses any supported nominal dimension and returns architectural notation. */
+export function normalizeArchitecturalDimension(
+  raw: string | number | null | undefined,
+): string | null {
+  const inches = parseDoorDimension(raw);
+  if (inches == null || inches <= 0) return null;
+  return formatArchitecturalDimension(inches);
+}
+
+/** Renders a nominal width/height pair as `3-0 x 7-0`. */
+export function formatArchitecturalSize(
+  width: string | number | null | undefined,
+  height: string | number | null | undefined,
+): string | null {
+  const formattedWidth = normalizeArchitecturalDimension(width);
+  const formattedHeight = normalizeArchitecturalDimension(height);
+  return formattedWidth && formattedHeight ? `${formattedWidth} x ${formattedHeight}` : null;
+}
+
 /** Parses any supported door dimension and returns compact nominal notation. */
 export function normalizeCompactNominalDimension(raw: string | number | null | undefined): string | null {
   const inches = parseDoorDimension(raw);

@@ -6,6 +6,28 @@ This is the curated CPQ roadmap for the IES ERP app. The first implementation sl
 
 The app remains the operational system for estimating, quote detail, catalog, BOM, kitting, and prep data. QuickBooks remains the accounting system of record.
 
+## Delivery Status - July 13, 2026
+
+Implemented in the application and covered by the current build/test suite:
+
+- The P0 estimating-to-quote workflow, including job setup, architectural size display, independent door/frame specifications, ratings/transoms, manual-quote routing, and snapshot-preserving quote revisions.
+- Separate lite/glass cutout, kit-order, visible-glass, and glass-type details in quote and operational outputs.
+- Hardware catalog source/audit fields, multiplicative chain discounts, admin review states, and in-estimate staging into a reusable review queue.
+- Quote display configuration v2, customer defaults, saved detail snapshots, and customer-safe PDFs.
+- BOM, vendor CSV, kitting, customer approval links, and procurement/receiving/staging/fulfillment tracking from durable quote data.
+
+Pending external verification or source data:
+
+- Run the Paul password-reset/sign-in and complete demo-path acceptance test in the deployed environment.
+- Import the requested row-868 hardware record after the original workbook/tab or expected part number is supplied. The only supplied workbook extending to physical row 868 has a blank row 868; the optimized source ends at row 349.
+
+Remaining P3 scope:
+
+- Full AI-assisted price-book ingestion automation.
+- A complete vendor-specific template library.
+- Operations analytics beyond the quote-to-fulfillment dashboard.
+- QuickBooks handoff and reconciliation.
+
 ## P0 - Usable Quote Loop
 
 ### Access And Usability
@@ -92,7 +114,7 @@ The app remains the operational system for estimating, quote detail, catalog, BO
 
 - AI price-book assistant and full price-book ingestion automation.
 - Full vendor template library.
-- Operations dashboards beyond quote-to-order prep.
+- Operations analytics and dashboards beyond quote-to-fulfillment tracking.
 - QuickBooks handoff and reconciliation workflows.
 
 ## Public Interfaces And Data
@@ -136,4 +158,4 @@ The app remains the operational system for estimating, quote detail, catalog, BO
 
 - The first implementation slice is the usable quote loop.
 - The repo keeps one curated roadmap doc rather than a separate exact archive.
-- AI price-book assistant, full vendor template library, acknowledgments, operations tracking, and QuickBooks handoff remain later phases.
+- AI price-book automation, the full vendor template library, deeper operations analytics, and QuickBooks handoff remain later phases.

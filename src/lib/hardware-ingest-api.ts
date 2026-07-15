@@ -24,6 +24,7 @@ export interface HardwarePriceRow {
   size: string | null;
   listPrice: number | null;
   discountMultiplier: number | null;
+  discountChain: string | null;
   netCost: number | null;
   uom: string;
   reviewStatus: string;
@@ -96,7 +97,7 @@ export async function getHardwareIngestSummary(hardwarePriceBookId: string): Pro
 export async function listHardwarePrices(hardwarePriceBookId: string, limit = 500): Promise<HardwarePriceRow[]> {
   const { data, error } = await supabase
     .from('hardware_price')
-    .select('id, list_price, discount_multiplier, net_cost, uom, review_status, source_row_ref, hardware_variant_id, hardware_variant!inner(id, sku, finish, function, size, hardware_product_id, hardware_product!inner(id, category, manufacturer_name, description))')
+    .select('id, list_price, discount_multiplier, discount_chain, net_cost, uom, review_status, source_row_ref, hardware_variant_id, hardware_variant!inner(id, sku, finish, function, size, hardware_product_id, hardware_product!inner(id, category, manufacturer_name, description))')
     .eq('hardware_price_book_id', hardwarePriceBookId)
     .order('created_at', { ascending: true })
     .limit(limit);
@@ -117,6 +118,7 @@ export async function listHardwarePrices(hardwarePriceBookId: string, limit = 50
       size: (v?.size as string | null) ?? null,
       listPrice: (r.list_price as number | null) ?? null,
       discountMultiplier: (r.discount_multiplier as number | null) ?? null,
+      discountChain: (r.discount_chain as string | null) ?? null,
       netCost: (r.net_cost as number | null) ?? null,
       uom: (r.uom as string) ?? 'EA',
       reviewStatus: (r.review_status as string) ?? 'UNREVIEWED',

@@ -18,6 +18,7 @@ import type {
   SpecFieldEntity,
   HardwareVariant,
   HardwarePrice,
+  HardwareSpec,
 } from '@/types';
 
 export interface SpecFieldWithPath extends OpeningSpecField {
@@ -27,14 +28,29 @@ export interface SpecFieldWithPath extends OpeningSpecField {
   enumOptions: string[];
 }
 
-function parseEnum(dataType: string | null, allowed: string | null): string[] {
+function expandLegacyStcOption(option: string): string[] {
+  const shorthand = option.match(/^(STC|gasket\s+)?([A-Za-z0-9]+(?:\/[A-Za-z0-9]+)+)$/i);
+  if (!shorthand) return [option];
+
+  const prefix = shorthand[1] ?? '';
+  return shorthand[2].split('/').map((value) => `${prefix}${value}`);
+}
+
+export function parseEnumOptions(
+  fieldId: string,
+  dataType: string | null,
+  allowed: string | null,
+): string[] {
   if (!allowed) return [];
   const isEnum = (dataType ?? '').toLowerCase().includes('enum') || (dataType ?? '').toLowerCase().includes('bool');
   if (!isEnum) return [];
-  return allowed
+  const options = allowed
     .split(/[;]/)
     .map((s) => s.trim())
     .filter(Boolean);
+
+  if (fieldId !== 'OPN-019') return options;
+  return [...new Set(options.flatMap(expandLegacyStcOption))];
 }
 
 function mapSpecField(row: Record<string, unknown>, pathByFieldId: Map<string, string>): SpecFieldWithPath {
@@ -57,7 +73,7 @@ function mapSpecField(row: Record<string, unknown>, pathByFieldId: Map<string, s
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     fieldPath: pathByFieldId.get(fieldId) ?? null,
-    enumOptions: parseEnum(dataType, allowed),
+    enumOptions: parseEnumOptions(fieldId, dataType, allowed),
   };
 }
 
@@ -176,10 +192,34 @@ export async function loadOptionDescriptors(): Promise<Map<string, Map<string, s
 export interface VariantOption {
   category: string;
   variant: HardwareVariant;
+  /** Vendor-neutral requirement shared by every compatible manufacturer offer. */
+  spec: HardwareSpec | null;
   price: HardwarePrice | null;
   productDescription: string | null;
+  manufacturerName: string | null;
+  vendorSeries: string | null;
+  vendorModel: string | null;
   /** hardware_product.subcategory — distinguishes real devices from accessories. */
   subcategory: string | null;
+}
+
+/**
+ * Selects only a governed, currently effective hardware price. An unreviewed
+ * observation must never become quoteable merely because it is the first
+ * embedded row returned by PostgREST.
+ */
+export function selectApprovedHardwarePrice<T extends Record<string, unknown>>(
+  prices: T[],
+  asOf = new Date().toISOString().slice(0, 10),
+): T | undefined {
+  return prices
+    .filter((price) => {
+      if (price.review_status !== 'APPROVED' || price.active === false) return false;
+      const from = price.effective_from == null ? null : String(price.effective_from).slice(0, 10);
+      const to = price.effective_to == null ? null : String(price.effective_to).slice(0, 10);
+      return (!from || from <= asOf) && (!to || to >= asOf);
+    })
+    .sort((a, b) => String(b.effective_from ?? '').localeCompare(String(a.effective_from ?? '')))[0];
 }
 
 /**
@@ -302,6 +342,60 @@ export interface HardwareCategoryOption {
   variantCount: number;
 }
 
+export interface StageHardwareFromEstimateInput {
+  category: string;
+  description: string;
+  function?: string | null;
+  finish?: string | null;
+  size?: string | null;
+  rating?: string | null;
+  manufacturerName?: string | null;
+  model?: string | null;
+  sku?: string | null;
+  estimateId?: string | null;
+  openingId?: string | null;
+}
+
+export interface StagedHardwareResult {
+  specId: string;
+  productId: string | null;
+  variantId: string | null;
+  externalSpecId: string;
+  approvalState: 'needs_review';
+}
+
+/**
+ * Captures missing hardware during estimating. The database RPC intentionally
+ * stages the spec/offer as needs_review, so it cannot enter priced selections
+ * until an admin verifies taxonomy, source, and price.
+ */
+export async function stageHardwareFromEstimate(
+  input: StageHardwareFromEstimateInput,
+): Promise<StagedHardwareResult> {
+  const { data, error } = await supabase.rpc('stage_hardware_from_estimate', {
+    p_category: input.category,
+    p_description: input.description,
+    p_function: input.function ?? null,
+    p_finish: input.finish ?? null,
+    p_size: input.size ?? null,
+    p_rating: input.rating ?? null,
+    p_manufacturer_name: input.manufacturerName ?? null,
+    p_model: input.model ?? null,
+    p_sku: input.sku ?? null,
+    p_estimate_id: input.estimateId ?? null,
+    p_opening_id: input.openingId ?? null,
+  });
+  if (error) throw new Error(`Failed to stage hardware: ${error.message}`);
+  const row = data as Record<string, unknown>;
+  return {
+    specId: String(row.spec_id),
+    productId: row.product_id ? String(row.product_id) : null,
+    variantId: row.variant_id ? String(row.variant_id) : null,
+    externalSpecId: String(row.external_spec_id),
+    approvalState: 'needs_review',
+  };
+}
+
 /**
  * Lists the hardware categories that actually have catalog variants, so the
  * builder can offer individual hardware selection (independent of any set
@@ -310,7 +404,11 @@ export interface HardwareCategoryOption {
 export async function loadHardwareCategories(): Promise<HardwareCategoryOption[]> {
   const { data, error } = await supabase
     .from('hardware_variant')
-    .select('hardware_product!inner(category)');
+    .select('hardware_product!inner(category, active, approval_state)')
+    .eq('active', true)
+    .eq('approval_state', 'approved')
+    .eq('hardware_product.active', true)
+    .eq('hardware_product.approval_state', 'approved');
   if (error) throw new Error(`Failed to load hardware categories: ${error.message}`);
   const counts = new Map<string, number>();
   for (const r of data ?? []) {
@@ -335,20 +433,33 @@ export async function loadHardwareCategories(): Promise<HardwareCategoryOption[]
 export async function loadVariantsForCategory(category: string): Promise<VariantOption[]> {
   const { data, error } = await supabase
     .from('hardware_variant')
-    .select('*, hardware_product!inner(category, subcategory, description), hardware_price(*)')
-    .eq('hardware_product.category', category);
+    .select('*, hardware_spec(*), hardware_product!inner(category, subcategory, description, manufacturer_name, product_family, model, active, approval_state), hardware_price(*)')
+    .eq('hardware_product.category', category)
+    .eq('active', true)
+    .eq('approval_state', 'approved')
+    .eq('hardware_product.active', true)
+    .eq('hardware_product.approval_state', 'approved');
   if (error) throw new Error(`Failed to load variants for ${category}: ${error.message}`);
 
   return (data ?? []).map((r) => {
     const row = r as Record<string, unknown>;
-    const product = row.hardware_product as { description?: string | null; subcategory?: string | null } | null;
+    const product = row.hardware_product as {
+      description?: string | null;
+      subcategory?: string | null;
+      manufacturer_name?: string | null;
+      product_family?: string | null;
+      model?: string | null;
+    } | null;
+    const specRow = row.hardware_spec as Record<string, unknown> | null;
     const prices = (row.hardware_price as Record<string, unknown>[] | undefined) ?? [];
-    const approved = prices.find((p) => p.review_status === 'APPROVED') ?? prices[0];
+    const approved = selectApprovedHardwarePrice(prices);
     return {
       category,
       variant: {
         id: row.id as string,
         hardwareProductId: row.hardware_product_id as string,
+        hardwareSpecId: (row.hardware_spec_id as string | null) ?? null,
+        sourceOfferId: (row.source_offer_id as string | null) ?? null,
         sku: (row.sku as string | null) ?? null,
         function: (row.function as string | null) ?? null,
         finish: (row.finish as string | null) ?? null,
@@ -358,9 +469,44 @@ export async function loadVariantsForCategory(category: string): Promise<Variant
         rating: (row.rating as string | null) ?? null,
         material: (row.material as string | null) ?? null,
         optionAttributes: (row.option_attributes as Record<string, unknown>) ?? {},
+        active: (row.active as boolean | null) ?? true,
+        approvalState: (row.approval_state as HardwareVariant['approvalState']) ?? 'approved',
+        sourceRowNumber: (row.source_row_number as number | null) ?? null,
+        taxonomyNotes: (row.taxonomy_notes as string | null) ?? null,
+        updatedBy: (row.updated_by as string | null) ?? null,
+        lastReviewedAt: (row.last_reviewed_at as string | null) ?? null,
         createdAt: row.created_at as string,
         updatedAt: row.updated_at as string,
       },
+      spec: specRow
+        ? {
+            id: specRow.id as string,
+            externalSpecId: specRow.external_spec_id as string,
+            category: specRow.category as string,
+            productSubtype: (specRow.product_subtype as string | null) ?? null,
+            application: (specRow.application as string | null) ?? null,
+            function: (specRow.function as string | null) ?? null,
+            keying: (specRow.keying as string | null) ?? null,
+            size: (specRow.size as string | null) ?? null,
+            rating: (specRow.rating as string | null) ?? null,
+            dutyGrade: (specRow.duty_grade as string | null) ?? null,
+            mountingArm: (specRow.mounting_arm as string | null) ?? null,
+            thicknessWeight: (specRow.thickness_weight as string | null) ?? null,
+            material: (specRow.material as string | null) ?? null,
+            finish: (specRow.finish as string | null) ?? null,
+            electrical: (specRow.electrical as string | null) ?? null,
+            otherRequirements: (specRow.other_requirements as string | null) ?? null,
+            matchConfidence: (specRow.match_confidence as string | null) ?? null,
+            active: (specRow.active as boolean | null) ?? true,
+            approvalState: (specRow.approval_state as HardwareSpec['approvalState']) ?? 'approved',
+            sourceFile: (specRow.source_file as string | null) ?? null,
+            sourceMetadata: (specRow.source_metadata as Record<string, unknown>) ?? {},
+            updatedBy: (specRow.updated_by as string | null) ?? null,
+            lastReviewedAt: (specRow.last_reviewed_at as string | null) ?? null,
+            createdAt: specRow.created_at as string,
+            updatedAt: specRow.updated_at as string,
+          }
+        : null,
       price: approved
         ? {
             id: approved.id as string,
@@ -368,6 +514,7 @@ export async function loadVariantsForCategory(category: string): Promise<Variant
             hardwarePriceBookId: (approved.hardware_price_book_id as string | null) ?? null,
             listPrice: approved.list_price != null ? Number(approved.list_price) : null,
             discountMultiplier: approved.discount_multiplier != null ? Number(approved.discount_multiplier) : null,
+            discountChain: (approved.discount_chain as string | null) ?? null,
             netCost: approved.net_cost != null ? Number(approved.net_cost) : null,
             uom: (approved.uom as string) ?? 'each',
             effectiveFrom: (approved.effective_from as string | null) ?? null,
@@ -375,11 +522,18 @@ export async function loadVariantsForCategory(category: string): Promise<Variant
             minimumQuantity: approved.minimum_quantity != null ? Number(approved.minimum_quantity) : null,
             sourceRowRef: (approved.source_row_ref as string | null) ?? null,
             reviewStatus: approved.review_status as HardwarePrice['reviewStatus'],
+            active: (approved.active as boolean | null) ?? true,
+            approvalState: (approved.approval_state as HardwarePrice['approvalState']) ?? 'approved',
+            updatedBy: (approved.updated_by as string | null) ?? null,
+            lastReviewedAt: (approved.last_reviewed_at as string | null) ?? null,
             createdAt: approved.created_at as string,
             updatedAt: approved.updated_at as string,
           }
         : null,
       productDescription: product?.description ?? null,
+      manufacturerName: product?.manufacturer_name ?? null,
+      vendorSeries: product?.product_family ?? null,
+      vendorModel: product?.model ?? ((row.option_attributes as Record<string, unknown> | null)?.vendor_model as string | null) ?? null,
       subcategory: product?.subcategory ?? null,
     };
   });

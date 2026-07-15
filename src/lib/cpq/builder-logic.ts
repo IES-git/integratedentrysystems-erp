@@ -37,6 +37,15 @@ const PATH = {
     stc: 'opening.stc_rating_and_gasket_type',
     blast: 'opening.blast_resistance_requirement',
     bullet: 'opening.bullet_resistance_level',
+    transomType: 'opening.transom_infill_type',
+    transomScope: 'opening.transom_scope',
+    dodWidth: 'opening.door_opening_dimension_width',
+    dodHeight: 'opening.door_opening_dimension_height',
+    transomWidth: 'opening.transom_width',
+    transomHeight: 'opening.transom_height',
+    overallFrameWidth: 'opening.overall_frame_width',
+    overallFrameHeight: 'opening.overall_frame_height',
+    frameOrderCallout: 'opening.frame_order_callout',
   },
   door: {
     series: 'door.door_series_construction',
@@ -294,6 +303,59 @@ function deriveDoorWidth(draft: OpeningDraft, leafCount: number): string | null 
   return formatCompactNominalDimension(per);
 }
 
+function nominalSizeCode(width: string | null | undefined, height: string | null | undefined): string | null {
+  const w = formatOrderDimension(width);
+  const h = formatOrderDimension(height);
+  return w && h ? `${w}${h}` : null;
+}
+
+function formatOrderDimension(value: string | null | undefined): string | null {
+  const raw = trimmed(value);
+  if (!raw) return null;
+  return normalizeOrderDimension(raw) ?? raw;
+}
+
+function normalizeOrderDimension(value: string): string | null {
+  const inches = parseDoorDimension(value);
+  if (inches == null || !Number.isInteger(inches) || inches <= 0) return null;
+  return formatCompactNominalDimension(inches);
+}
+
+export interface FrameOrderCalloutInput {
+  openingMark?: string | null;
+  transomScope?: string | null;
+  transomType?: string | null;
+  dodWidth?: string | null;
+  dodHeight?: string | null;
+  transomWidth?: string | null;
+  transomHeight?: string | null;
+  overallFrameWidth?: string | null;
+  overallFrameHeight?: string | null;
+}
+
+/** Builds a purchasing callout from confirmed dimensions without guessing deductions. */
+export function generateFrameOrderCallout(input: FrameOrderCalloutInput): string | null {
+  const dod = nominalSizeCode(input.dodWidth, input.dodHeight);
+  if (!dod) return null;
+
+  const parts: string[] = [];
+  const mark = trimmed(input.openingMark);
+  if (mark) parts.push(mark.toUpperCase());
+  const scope = trimmed(input.transomScope);
+  if (scope) parts.push(scope.toUpperCase());
+  parts.push(`DOD ${dod}`);
+
+  const transom = nominalSizeCode(input.transomWidth, input.transomHeight);
+  const type = trimmed(input.transomType);
+  if (type && type.toLowerCase() !== 'none') {
+    parts.push(`${type.toUpperCase()} TRANSOM${transom ? ` ${transom}` : ''}`);
+  }
+
+  const overall = nominalSizeCode(input.overallFrameWidth, input.overallFrameHeight);
+  if (overall) parts.push(`O/A ${overall}`);
+  return parts.join(' | ');
+}
+
 // ---------------------------------------------------------------------------
 // 1. Cascade / auto-fill
 // ---------------------------------------------------------------------------
@@ -315,6 +377,39 @@ export function deriveBuilderContext(draft: OpeningDraft): BuilderContext {
   const doorWidth = deriveDoorWidth(draft, leafCount);
   const jambDepth = openingVal(draft, PATH.opening.jambDepth);
   const fireLabeled = draft.fireLabelRequired;
+
+  // Transom/order dimensions stay independent. Shared values are copied only
+  // as overridable defaults; manufacturer-specific bar/face deductions are not
+  // assumed. Overall frame height therefore remains an explicit input.
+  const transomType = openingVal(draft, PATH.opening.transomType);
+  if (draft.configurationType === 'sidelite_transom' && transomType && transomType.toLowerCase() !== 'none') {
+    const scope = leafCount >= 2 ? 'Pair' : 'Single';
+    derivedOpeningFields[PATH.opening.transomScope] = { value: scope, reason: 'from leaf count' };
+    if (openingWidth) {
+      derivedOpeningFields[PATH.opening.dodWidth] = { value: openingWidth, reason: 'from nominal opening width' };
+      derivedOpeningFields[PATH.opening.transomWidth] = { value: openingWidth, reason: 'from nominal opening width' };
+      derivedOpeningFields[PATH.opening.overallFrameWidth] = { value: openingWidth, reason: 'from nominal opening width' };
+    }
+    if (openingHeight) {
+      derivedOpeningFields[PATH.opening.dodHeight] = { value: openingHeight, reason: 'from nominal opening height' };
+    }
+
+    const effective = (path: string) => openingVal(draft, path) || derivedOpeningFields[path]?.value || null;
+    const callout = generateFrameOrderCallout({
+      openingMark: draft.name,
+      transomScope: effective(PATH.opening.transomScope),
+      transomType,
+      dodWidth: effective(PATH.opening.dodWidth),
+      dodHeight: effective(PATH.opening.dodHeight),
+      transomWidth: effective(PATH.opening.transomWidth),
+      transomHeight: effective(PATH.opening.transomHeight),
+      overallFrameWidth: effective(PATH.opening.overallFrameWidth),
+      overallFrameHeight: effective(PATH.opening.overallFrameHeight),
+    });
+    if (callout) {
+      derivedOpeningFields[PATH.opening.frameOrderCallout] = { value: callout, reason: 'from confirmed DOD, transom, and overall-frame values' };
+    }
+  }
 
   // Door leaves.
   for (const door of draft.doors) {
@@ -444,6 +539,15 @@ const TRIGGERS: Record<string, (draft: OpeningDraft, ctx: BuilderContext, compon
   'OPN-014': (d) => d.fireLabelRequired, // label agency
   'OPN-015': (d) => d.fireLabelRequired, // hourly fire rating
   'OPN-016': (d) => d.fireLabelRequired, // label form/material
+  'OPN-028': (d) => d.configurationType === 'sidelite_transom',
+  'OPN-029': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
+  'OPN-030': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
+  'OPN-031': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
+  'OPN-032': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
+  'OPN-033': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
+  'OPN-034': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
+  'OPN-035': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
+  'OPN-036': (d) => d.configurationType === 'sidelite_transom' && !['', 'none'].includes(openingVal(d, PATH.opening.transomType).toLowerCase()),
   // Door
   'DOR-014': (_d, ctx) => ctx.astragalApplies, // astragal (pairs)
   'DOR-016': (_d, _c, comp) => isGlazedElevation(compVal(comp, PATH.door.elevation)),
@@ -519,6 +623,10 @@ const CURATED_OPTION_LABELS: Record<string, Record<string, string>> = {
     Galvannealed: 'Generic galvannealed',
     A40: 'A40 galvannealed',
     A60: 'A60 galvannealed',
+    'Stainless 304': '304 stainless steel (manual/vendor quote)',
+    'Stainless 316': '316 stainless steel (manual/vendor quote)',
+    Aluminum: 'Aluminum (manual/vendor quote)',
+    'Fiberglass/FRP': 'Fiberglass / FRP (manual/vendor quote)',
   },
   // Door hand (DOR-012) / Frame hand (FRM-014)
   'DOR-012': {
@@ -529,6 +637,10 @@ const CURATED_OPTION_LABELS: Record<string, Record<string, string>> = {
     Galvannealed: 'Generic galvannealed',
     A40: 'A40 galvannealed',
     A60: 'A60 galvannealed',
+    'Stainless 304': '304 stainless steel (manual/vendor quote)',
+    'Stainless 316': '316 stainless steel (manual/vendor quote)',
+    Aluminum: 'Aluminum (manual/vendor quote)',
+    'Fiberglass/FRP': 'Fiberglass / FRP (manual/vendor quote)',
   },
   'FRM-014': {
     RH: 'Right hand', LH: 'Left hand', RHR: 'Right hand reverse', LHR: 'Left hand reverse', NH: 'Non-handed',
@@ -995,7 +1107,12 @@ export function priceableEnumOptions(
     return priceable.length > 0 ? sortDimensionLike(priceable) : base;
   }
   const allowed = new Set(priceable.map((value) => normVal(value, field.fieldPath ?? undefined)));
-  const filtered = candidates.filter((o) => allowed.has(normVal(o, field.fieldPath ?? undefined)));
+  const manualMaterialValues = new Set(['a40', 'a60', 'stainless 304', 'stainless 316', 'aluminum', 'fiberglass/frp']);
+  const isMaterialField = ['door.door_material', 'frame.frame_material', 'panel.panel_material'].includes(field.fieldPath);
+  const filtered = candidates.filter((o) =>
+    allowed.has(normVal(o, field.fieldPath ?? undefined)) ||
+    (isMaterialField && manualMaterialValues.has(o.trim().toLowerCase())),
+  );
   // Safeguard: never hide everything (avoids an un-pickable field on odd data).
   return filtered.length > 0 ? filtered : (base ?? candidates);
 }

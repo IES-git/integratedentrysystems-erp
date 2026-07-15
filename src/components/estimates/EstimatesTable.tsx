@@ -136,8 +136,17 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
     }
   };
 
-  const handleConvertToQuote = (estimateId: string, quoteType: 'customer' | 'manufacturer' | 'both') => {
-    navigate(`/app/quotes/wizard?estimateId=${estimateId}&quoteType=${quoteType}`);
+  const handleConvertToQuote = (estimate: EstimateWithItems, quoteType: 'customer' | 'manufacturer' | 'both') => {
+    if (!estimate.jobName?.trim()) {
+      toast({
+        title: 'Job setup required',
+        description: 'Add a job name and review the project details before creating a quote.',
+        variant: 'destructive',
+      });
+      navigate(`/app/estimates/${estimate.id}/edit?step=1`);
+      return;
+    }
+    navigate(`/app/quotes/wizard?estimateId=${estimate.id}&quoteType=${quoteType}`);
   };
 
   const handleEditEstimate = (estimateId: string) => {
@@ -468,15 +477,15 @@ export function EstimatesTable({ estimates, companies, onEstimateDeleted, onEsti
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="start">
-                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'customer')}>
+                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate, 'customer')}>
                             <User className="mr-2 h-4 w-4" />
                             Customer Quote
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'manufacturer')}>
+                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate, 'manufacturer')}>
                             <Factory className="mr-2 h-4 w-4" />
                             Manufacturer Quote
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate.id, 'both')}>
+                          <DropdownMenuItem onClick={() => handleConvertToQuote(estimate, 'both')}>
                             <Users className="mr-2 h-4 w-4" />
                             Multiple Quotes
                           </DropdownMenuItem>

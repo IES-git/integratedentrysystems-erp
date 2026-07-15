@@ -37,6 +37,23 @@ export function getOppositeHanding(handing: string): string {
   return OPPOSITE_HANDING[handing] ?? handing;
 }
 
+/** Applies the selected active-leaf hand and its complement to a two-leaf pair. */
+export function applyComplementaryPairHanding<T extends { id: string; fields: Record<string, string> }>(
+  doors: T[],
+  selectedDoorId: string,
+  handing: string,
+  fieldPath = 'door.door_hand',
+): T[] {
+  if (doors.length !== 2) return doors;
+  return doors.map((door) => ({
+    ...door,
+    fields: {
+      ...door.fields,
+      [fieldPath]: door.id === selectedDoorId ? handing : getOppositeHanding(handing),
+    },
+  }));
+}
+
 /**
  * Hinges per leaf by door height, per NFPA 80 / ANSI-BHMA A156.1:
  *   - up to 60"            : 2 hinges

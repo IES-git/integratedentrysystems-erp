@@ -41,6 +41,8 @@ function mapLine(row: Record<string, unknown>): EstimateLine {
     sourcePage: (row.source_page as string | null) ?? null,
     sourceRegionId: (row.source_region_id as string | null) ?? null,
     priceBookId: (row.price_book_id as string | null) ?? null,
+    manufacturerId: (row.manufacturer_id as string | null) ?? null,
+    manufacturerName: (row.manufacturer_name as string | null) ?? null,
     confidence: num(row.confidence),
     reviewStatus: (row.review_status as string | null) ?? null,
     exceptionMessage: (row.exception_message as string | null) ?? null,

@@ -1227,15 +1227,16 @@ export async function getDefaultValuesForFields(
   if (globalResult.error) throw new Error(`Failed to fetch field options: ${globalResult.error.message}`);
   if (itemResult.error) throw new Error(`Failed to fetch item field options: ${itemResult.error.message}`);
 
+  type FieldOptionDbRow = { field_definition_id: string; value: string; is_default: boolean | null };
   const globalByDef = new Map<string, Array<{ value: string; isDefault: boolean }>>();
-  for (const row of (globalResult.data ?? []) as any[]) {
+  for (const row of (globalResult.data ?? []) as FieldOptionDbRow[]) {
     const list = globalByDef.get(row.field_definition_id) ?? [];
     list.push({ value: row.value, isDefault: row.is_default ?? false });
     globalByDef.set(row.field_definition_id, list);
   }
 
   const itemByDef = new Map<string, Array<{ value: string; isDefault: boolean }>>();
-  for (const row of (itemResult.data ?? []) as any[]) {
+  for (const row of (itemResult.data ?? []) as FieldOptionDbRow[]) {
     const list = itemByDef.get(row.field_definition_id) ?? [];
     list.push({ value: row.value, isDefault: row.is_default ?? false });
     itemByDef.set(row.field_definition_id, list);
@@ -1620,16 +1621,15 @@ export async function getItemTypes(): Promise<ItemType[]> {
 
   // Build a set of codes that exist in the hardware catalog so we can
   // override the label-based category check for items like "Door Closer…"
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const hardwareCatalogCodes = new Set<string>(
-    (catalogResult.data ?? []).map((row: any) => row.canonical_code as string)
+    (catalogResult.data ?? []).map((row) => String((row as Record<string, unknown>).canonical_code ?? ''))
   );
 
   // Build per-canonical-code value-count maps: code -> fieldKey -> value -> count
   const fieldValueCounts = new Map<string, Map<string, Map<string, number>>>();
   for (const row of keyFieldsResult.data ?? []) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const code = (row.estimate_items as any)?.canonical_code as string | undefined;
+    const relation = row.estimate_items as unknown as { canonical_code?: string | null } | null;
+    const code = relation?.canonical_code ?? undefined;
     if (!code || !row.field_value || !row.field_key) continue;
     if (!fieldValueCounts.has(code)) fieldValueCounts.set(code, new Map());
     const byKey = fieldValueCounts.get(code)!;
@@ -2410,6 +2410,7 @@ function mapEstimateOpeningRow(row: any): EstimateOpening {
     quantity: row.quantity,
     sortOrder: row.sort_order,
     templateType: row.template_type ?? null,
+    specSnapshot: (row.spec_snapshot as Record<string, unknown> | null) ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

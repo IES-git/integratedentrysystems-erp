@@ -22,7 +22,7 @@ import type {
 
 function toNumber(v: string | number | undefined | null): number | null {
   if (v === undefined || v === null) return null;
-  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
+  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.-]/g, ''));
   return Number.isNaN(n) ? null : n;
 }
 

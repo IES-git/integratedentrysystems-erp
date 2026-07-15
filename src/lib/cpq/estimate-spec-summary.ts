@@ -9,7 +9,7 @@
  */
 
 import type { EstimateSpecSummary } from '@/types';
-import { normalizeCompactNominalDimension } from '@/components/pricing/dimension-utils';
+import { normalizeArchitecturalDimension } from '@/components/pricing/dimension-utils';
 
 /** Loosely-typed view of a persisted spec_snapshot component. */
 interface SnapshotComponent {
@@ -62,10 +62,10 @@ function gauge(value: string | null): string | null {
   return /^\d+$/.test(value) ? `${value}ga` : value;
 }
 
-/** Returns compact nominal notation such as "30" / "70"; leaves custom text untouched. */
-function compactNominal(value: string | null): string | null {
+/** Returns architectural notation such as "3-0" / "7-0"; leaves custom text untouched. */
+function architecturalNominal(value: string | null): string | null {
   if (!value) return null;
-  return normalizeCompactNominalDimension(value) ?? value;
+  return normalizeArchitecturalDimension(value) ?? value;
 }
 
 function joinParts(parts: (string | null)[]): string | null {
@@ -103,8 +103,8 @@ function describeConfig(configurationType: string | null | undefined): string | 
 function describeSize(opening: OpeningSnapshot, door: SnapshotComponent | undefined): string | null {
   const width = field(door, 'door.nominal_door_width') ?? opening.openingWidth ?? null;
   const height = field(door, 'door.nominal_door_height') ?? opening.openingHeight ?? null;
-  const w = compactNominal(width);
-  const h = compactNominal(height);
+  const w = architecturalNominal(width);
+  const h = architecturalNominal(height);
   if (w && h) return `${w} × ${h}`;
   return w || h || null;
 }

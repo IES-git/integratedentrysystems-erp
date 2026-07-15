@@ -32,6 +32,9 @@ export interface SendQuoteDialogProps {
   contacts: Contact[];
   /** Whether a manufacturer PDF will also be attached. */
   includesManufacturerPdf: boolean;
+  audience?: 'customer' | 'manufacturer';
+  attachmentLabel?: string;
+  jobName?: string | null;
   onSend: (params: {
     recipientEmail: string;
     ccEmails: string[];
@@ -48,15 +51,29 @@ function isValidEmail(email: string) {
   return EMAIL_RE.test(email.trim());
 }
 
-function buildDefaultSubject(quote: Quote, company: Company | null): string {
+function buildDefaultSubject(quote: Quote, company: Company | null, audience: 'customer' | 'manufacturer', jobName?: string | null): string {
   const quoteRef = `Q-${quote.id.slice(-8).toUpperCase()}`;
+  if (audience === 'manufacturer') {
+    return `RFQ-${quote.id.slice(-8).toUpperCase()}${jobName ? ` · ${jobName}` : ''} · Integrated Entry Systems`;
+  }
   const companyName = company?.name ?? 'your company';
   return `Your Quote ${quoteRef} from Integrated Entry Systems`;
 }
 
-function buildDefaultMessage(quote: Quote, company: Company | null): string {
+function buildDefaultMessage(quote: Quote, company: Company | null, audience: 'customer' | 'manufacturer', jobName?: string | null): string {
   const companyName = company?.name ?? 'you';
   const quoteRef = `Q-${quote.id.slice(-8).toUpperCase()}`;
+  if (audience === 'manufacturer') {
+    const rfqRef = `RFQ-${quote.id.slice(-8).toUpperCase()}`;
+    return `Hello ${companyName},
+
+Please find attached ${rfqRef}${jobName ? ` for ${jobName}` : ''}. This document contains only the items assigned to your company, including opening marks, quantities, part or series information, dimensions, finishes, and recorded technical specifications.
+
+Please confirm pricing, freight, availability, lead time, and any exceptions or substitutions.
+
+Best regards,
+Integrated Entry Systems`;
+  }
   const fmt = (n: number) =>
     new Intl.NumberFormat('en-US', { style: 'currency', currency: quote.currency ?? 'USD' }).format(n);
 
@@ -85,6 +102,9 @@ export function SendQuoteDialog({
   company,
   contacts,
   includesManufacturerPdf,
+  audience = 'customer',
+  attachmentLabel,
+  jobName,
   onSend,
 }: SendQuoteDialogProps) {
   // Derive default recipient from primary contact (first in list since listContacts orders primary first)
@@ -99,8 +119,8 @@ export function SendQuoteDialog({
   const [manualEmail, setManualEmail] = useState('');
   const [ccInput, setCcInput] = useState('');
   const [ccEmails, setCcEmails] = useState<string[]>([]);
-  const [subject, setSubject] = useState(() => buildDefaultSubject(quote, company));
-  const [message, setMessage] = useState(() => buildDefaultMessage(quote, company));
+  const [subject, setSubject] = useState(() => buildDefaultSubject(quote, company, audience, jobName));
+  const [message, setMessage] = useState(() => buildDefaultMessage(quote, company, audience, jobName));
   const [isSending, setIsSending] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -112,8 +132,8 @@ export function SendQuoteDialog({
     setManualEmail('');
     setCcInput('');
     setCcEmails([]);
-    setSubject(buildDefaultSubject(quote, company));
-    setMessage(buildDefaultMessage(quote, company));
+    setSubject(buildDefaultSubject(quote, company, audience, jobName));
+    setMessage(buildDefaultMessage(quote, company, audience, jobName));
     setErrors({});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -179,10 +199,12 @@ export function SendQuoteDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Mail className="h-5 w-5" />
-            Send Quote to Customer
+            {audience === 'manufacturer' ? `Send RFQ to ${company?.name ?? 'Manufacturer'}` : 'Send Quote to Customer'}
           </DialogTitle>
           <DialogDescription>
-            The quote PDF will be attached and sent directly to the customer.
+            {audience === 'manufacturer'
+              ? 'Only this manufacturer’s assigned items will be attached.'
+              : 'The quote PDF will be attached and sent directly to the customer.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -191,7 +213,7 @@ export function SendQuoteDialog({
           <div className="flex flex-wrap gap-2">
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-md">
               <Paperclip className="h-3 w-3" />
-              Customer Quote PDF
+              {attachmentLabel ?? (audience === 'manufacturer' ? 'Manufacturer RFQ PDF' : 'Customer Quote PDF')}
             </div>
             {includesManufacturerPdf && (
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-md">
@@ -347,7 +369,7 @@ export function SendQuoteDialog({
             ) : (
               <Mail className="mr-2 h-4 w-4" />
             )}
-            {isSending ? 'Sending…' : 'Send Quote'}
+            {isSending ? 'Sending…' : audience === 'manufacturer' ? 'Send RFQ' : 'Send Quote'}
           </Button>
         </DialogFooter>
       </DialogContent>

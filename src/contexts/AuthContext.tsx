@@ -250,6 +250,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const { error } = await supabase.auth.updateUser({ password: newPassword });
       if (error) return { success: false, error: error.message };
+      // Recovery links create a temporary authenticated session. The reset UI
+      // promises a return to login, so clear that recovery session explicitly.
+      await supabase.auth.signOut();
       return { success: true };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'An error occurred';

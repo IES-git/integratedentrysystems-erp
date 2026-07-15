@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { ArrowLeft, ArrowRight, BriefcaseBusiness, Copy, Loader2, MapPin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -44,6 +44,8 @@ export function JobSetupStep({
   saving = false,
 }: JobSetupStepProps) {
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const selectedCompanyIdRef = useRef<string | null>(null);
+  const autoFilledJobLocationRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -89,6 +91,26 @@ export function JobSetupStep({
     [selectedCompany],
   );
 
+  useEffect(() => {
+    const selectedCompanyId = selectedCompany?.id ?? null;
+    if (!selectedCompanyId || selectedCompanyIdRef.current === selectedCompanyId) return;
+
+    selectedCompanyIdRef.current = selectedCompanyId;
+    const customerAddress = customerShippingAddress || customerBillingAddress;
+    const currentJobLocation = value.jobLocation?.trim() ?? '';
+    const canAutofill = !currentJobLocation || currentJobLocation === autoFilledJobLocationRef.current;
+
+    if (!customerAddress || !canAutofill) {
+      autoFilledJobLocationRef.current = null;
+      return;
+    }
+
+    autoFilledJobLocationRef.current = customerAddress;
+    if (currentJobLocation !== customerAddress) {
+      onChange({ ...value, jobLocation: customerAddress });
+    }
+  }, [customerBillingAddress, customerShippingAddress, onChange, selectedCompany, value]);
+
   const selectedShipTo = value.shipToSource ?? 'customer_shipping';
   const shipToPreview =
     selectedShipTo === 'customer_billing'
@@ -109,6 +131,11 @@ export function JobSetupStep({
       shipToSource: 'override',
       shipToAddress: value.jobLocation ?? '',
     });
+  };
+
+  const copyShipToToJobLocation = () => {
+    if (!shipToPreview) return;
+    update('jobLocation', shipToPreview);
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -260,10 +287,16 @@ export function JobSetupStep({
           <div className="space-y-1.5 sm:col-span-2">
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="shipToAddress">Ship-To Address</Label>
-              <Button type="button" variant="ghost" size="sm" onClick={copyJobLocationToShipTo}>
-                <Copy className="mr-2 h-3.5 w-3.5" />
-                Copy Job Location
-              </Button>
+              <div className="flex flex-wrap justify-end gap-1">
+                <Button type="button" variant="ghost" size="sm" onClick={copyJobLocationToShipTo}>
+                  <Copy className="mr-2 h-3.5 w-3.5" />
+                  Job → Ship-To
+                </Button>
+                <Button type="button" variant="ghost" size="sm" onClick={copyShipToToJobLocation} disabled={!shipToPreview}>
+                  <Copy className="mr-2 h-3.5 w-3.5" />
+                  Ship-To → Job
+                </Button>
+              </div>
             </div>
             <Input
               id="shipToAddress"

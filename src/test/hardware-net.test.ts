@@ -1,7 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { resolveHardwareNet, MAX_PLAUSIBLE_HARDWARE_NET, requiresDoorFramePrep, matchCrosswalk, derivePrepRequirements } from '@/lib/pricing';
+import {
+  resolveHardwareNet,
+  parseDiscountChainMultiplier,
+  MAX_PLAUSIBLE_HARDWARE_NET,
+  requiresDoorFramePrep,
+  matchCrosswalk,
+  derivePrepRequirements,
+} from '@/lib/pricing';
 import type { HardwareCatalog } from '@/lib/pricing';
 import type { HardwarePrepCrosswalk } from '@/types';
+import { selectApprovedHardwarePrice } from '@/lib/cpq-catalog-api';
 
 const cw = (hardwareCategory: string, doorPrepCode: string | null, framePrepCode: string | null): HardwarePrepCrosswalk => ({
   id: hardwareCategory, hardwareCategory, hardwareProductId: null, hardwareVariantId: null,
@@ -83,10 +91,49 @@ describe('derivePrepRequirements (subcategory-aware)', () => {
   });
 });
 
-const price = (netCost: number | null, listPrice: number | null = null, discountMultiplier: number | null = null) => ({
+const price = (
+  netCost: number | null,
+  listPrice: number | null = null,
+  discountMultiplier: number | null = null,
+  discountChain: string | null = null,
+) => ({
   netCost,
   listPrice,
   discountMultiplier,
+  discountChain,
+});
+
+describe('parseDiscountChainMultiplier', () => {
+  it('applies each chain segment sequentially', () => {
+    expect(parseDiscountChainMultiplier('50/20')).toBeCloseTo(0.4);
+    expect(parseDiscountChainMultiplier('50 / 20 / 5%')).toBeCloseTo(0.38);
+  });
+
+  it('rejects incomplete, non-numeric, and out-of-range chains', () => {
+    expect(parseDiscountChainMultiplier('')).toBeNull();
+    expect(parseDiscountChainMultiplier('50/')).toBeNull();
+    expect(parseDiscountChainMultiplier('50/abc')).toBeNull();
+    expect(parseDiscountChainMultiplier('101/20')).toBeNull();
+  });
+});
+
+describe('selectApprovedHardwarePrice', () => {
+  it('never falls back to an unapproved catalog observation', () => {
+    expect(selectApprovedHardwarePrice([
+      { id: 'unreviewed', review_status: 'UNREVIEWED', net_cost: 10 },
+      { id: 'review', review_status: 'NEEDS_REVIEW', net_cost: 20 },
+    ], '2026-07-10')).toBeUndefined();
+  });
+
+  it('selects the newest active approved price in the effective window', () => {
+    const selected = selectApprovedHardwarePrice([
+      { id: 'old', review_status: 'APPROVED', active: true, effective_from: '2025-01-01' },
+      { id: 'new', review_status: 'APPROVED', active: true, effective_from: '2026-01-01' },
+      { id: 'future', review_status: 'APPROVED', active: true, effective_from: '2027-01-01' },
+      { id: 'inactive', review_status: 'APPROVED', active: false, effective_from: '2026-06-01' },
+    ], '2026-07-10');
+    expect(selected?.id).toBe('new');
+  });
 });
 
 describe('resolveHardwareNet', () => {
@@ -110,6 +157,14 @@ describe('resolveHardwareNet', () => {
 
   it('computes list × discount when net is missing', () => {
     expect(resolveHardwareNet(price(null, 138.25, 0.25))).toBe(34.56);
+  });
+
+  it('computes sequential discount chains when net and multiplier are missing', () => {
+    expect(resolveHardwareNet(price(null, 100, null, '50/20'))).toBe(40);
+  });
+
+  it('prefers an explicit multiplier over a discount chain', () => {
+    expect(resolveHardwareNet(price(null, 100, 0.25, '50/20'))).toBe(25);
   });
 
   it('returns null when nothing is trustworthy', () => {

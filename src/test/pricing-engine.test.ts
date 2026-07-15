@@ -386,6 +386,8 @@ describe('pricing engine core', () => {
     const variantMap = new Map<string, VariantWithPrice>([['v1', {
       category: 'butt_hinges',
       subcategory: 'butt_hinge',
+      manufacturerId: 'hardware-maker-id',
+      manufacturerName: 'Hardware Maker',
       variant: { id: 'v1', hardwareProductId: 'p1', sku: 'HG-1', function: null, finish: null, size: null, hand: null, voltage: null, rating: null, material: null, optionAttributes: {}, createdAt: '', updatedAt: '' },
       price: { id: 'pr1', hardwareVariantId: 'v1', hardwarePriceBookId: null, listPrice: 50, discountMultiplier: 0.5, netCost: 25, uom: 'each', effectiveFrom: null, effectiveTo: null, minimumQuantity: null, sourceRowRef: null, reviewStatus: 'APPROVED', createdAt: '', updatedAt: '' },
     }]]);
@@ -394,6 +396,20 @@ describe('pricing engine core', () => {
     const hwLine = res.lines.find((l) => l.chargeCategory === 'butt_hinges' && l.priceStatus === 'PRICED');
     expect(hwLine?.extendedNetPrice).toBe(75); // 25 × 3
     expect(hwLine?.sellPrice).toBe(150); // 50 sell × 3
+    expect(hwLine?.manufacturerId).toBe('hardware-maker-id');
+    expect(hwLine?.manufacturerName).toBe('Hardware Maker');
+    expect(hwLine?.priceBookId).toBe('doc1'); // pricing audit source, not RFQ routing identity
+  });
+
+  it('does not assign the structural manufacturer to unmatched manual hardware', () => {
+    const spec = baseSpec({
+      components: [{ id: 'd1', entityType: 'door', label: 'Door', quantity: 1, code: 'H', manufacturerId: 'door-maker', fields: {} }],
+      hardware: [{ category: 'butt_hinges', variantId: null, quantity: 3, required: true, source: 'manual' }],
+    });
+    const res = priceOpeningCore(spec, { rules: [], dependencyRules: [] }, emptyCatalog, new Map(), opts);
+    const manualHardware = res.lines.find((line) => line.entityType === 'hardware');
+    expect(manualHardware?.manufacturerId).toBeNull();
+    expect(manualHardware?.manufacturerName).toBeNull();
   });
 });
 

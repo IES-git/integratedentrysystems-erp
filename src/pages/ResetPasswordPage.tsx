@@ -11,6 +11,16 @@ import iesLogo from '@/assets/ies-logo.png';
 
 type PageState = 'waiting' | 'ready' | 'success' | 'invalid';
 
+export function hasPasswordRecoverySignal(url: string): boolean {
+  const parsed = new URL(url);
+  const query = parsed.searchParams;
+  const hash = new URLSearchParams(parsed.hash.replace(/^#/, ''));
+  return query.get('type') === 'recovery'
+    || hash.get('type') === 'recovery'
+    || query.has('code')
+    || hash.has('access_token');
+}
+
 export default function ResetPasswordPage() {
   const [pageState, setPageState] = useState<PageState>('waiting');
   const [password, setPassword] = useState('');
@@ -21,19 +31,31 @@ export default function ResetPasswordPage() {
   const { resetPassword } = useAuth();
 
   useEffect(() => {
+    let active = true;
+    const recoverySignal = hasPasswordRecoverySignal(window.location.href);
     // Supabase fires PASSWORD_RECOVERY when the user arrives via the reset link
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'PASSWORD_RECOVERY') {
+      if (active && event === 'PASSWORD_RECOVERY') {
         setPageState('ready');
       }
     });
 
+    // On slower browsers the global auth provider may process the URL before
+    // this page subscribes. Accept an already-established recovery session only
+    // when the URL itself carries a recovery/code signal.
+    if (recoverySignal) {
+      void supabase.auth.getSession().then(({ data }) => {
+        if (active && data.session) setPageState('ready');
+      });
+    }
+
     // Timeout: if no PASSWORD_RECOVERY event fires, the link is invalid/expired
     const timeout = setTimeout(() => {
       setPageState((current) => (current === 'waiting' ? 'invalid' : current));
-    }, 3000);
+    }, 10000);
 
     return () => {
+      active = false;
       subscription.unsubscribe();
       clearTimeout(timeout);
     };

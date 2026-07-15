@@ -15,6 +15,7 @@ interface RequestBody {
   pdfFileName: string;
   manufacturerPdfBase64?: string;
   manufacturerPdfFileName?: string;
+  updateQuoteDeliveryStatus?: boolean;
 }
 
 function isValidEmail(email: string): boolean {
@@ -84,6 +85,7 @@ Deno.serve(async (req: Request) => {
       pdfFileName,
       manufacturerPdfBase64,
       manufacturerPdfFileName,
+      updateQuoteDeliveryStatus = true,
     } = body;
 
     if (!quoteId || !recipientEmail || !subject || !message || !pdfBase64 || !pdfFileName) {
@@ -109,7 +111,7 @@ Deno.serve(async (req: Request) => {
     // Verify the quote exists and belongs to this org
     const { data: quoteRow, error: quoteError } = await adminClient
       .from('quotes')
-      .select('id, status')
+      .select('*')
       .eq('id', quoteId)
       .single();
 
@@ -192,7 +194,12 @@ Deno.serve(async (req: Request) => {
       error: null,
     });
 
-    // Update quote status → sent (only advance if not already past 'sent')
+    if (!updateQuoteDeliveryStatus) {
+      return jsonResponse({ success: true, quote: quoteRow }, 200);
+    }
+
+    // Customer delivery updates the quote's sent state. Manufacturer RFQs are
+    // logged above but intentionally do not replace customer delivery data.
     const advanceStatus = ['draft', 'sent'].includes(quoteRow.status);
     const { data: updatedQuote, error: updateError } = await adminClient
       .from('quotes')

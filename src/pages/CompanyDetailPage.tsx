@@ -53,6 +53,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Separator } from '@/components/ui/separator';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import {
   getCompanyWithContacts,
@@ -62,7 +63,23 @@ import {
   updateContact,
   deleteContact,
 } from '@/lib/companies-api';
-import type { Company, Contact, CompanySettings } from '@/types';
+import { listTemplates } from '@/lib/templates-api';
+import type { Company, Contact, CompanySettings, Template } from '@/types';
+
+function formatPartNumberMap(value?: Record<string, string>): string {
+  return Object.entries(value ?? {}).map(([internal, customer]) => `${internal} = ${customer}`).join('\n');
+}
+
+function parsePartNumberMap(value: string): Record<string, string> {
+  const entries = value.split(/\r?\n/).flatMap((line) => {
+    const separator = line.indexOf('=');
+    if (separator < 1) return [];
+    const internal = line.slice(0, separator).trim();
+    const customer = line.slice(separator + 1).trim();
+    return internal && customer ? [[internal, customer] as const] : [];
+  });
+  return Object.fromEntries(entries);
+}
 
 export default function CompanyDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -90,15 +107,23 @@ export default function CompanyDetailPage() {
     costMultiplier: 1.0,
     paymentTerms: null,
     defaultTemplateId: null,
+    defaultQuoteOrganizationMode: 'by_product_group',
+    defaultQuoteDetailLevel: 'rolled_up',
+    quoteValidityDays: 90,
   });
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [partNumberMapText, setPartNumberMapText] = useState('');
+  const [quoteTemplates, setQuoteTemplates] = useState<Template[]>([]);
 
   const load = useCallback(async () => {
     if (!id) return;
     try {
       setIsLoading(true);
       setError(null);
-      const result = await getCompanyWithContacts(id);
+      const [result, templates] = await Promise.all([
+        getCompanyWithContacts(id),
+        listTemplates().catch(() => [] as Template[]),
+      ]);
       if (!result) {
         setError('Company not found');
         return;
@@ -106,6 +131,8 @@ export default function CompanyDetailPage() {
       setCompany(result.company);
       setContacts(result.contacts);
       setSettingsValues(result.company.settings);
+      setPartNumberMapText(formatPartNumberMap(result.company.settings.customerPartNumberMap));
+      setQuoteTemplates(templates.filter((template) => template.audience === 'customer'));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load company');
     } finally {
@@ -167,6 +194,15 @@ export default function CompanyDetailPage() {
     if (shippingCity && billingCity) shippingCity.value = billingCity.value;
     if (shippingState && billingState) shippingState.value = billingState.value;
     if (shippingZip && billingZip) shippingZip.value = billingZip.value;
+  };
+
+  const copyShippingToBilling = (form: HTMLFormElement | null) => {
+    if (!form) return;
+    for (const field of ['Street', 'City', 'State', 'Zip']) {
+      const shipping = form.elements.namedItem(`shipping${field}`) as HTMLInputElement | null;
+      const billing = form.elements.namedItem(`billing${field}`) as HTMLInputElement | null;
+      if (shipping && billing) billing.value = shipping.value;
+    }
   };
 
   // ---- Contacts ----
@@ -234,7 +270,10 @@ export default function CompanyDetailPage() {
     if (!company) return;
     setIsSavingSettings(true);
     try {
-      await updateCompanySettings(company.id, settingsValues);
+      await updateCompanySettings(company.id, {
+        ...settingsValues,
+        customerPartNumberMap: parsePartNumberMap(partNumberMapText),
+      });
       toast({ title: 'Settings saved' });
       await load();
     } catch (err) {
@@ -563,6 +602,130 @@ export default function CompanyDetailPage() {
                 />
               </div>
 
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-sm">Quote Organization</Label>
+                  <Select
+                    value={settingsValues.defaultQuoteOrganizationMode ?? 'by_product_group'}
+                    onValueChange={(value) => setSettingsValues((prev) => ({
+                      ...prev,
+                      defaultQuoteOrganizationMode: value as CompanySettings['defaultQuoteOrganizationMode'],
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="by_product_group">By Product Group</SelectItem>
+                      <SelectItem value="by_opening">By Opening</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-sm">Quote Detail</Label>
+                  <Select
+                    value={settingsValues.defaultQuoteDetailLevel ?? 'rolled_up'}
+                    onValueChange={(value) => setSettingsValues((prev) => ({
+                      ...prev,
+                      defaultQuoteDetailLevel: value as CompanySettings['defaultQuoteDetailLevel'],
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="summary">Summary Only</SelectItem>
+                      <SelectItem value="rolled_up">Rolled-Up Totals</SelectItem>
+                      <SelectItem value="per_item_sell">Per-Item Sell</SelectItem>
+                      <SelectItem value="full_internal">Full Internal Detail</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-sm">Default Customer Quote Template</Label>
+                <Select
+                  value={settingsValues.defaultQuoteTemplateKey ?? '__none'}
+                  onValueChange={(value) => setSettingsValues((prev) => ({
+                    ...prev,
+                    defaultQuoteTemplateKey: value === '__none' ? null : value,
+                  }))}
+                >
+                  <SelectTrigger><SelectValue placeholder="Use system default" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none">Use system default</SelectItem>
+                    {quoteTemplates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Applied automatically when starting a new customer quote for this company.</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="quoteValidityDays" className="text-sm">Quote Validity Days</Label>
+                <Input
+                  id="quoteValidityDays"
+                  type="number"
+                  min={1}
+                  value={settingsValues.quoteValidityDays ?? 90}
+                  onChange={(e) => setSettingsValues((prev) => ({
+                    ...prev,
+                    quoteValidityDays: Math.max(1, Number(e.target.value) || 90),
+                  }))}
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="quoteHeaderText" className="text-sm">Default Quote Header</Label>
+                <Textarea
+                  id="quoteHeaderText"
+                  rows={2}
+                  value={settingsValues.quoteHeaderText ?? ''}
+                  onChange={(e) => setSettingsValues((prev) => ({ ...prev, quoteHeaderText: e.target.value || null }))}
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="quoteDisclaimerText" className="text-sm">Default Disclaimer</Label>
+                <Textarea
+                  id="quoteDisclaimerText"
+                  rows={3}
+                  value={settingsValues.quoteDisclaimerText ?? ''}
+                  onChange={(e) => setSettingsValues((prev) => ({ ...prev, quoteDisclaimerText: e.target.value || null }))}
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="quoteFooterText" className="text-sm">Default Quote Footer</Label>
+                <Textarea
+                  id="quoteFooterText"
+                  rows={2}
+                  value={settingsValues.quoteFooterText ?? ''}
+                  onChange={(e) => setSettingsValues((prev) => ({ ...prev, quoteFooterText: e.target.value || null }))}
+                />
+              </div>
+
+              <div className="space-y-2 rounded-md border p-3">
+                <div className="flex items-start gap-2">
+                  <Checkbox
+                    id="showCustomerPartNumbers"
+                    checked={settingsValues.showCustomerPartNumbers ?? false}
+                    onCheckedChange={(checked) => setSettingsValues((prev) => ({
+                      ...prev,
+                      showCustomerPartNumbers: checked === true,
+                    }))}
+                  />
+                  <div>
+                    <Label htmlFor="showCustomerPartNumbers" className="text-sm">Show customer part numbers</Label>
+                    <p className="text-xs text-muted-foreground">Replaces matching internal codes on this customer’s Sales Estimate.</p>
+                  </div>
+                </div>
+                <Textarea
+                  value={partNumberMapText}
+                  onChange={(event) => setPartNumberMapText(event.target.value)}
+                  rows={5}
+                  placeholder={'Internal code = Customer part\nH-3070 = FB-10042'}
+                  disabled={!settingsValues.showCustomerPartNumbers}
+                />
+                <p className="text-[11px] text-muted-foreground">One mapping per line. Unmapped codes retain their internal value.</p>
+              </div>
+
               <Button
                 onClick={handleSaveSettings}
                 disabled={isSavingSettings}
@@ -625,7 +788,12 @@ export default function CompanyDetailPage() {
               </div>
 
               <div className="space-y-2">
-                <Label className="text-sm font-medium">Billing Address</Label>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Billing Address</Label>
+                  <Button type="button" variant="ghost" size="sm" onClick={(event) => copyShippingToBilling(event.currentTarget.form)}>
+                    Copy Shipping
+                  </Button>
+                </div>
                 <Input
                   name="billingStreet"
                   defaultValue={company.billingAddress ?? ''}

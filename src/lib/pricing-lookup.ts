@@ -380,10 +380,10 @@ async function resolveDoorPrice(
   const heightIn = rawHeight ? parseDoorDimension(rawHeight) : null;
 
   if (widthIn === null) {
-    return noResult('no_row', `Cannot parse width "${rawWidth}" — enter as nominal (36 = 3'6\"), hyphen (3-6), or plain inches`, tableId);
+    return noResult('no_row', `Cannot parse width "${rawWidth}" — enter as nominal (36 = 3'6"), hyphen (3-6), or plain inches`, tableId);
   }
   if (heightIn === null) {
-    return noResult('no_row', `Cannot parse height "${rawHeight}" — enter as nominal (68 = 6'8\"), hyphen (6-8), or plain inches`, tableId);
+    return noResult('no_row', `Cannot parse height "${rawHeight}" — enter as nominal (68 = 6'8"), hyphen (6-8), or plain inches`, tableId);
   }
 
   // 3. Fetch all rows and match by width AND height

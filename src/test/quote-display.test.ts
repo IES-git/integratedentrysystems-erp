@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCustomerDisplayRows,
+  applyCompanyQuoteDefaults,
   createDefaultAudienceDisplayConfig,
   createDefaultQuoteDisplayConfig,
   getEffectiveVisibleColumns,
@@ -8,6 +9,7 @@ import {
   getLineDisplayKey,
   hasHiddenDisplayLines,
   normalizeAudienceDisplayConfig,
+  resolveCustomerPartNumber,
   resolveQuoteDocumentDisplayConfig,
 } from '@/lib/quote-display';
 import type { QuoteItem } from '@/types';
@@ -209,5 +211,42 @@ describe('quote display helpers', () => {
       'description',
       'line_total',
     ]);
+  });
+
+  it('defaults new customer quotes to rolled-up product groups', () => {
+    const config = createDefaultQuoteDisplayConfig(null, 'customer');
+
+    expect(config.version).toBe(2);
+    if (config.version !== 2) return;
+    expect(config.organizationMode).toBe('by_product_group');
+    expect(config.detailMode).toBe('rolled_up');
+    expect(config.validityDays).toBe(90);
+  });
+
+  it('applies persisted company presentation defaults to a new quote', () => {
+    const config = applyCompanyQuoteDefaults(createDefaultQuoteDisplayConfig(null, 'customer'), {
+      costMultiplier: 1.25,
+      paymentTerms: 'Net 30',
+      defaultTemplateId: null,
+      defaultQuoteOrganizationMode: 'by_opening',
+      defaultQuoteDetailLevel: 'per_item_sell',
+      quoteValidityDays: 45,
+      quoteHeaderText: 'Customer-specific header',
+      quoteDisclaimerText: 'Customer-specific disclaimer',
+    });
+
+    expect(config.organizationMode).toBe('by_opening');
+    expect(config.detailMode).toBe('per_item_sell');
+    expect(config.validityDays).toBe(45);
+    expect(config.headerText).toBe('Customer-specific header');
+    expect(config.disclaimerText).toBe('Customer-specific disclaimer');
+  });
+
+  it('uses customer-specific part numbers without dropping unmapped codes', () => {
+    const map = { 'HM-DOOR': 'FB-10042' };
+    expect(resolveCustomerPartNumber('HM-DOOR', true, map)).toBe('FB-10042');
+    expect(resolveCustomerPartNumber('hm-door', true, map)).toBe('FB-10042');
+    expect(resolveCustomerPartNumber('HW-SET', true, map)).toBe('HW-SET');
+    expect(resolveCustomerPartNumber('HM-DOOR', false, map)).toBe('HM-DOOR');
   });
 });

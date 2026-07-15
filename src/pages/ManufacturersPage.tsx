@@ -118,6 +118,15 @@ export default function ManufacturersPage() {
     if (shippingZip && billingZip) shippingZip.value = billingZip.value;
   };
 
+  const copyShippingToBilling = (form: HTMLFormElement | null) => {
+    if (!form) return;
+    for (const field of ['Street', 'City', 'State', 'Zip']) {
+      const shipping = form.elements.namedItem(`shipping${field}`) as HTMLInputElement | null;
+      const billing = form.elements.namedItem(`billing${field}`) as HTMLInputElement | null;
+      if (shipping && billing) billing.value = shipping.value;
+    }
+  };
+
   const handleSave = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -363,7 +372,12 @@ export default function ManufacturersPage() {
               </div>
 
               <div className="space-y-2">
-                <Label className="text-sm font-medium">Billing Address</Label>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Billing Address</Label>
+                  <Button type="button" variant="ghost" size="sm" onClick={(event) => copyShippingToBilling(event.currentTarget.form)}>
+                    Copy Shipping
+                  </Button>
+                </div>
                 <Input
                   name="billingStreet"
                   defaultValue={editingManufacturer?.billingAddress ?? ''}

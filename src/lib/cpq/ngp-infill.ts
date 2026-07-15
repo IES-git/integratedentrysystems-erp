@@ -309,6 +309,17 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
 
   if (input.infillType === 'NONE') return base;
 
+  // 120-minute and 3-hour openings do not permit vision-lite glazing. Route
+  // these configurations back to the estimator before any kit/glass is priced.
+  if (input.infillType === 'LITE' && (input.fireRatingMinutes ?? 0) >= 120) {
+    issues.push({
+      code: 'NGP_FIRE_RATING_BLOCKS_LITE',
+      severity: 'block',
+      message: `${input.fireRatingMinutes}-minute fire labels do not permit a vision lite; remove the cutout or use the approved manual/custom assembly workflow.`,
+    });
+    return base;
+  }
+
   if (input.infillType === 'LOUVER') {
     const candidates = filterLouvers(catalog, input);
     base.candidateLouvers = candidates;
@@ -336,7 +347,7 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
     else if (orderW != null && orderH != null) {
       components.push({
         entityType: 'louver', code: louver.model ?? 'louver', quantity: cores,
-        label: `NGP louver ${louver.model} (${orderW}×${orderH})`,
+        label: `NGP louver ${louver.model} — ${infillDimensionSummary(input, base, orderW, orderH, null)}`,
         fields: {
           ...ngpFields(pt.priceTableId, orderW, orderH, input),
           ...ngpDisplayFields(input, base, null),
@@ -404,7 +415,7 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
   } else if (orderW != null && orderH != null) {
     components.push({
       entityType: 'lite_kit', code: kitModel, quantity: 1,
-      label: `NGP lite kit ${kitModel} (${orderW}×${orderH})${pt.assembly ? ' assembly' : ''}`,
+      label: `NGP lite kit ${kitModel}${pt.assembly ? ' assembly' : ''} — ${infillDimensionSummary(input, base, orderW, orderH, glass?.model ?? input.glassModel ?? null)}`,
       fields: {
         ...ngpFields(pt.priceTableId, orderW, orderH, input),
         ...ngpDisplayFields(input, base, glass?.model ?? input.glassModel ?? null),
@@ -420,7 +431,7 @@ export function resolveInfill(catalog: NgpCatalog, input: InfillSelectionInput):
     if (gpt && orderW != null && orderH != null) {
       components.push({
         entityType: 'glass', code: glass.model ?? 'glass', quantity: 1,
-        label: `NGP glass ${glass.model} (${orderW}×${orderH})`,
+        label: `NGP glass ${glass.model} — ${infillDimensionSummary(input, base, orderW, orderH, glass.model ?? input.glassModel ?? null)}`,
         fields: {
           'infill.price_table_id': gpt,
           'infill.order_width_in': orderW,
@@ -496,6 +507,25 @@ function ngpDisplayFields(
   if (resolved.exposedHeightIn != null) fields['infill.visible_height_in'] = resolved.exposedHeightIn;
   if (glassType) fields['infill.glass_type'] = glassType;
   return fields;
+}
+
+function infillDimensionSummary(
+  input: InfillSelectionInput,
+  resolved: Pick<ResolvedInfill, 'exposedWidthIn' | 'exposedHeightIn'>,
+  orderWidthIn: number,
+  orderHeightIn: number,
+  glassType: string | null,
+): string {
+  const parts: string[] = [];
+  if (input.cutoutWidthIn != null && input.cutoutHeightIn != null) {
+    parts.push(`cutout ${input.cutoutWidthIn}×${input.cutoutHeightIn}"`);
+  }
+  parts.push(`kit ${orderWidthIn}×${orderHeightIn}"`);
+  if (resolved.exposedWidthIn != null && resolved.exposedHeightIn != null) {
+    parts.push(`visible ${resolved.exposedWidthIn}×${resolved.exposedHeightIn}"`);
+  }
+  if (glassType) parts.push(`glass ${glassType}`);
+  return parts.join(' · ');
 }
 
 /**

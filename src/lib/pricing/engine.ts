@@ -924,6 +924,18 @@ export function priceOpeningCore(
   lines.push(...ka.lines);
   manualQuotes.push(...ka.manualQuotes);
 
+  // Freeze the selected component manufacturer onto structural lines. Hardware
+  // already carries its manufacturer from hardware_product and must never
+  // inherit the door/frame manufacturer merely because the same pricing run
+  // used a structural price book.
+  const componentManufacturer = new Map(
+    spec.components.map((component) => [component.id, component.manufacturerId ?? null]),
+  );
+  for (const line of lines) {
+    if (line.entityType === 'hardware' || line.manufacturerId) continue;
+    if (line.componentId) line.manufacturerId = componentManufacturer.get(line.componentId) ?? null;
+  }
+
   // 4b. NGP order-level commercial policies (oversize / minimums / handling).
   if (ngp && ngp.policies.length > 0) {
     const ngpLines = lines.filter((l) => l.entityType != null && NGP_ENTITY_SET.has(l.entityType));
@@ -1108,6 +1120,8 @@ export async function persistEngineResult(
     source_page: l.sourcePage ?? sourcePages.get(l.sourceRegionId ?? '') ?? null,
     source_region_id: l.sourceRegionId,
     price_book_id: l.priceBookId ?? documentId,
+    manufacturer_id: l.manufacturerId ?? null,
+    manufacturer_name: l.manufacturerName?.trim() || null,
     confidence: l.confidence,
     exception_message: l.exceptionMessage,
     sort_order: l.sortOrder,

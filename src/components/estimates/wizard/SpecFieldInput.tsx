@@ -46,8 +46,8 @@ function displayOptionLabel(value: string): string {
 }
 
 const HAND_GROUPS = [
-  { label: 'Inswing', values: ['RH', 'LH'] },
   { label: 'Outswing', values: ['RHR', 'LHR'] },
+  { label: 'Inswing', values: ['RH', 'LH'] },
   { label: 'Non-handed', values: ['NH'] },
   { label: 'Frame pair', values: ['RHA', 'LHA', 'DA'] },
 ];

@@ -29,13 +29,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { getEstimateWithItems, updateEstimateOpening } from '@/lib/estimates-api';
 import { refreshEstimatePricing } from '@/lib/pricing-lookup';
-import { getCompany } from '@/lib/companies-api';
-import { createQuote, getQuoteWithItems, updateQuoteWithItems, type CreateQuoteLineSnapshotInput } from '@/lib/quotes-api';
+import { getCompany, listContacts, listManufacturers } from '@/lib/companies-api';
+import { createQuote, getQuoteWithItems, updateQuote, type CreateQuoteLineSnapshotInput } from '@/lib/quotes-api';
 import { getTemplate } from '@/lib/templates-api';
 import { assertEstimateBuildable, priceEstimate } from '@/lib/cpq/service';
 import { loadEstimateLinesByOpening } from '@/lib/cpq/estimate-lines-api';
@@ -47,11 +48,19 @@ import {
   QuotePresentationControls,
   type QuoteCopyGenerationRequest,
 } from '@/components/quotes/QuotePresentationControls';
-import { normalizeCompactNominalDimension } from '@/components/pricing/dimension-utils';
+import { normalizeArchitecturalDimension } from '@/components/pricing/dimension-utils';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
+import {
+  buildOperationalOutputRows,
+  groupOperationalRowsByManufacturer,
+  isManufacturerProcurementRow,
+  manufacturerRfqFilename,
+  operationalSnapshotKey,
+} from '@/lib/operational-outputs';
 import { getMarkupOverrideMatch } from '@/lib/customer-markups';
 import {
   createDefaultQuoteDisplayConfig,
+  applyCompanyQuoteDefaults,
   getBlock,
   parseQuoteDisplayConfigJson,
   serializeQuoteDisplayConfig,
@@ -59,13 +68,17 @@ import {
 } from '@/lib/quote-display';
 import type {
   Company,
+  Contact,
+  Estimate,
   EstimateItem,
   EstimateOpeningWithItems,
   EstimateLine,
   ItemField,
   Quote,
+  QuoteContextSnapshot,
   QuoteDisplayConfig,
   QuoteItem,
+  QuoteLineSnapshot,
   QuoteType,
 } from '@/types';
 
@@ -93,6 +106,15 @@ interface LineItem {
   unitPrice: number;
   /** Total for this line across all opening instances (unitPrice × qty × openingQty). */
   lineTotal: number;
+}
+
+interface ManufacturerIdentity {
+  id: string | null;
+  name: string | null;
+}
+
+function hardwareSkuKey(value: string | null | undefined): string {
+  return value?.trim().toUpperCase() ?? '';
 }
 
 const QUOTE_COPY_FIELD_TARGETS: Record<QuoteCopyGenerationRequest['field'], QuoteCopyTarget> = {
@@ -142,6 +164,34 @@ function compactSpecFields(spec?: Record<string, string>): Record<string, string
       .filter(([, value]) => Boolean(value))
       .slice(0, 18),
   );
+}
+
+function getOpeningOrderData(opening: EstimateOpeningWithItems | undefined): Record<string, string | null> | null {
+  if (!opening) return null;
+  const snapshot = opening.specSnapshot as {
+    configurationType?: string;
+    openingWidth?: string;
+    openingHeight?: string;
+    openingFields?: Record<string, string>;
+  } | null | undefined;
+  const fields = snapshot?.openingFields ?? {};
+  const value = (path: string) => fields[path]?.trim() || null;
+  const data = {
+    openingMark: opening.name,
+    configurationType: snapshot?.configurationType ?? null,
+    nominalWidth: snapshot?.openingWidth ?? null,
+    nominalHeight: snapshot?.openingHeight ?? null,
+    transomType: value('opening.transom_infill_type'),
+    transomScope: value('opening.transom_scope'),
+    dodWidth: value('opening.door_opening_dimension_width'),
+    dodHeight: value('opening.door_opening_dimension_height'),
+    transomWidth: value('opening.transom_width'),
+    transomHeight: value('opening.transom_height'),
+    overallFrameWidth: value('opening.overall_frame_width'),
+    overallFrameHeight: value('opening.overall_frame_height'),
+    frameOrderCallout: value('opening.frame_order_callout'),
+  };
+  return Object.values(data).some(Boolean) ? data : null;
 }
 
 function buildInitialMultipliers({
@@ -663,7 +713,7 @@ function formatSpecValue(key: string, value: unknown): string {
   const raw = String(value ?? '');
   if (!raw) return raw;
   if (!NOMINAL_SPEC_KEYS.has(key)) return raw;
-  return normalizeCompactNominalDimension(raw) ?? raw;
+  return normalizeArchitecturalDimension(raw) ?? raw;
 }
 
 interface BuildSpecPanelProps {
@@ -1136,6 +1186,7 @@ export default function QuoteBuilderPage() {
   const requestedEstimateId = searchParams.get('estimateId');
   const requestedCustomerId = searchParams.get('customerId');
   const requestedQuoteType = (searchParams.get('quoteType') ?? 'customer') as QuoteType;
+  const requestedManufacturerId = searchParams.get('manufacturerId');
   const templateId = searchParams.get('templateId');
   const baseQuoteId = searchParams.get('baseQuoteId');
   const editQuoteId = routeQuoteId ?? searchParams.get('quoteId');
@@ -1152,18 +1203,31 @@ export default function QuoteBuilderPage() {
     quoteType: requestedQuoteType,
   }));
   const [estimateItems, setEstimateItems] = useState<EstimateItemWithFields[]>([]);
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
   const [openings, setOpenings] = useState<EstimateOpeningWithItems[]>([]);
   const [linesByOpening, setLinesByOpening] = useState<Map<string, EstimateLine[]>>(new Map());
   const [quotableOpenings, setQuotableOpenings] = useState<QuotableOpening[]>([]);
   // Per-opening spec: door fields + frame fields loaded from item_fields.
   const [openingSpecMap, setOpeningSpecMap] = useState<Map<string, { door: Record<string, string>; frame: Record<string, string> }>>(new Map());
   const [company, setCompany] = useState<Company | null>(null);
+  const [primaryContact, setPrimaryContact] = useState<Contact | null>(null);
+  const [manufacturerByPriceBookId, setManufacturerByPriceBookId] = useState<Map<string, ManufacturerIdentity>>(new Map());
+  const [manufacturerByHardwareSku, setManufacturerByHardwareSku] = useState<Map<string, ManufacturerIdentity>>(new Map());
+  const [manufacturerNameById, setManufacturerNameById] = useState<Map<string, string>>(new Map());
+  const [rfqManufacturers, setRfqManufacturers] = useState<Array<Pick<Company, 'id' | 'name'>>>([]);
+  const [manufacturerOverrideBySourceKey, setManufacturerOverrideBySourceKey] = useState<Record<string, ManufacturerIdentity>>({});
+  const [isManufacturerAssignmentOpen, setIsManufacturerAssignmentOpen] = useState(false);
   const [notes, setNotes] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isDownloadingCustomer, setIsDownloadingCustomer] = useState(false);
   const [isDownloadingManufacturer, setIsDownloadingManufacturer] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [savedQuote, setSavedQuote] = useState<Quote | null>(null);
+  const [savedQuoteItems, setSavedQuoteItems] = useState<QuoteItem[]>([]);
+  const [savedQuoteSnapshots, setSavedQuoteSnapshots] = useState<QuoteLineSnapshot[]>([]);
+  const [selectedManufacturerKey, setSelectedManufacturerKey] = useState(
+    requestedManufacturerId ? `id:${requestedManufacturerId}` : '',
+  );
   const [displayConfig, setDisplayConfig] = useState<QuoteDisplayConfig>(() =>
     createDefaultQuoteDisplayConfig(null, requestedQuoteType),
   );
@@ -1249,12 +1313,16 @@ export default function QuoteBuilderPage() {
           quoteType: effectiveQuoteType,
         });
         setSavedQuote(editQuoteId && sourceQuote ? sourceQuote : null);
+        setSavedQuoteItems(editQuoteId && sourceQuoteResult ? sourceQuoteResult.items : []);
+        setSavedQuoteSnapshots(editQuoteId && sourceQuoteResult ? sourceQuoteResult.snapshots : []);
         setNotes(sourceQuote?.notes ?? '');
 
-        const [result, engineLines, selectedTemplate] = await Promise.all([
+        const [result, engineLines, loadedCompany, companyContacts, availableManufacturers] = await Promise.all([
           getEstimateWithItems(effectiveEstimateId),
           loadEstimateLinesByOpening(effectiveEstimateId).catch(() => new Map<string, EstimateLine[]>()),
-          templateId ? getTemplate(templateId).catch(() => null) : Promise.resolve(null),
+          effectiveCustomerId ? getCompany(effectiveCustomerId).catch(() => null) : Promise.resolve(null),
+          effectiveCustomerId ? listContacts(effectiveCustomerId).catch(() => []) : Promise.resolve([] as Contact[]),
+          listManufacturers().catch(() => []),
         ]);
         if (!result) {
           toast({
@@ -1264,16 +1332,90 @@ export default function QuoteBuilderPage() {
           navigate('/app/estimates');
           return;
         }
+        if (!sourceQuote && !result.estimate.jobName?.trim()) {
+          toast({
+            title: 'Job setup required',
+            description: 'Add a job name and confirm project details before creating a quote.',
+            variant: 'destructive',
+          });
+          navigate(`/app/estimates/${effectiveEstimateId}/edit?step=1`);
+          return;
+        }
         const items = result.items;
+        const preferredTemplateId = templateId
+          ?? loadedCompany?.settings?.defaultQuoteTemplateKey
+          ?? loadedCompany?.settings?.defaultTemplateId
+          ?? null;
+        const selectedTemplate = preferredTemplateId
+          ? await getTemplate(preferredTemplateId).catch(() => null)
+          : null;
         const defaultDisplayConfig = createDefaultQuoteDisplayConfig(selectedTemplate, effectiveQuoteType);
         setDisplayConfig(
           sourceQuote?.displayConfigJson
             ? parseQuoteDisplayConfigJson(sourceQuote.displayConfigJson) ?? defaultDisplayConfig
-            : defaultDisplayConfig,
+            : applyCompanyQuoteDefaults(defaultDisplayConfig, loadedCompany?.settings),
         );
+        setEstimate(result.estimate);
         setEstimateItems(items);
+        setRfqManufacturers(availableManufacturers.map(({ id, name }) => ({ id, name })));
         setOpenings(result.openings ?? []);
         setLinesByOpening(engineLines);
+
+        const priceBookIds = [...new Set(
+          [...engineLines.values()].flat().map((line) => line.priceBookId).filter(Boolean),
+        )] as string[];
+        const allEngineLines = [...engineLines.values()].flat();
+        const hardwareSkus = [...new Set(
+          allEngineLines
+            .filter((line) => line.entityType === 'hardware')
+            .map((line) => hardwareSkuKey(line.selectedOptionCode))
+            .filter(Boolean),
+        )];
+        const legacyManufacturerIds = items.map((item) => item.manufacturerId).filter(Boolean) as string[];
+        const engineManufacturerIds = allEngineLines.map((line) => line.manufacturerId).filter(Boolean) as string[];
+        const priceBookManufacturerMap = new Map<string, ManufacturerIdentity>();
+        const hardwareManufacturerMap = new Map<string, ManufacturerIdentity>();
+        const manufacturerNames = new Map<string, string>();
+        if (priceBookIds.length > 0) {
+          const { data: documentRows } = await supabase
+            .from('price_book_document')
+            .select('id, manufacturer_id, manufacturer:companies(name)')
+            .in('id', priceBookIds);
+          for (const row of documentRows ?? []) {
+            const relation = row.manufacturer as unknown as { name?: string } | null;
+            const manufacturerId = row.manufacturer_id as string | null;
+            const manufacturerName = relation?.name ?? null;
+            priceBookManufacturerMap.set(row.id as string, { id: manufacturerId, name: manufacturerName });
+            if (manufacturerId && manufacturerName) manufacturerNames.set(manufacturerId, manufacturerName);
+          }
+        }
+        if (hardwareSkus.length > 0) {
+          const { data: variantRows } = await supabase
+            .from('hardware_variant')
+            .select('sku, hardware_product(manufacturer_id, manufacturer_name)')
+            .in('sku', hardwareSkus);
+          for (const row of variantRows ?? []) {
+            const product = row.hardware_product as unknown as { manufacturer_id?: string | null; manufacturer_name?: string | null } | null;
+            const manufacturerId = product?.manufacturer_id ?? null;
+            const manufacturerName = product?.manufacturer_name?.trim() || null;
+            hardwareManufacturerMap.set(hardwareSkuKey(row.sku as string | null), { id: manufacturerId, name: manufacturerName });
+            if (manufacturerId && manufacturerName) manufacturerNames.set(manufacturerId, manufacturerName);
+          }
+        }
+        const missingManufacturerIds = [...new Set(
+          [...legacyManufacturerIds, ...engineManufacturerIds]
+            .filter((id) => !manufacturerNames.has(id)),
+        )];
+        if (missingManufacturerIds.length > 0) {
+          const { data: manufacturerRows } = await supabase
+            .from('companies')
+            .select('id, name')
+            .in('id', missingManufacturerIds);
+          for (const row of manufacturerRows ?? []) manufacturerNames.set(row.id as string, row.name as string);
+        }
+        setManufacturerByPriceBookId(priceBookManufacturerMap);
+        setManufacturerByHardwareSku(hardwareManufacturerMap);
+        setManufacturerNameById(manufacturerNames);
 
         // Build quotable openings from engine lines (one per opening that has them).
         const qo = buildQuotableOpenings(result.openings ?? [], engineLines);
@@ -1311,17 +1453,23 @@ export default function QuoteBuilderPage() {
         let overrides: Record<string, number> = {};
 
         if (effectiveCustomerId) {
-          const co = await getCompany(effectiveCustomerId);
-          setCompany(co);
-          if (co) {
-            defaultMult = co.settings?.costMultiplier ?? 1.0;
-            overrides = co.settings?.markupOverrides ?? {};
+          setCompany(loadedCompany);
+          setPrimaryContact(
+            companyContacts.find((contact) => contact.id === result.estimate.customerContactId)
+              ?? companyContacts.find((contact) => contact.isPrimary)
+              ?? companyContacts[0]
+              ?? null,
+          );
+          if (loadedCompany) {
+            defaultMult = loadedCompany.settings?.costMultiplier ?? 1.0;
+            overrides = loadedCompany.settings?.markupOverrides ?? {};
             setBulkOverrides(overrides);
           } else {
             setBulkOverrides({});
           }
         } else {
           setCompany(null);
+          setPrimaryContact(null);
           setBulkOverrides({});
         }
 
@@ -1578,23 +1726,100 @@ export default function QuoteBuilderPage() {
     [lineItems]
   );
 
+  const buildQuoteContextSnapshot = useCallback((): QuoteContextSnapshot | null => {
+    if (!estimate) return null;
+    return {
+      version: 1,
+      capturedAt: new Date().toISOString(),
+      job: {
+        jobName: estimate.jobName,
+        jobLocation: estimate.jobLocation,
+        jobNumber: estimate.jobNumber,
+        customerPo: estimate.customerPo,
+        quoteDate: estimate.quoteDate,
+        shippingMethod: estimate.shippingMethod,
+        terms: estimate.terms,
+        delivery: estimate.delivery,
+        shipToSource: estimate.shipToSource,
+        shipToAddress: estimate.shipToAddress,
+        shipToCity: estimate.shipToCity,
+        shipToState: estimate.shipToState,
+        shipToZip: estimate.shipToZip,
+        customerContactId: estimate.customerContactId,
+        customerRepName: estimate.customerRepName,
+        customerRepPhone: estimate.customerRepPhone,
+        customerRepEmail: estimate.customerRepEmail,
+        internalNotes: estimate.internalNotes,
+      },
+      company: company ? {
+        id: company.id,
+        name: company.name,
+        billingAddress: company.billingAddress,
+        billingCity: company.billingCity,
+        billingState: company.billingState,
+        billingZip: company.billingZip,
+        shippingAddress: company.shippingAddress,
+        shippingCity: company.shippingCity,
+        shippingState: company.shippingState,
+        shippingZip: company.shippingZip,
+        paymentTerms: company.settings?.paymentTerms ?? null,
+        showCustomerPartNumbers: company.settings?.showCustomerPartNumbers ?? false,
+        customerPartNumberMap: company.settings?.customerPartNumberMap ?? {},
+      } : null,
+      contact: primaryContact ? {
+        id: primaryContact.id,
+        firstName: primaryContact.firstName,
+        lastName: primaryContact.lastName,
+        email: primaryContact.email,
+        phone: primaryContact.phone,
+        title: primaryContact.title,
+      } : null,
+      openingNames: Object.fromEntries(openings.map((opening) => [opening.id, opening.name])),
+    };
+  }, [company, estimate, openings, primaryContact]);
+
+  const resolveLineManufacturer = useCallback((line: EstimateLine): ManufacturerIdentity => {
+    const explicitName = line.manufacturerName?.trim()
+      || (line.manufacturerId ? manufacturerNameById.get(line.manufacturerId) ?? null : null);
+    if (line.manufacturerId || explicitName) {
+      return { id: line.manufacturerId ?? null, name: explicitName };
+    }
+
+    if (line.entityType === 'hardware') {
+      // Existing estimates created before manufacturer columns were introduced
+      // can still be routed from the immutable selected SKU. An unmatched or
+      // manual hardware line remains unassigned instead of inheriting CECO (or
+      // whichever structural price book happened to price the opening).
+      return manufacturerByHardwareSku.get(hardwareSkuKey(line.selectedOptionCode))
+        ?? { id: null, name: null };
+    }
+
+    return line.priceBookId
+      ? manufacturerByPriceBookId.get(line.priceBookId) ?? { id: null, name: null }
+      : { id: null, name: null };
+  }, [manufacturerByHardwareSku, manufacturerByPriceBookId, manufacturerNameById]);
+
   const buildQuoteLineSnapshots = useCallback(
-    (): CreateQuoteLineSnapshotInput[] =>
-      lineItems.map((li, idx) => {
+    (): CreateQuoteLineSnapshotInput[] => {
+      const pricedSnapshots = lineItems.map((li, idx): CreateQuoteLineSnapshotInput => {
         const item = li.estimateItem;
         const isEngLine = item.isEngineLineDetail === true;
         const openingQty = item.openingQuantity ?? 1;
         const quoteQuantity = isEngLine ? item.quantity * openingQty : item.quantity;
         const lineTotal = parseFloat((li.unitPrice * quoteQuantity).toFixed(2));
         const displayKey = getLineItemDisplayKey(item);
+        const opening = openings.find((candidate) => candidate.id === (item.engineLine?.openingId ?? item.openingId));
+        const openingOrderData = getOpeningOrderData(opening);
 
         if (isEngLine && item.engineLine) {
           const line = item.engineLine;
+          const manufacturer = resolveLineManufacturer(line);
           return {
             estimateId: estimateId ?? null,
             estimateLineId: line.id,
             estimateItemId: null,
             openingId: line.openingId ?? item.openingId ?? null,
+            openingName: openings.find((opening) => opening.id === (line.openingId ?? item.openingId))?.name ?? null,
             componentId: line.componentId ?? null,
             sourceTable: 'estimate_line',
             sourceLineType: line.lineType,
@@ -1602,6 +1827,9 @@ export default function QuoteBuilderPage() {
             chargeCategory: line.chargeCategory,
             description: line.description ?? item.itemLabel,
             selectedOptionCode: line.selectedOptionCode ?? item.canonicalCode ?? null,
+            manufacturerId: manufacturer.id,
+            manufacturerName: manufacturer.name,
+            partNumber: line.selectedOptionCode ?? item.canonicalCode ?? null,
             quantity: quoteQuantity,
             unitOfMeasure: line.unitOfMeasure,
             unitListPrice: line.unitListPrice,
@@ -1627,10 +1855,18 @@ export default function QuoteBuilderPage() {
               grossMarginPct: line.grossMarginPct,
               calculationExpression: line.calculationExpression,
               matchedConditions: line.matchedConditions,
+              fields: Object.entries(line.matchedConditions ?? {}).map(([key, value]) => ({
+                key,
+                label: SPEC_FIELD_LABELS[key] ?? key,
+                value: String(value ?? ''),
+              })),
               sourcePage: line.sourcePage,
               sourceRegionId: line.sourceRegionId,
               priceBookId: line.priceBookId,
+              manufacturerId: manufacturer.id,
+              manufacturerName: manufacturer.name,
               exceptionMessage: line.exceptionMessage,
+              openingOrderData,
             },
           };
         }
@@ -1640,6 +1876,7 @@ export default function QuoteBuilderPage() {
           estimateLineId: null,
           estimateItemId: item.id,
           openingId: item.openingId ?? null,
+          openingName: openings.find((opening) => opening.id === item.openingId)?.name ?? null,
           componentId: item.parentItemId ?? null,
           sourceTable: 'estimate_items',
           sourceLineType: null,
@@ -1647,6 +1884,9 @@ export default function QuoteBuilderPage() {
           chargeCategory: item.chargeCategory ?? item.subcategory ?? item.itemType ?? null,
           description: item.itemLabel,
           selectedOptionCode: item.canonicalCode ?? null,
+          manufacturerId: item.manufacturerId ?? null,
+          manufacturerName: item.manufacturerId ? manufacturerNameById.get(item.manufacturerId) ?? null : null,
+          partNumber: item.canonicalCode ?? null,
           quantity: quoteQuantity,
           unitOfMeasure: null,
           unitListPrice: item.unitPrice,
@@ -1671,10 +1911,89 @@ export default function QuoteBuilderPage() {
               label: field.fieldLabel,
               value: field.fieldValue,
             })),
+            openingOrderData,
           },
         };
-      }),
-    [estimateId, lineItems]
+      });
+
+      // Included manufacturer scope (most importantly standard door/frame
+      // preps) carries no separate price, so it is intentionally absent from
+      // customer pricing lines. It is still required to manufacture the
+      // opening and must be frozen into the procurement snapshot.
+      const includedSnapshots: CreateQuoteLineSnapshotInput[] = [];
+      for (const opening of openings) {
+        const openingOrderData = getOpeningOrderData(opening);
+        for (const line of linesByOpening.get(opening.id) ?? []) {
+          if (line.lineType !== 'INCLUDED' || line.includedOrSuppressedBy) continue;
+          const manufacturer = resolveLineManufacturer(line);
+          includedSnapshots.push({
+            estimateId: estimateId ?? null,
+            estimateLineId: line.id,
+            estimateItemId: null,
+            openingId: opening.id,
+            openingName: opening.name,
+            componentId: line.componentId ?? null,
+            sourceTable: 'estimate_line',
+            sourceLineType: line.lineType,
+            entityType: line.entityType,
+            chargeCategory: line.chargeCategory,
+            description: line.description,
+            selectedOptionCode: line.selectedOptionCode,
+            manufacturerId: manufacturer.id,
+            manufacturerName: manufacturer.name,
+            partNumber: line.selectedOptionCode,
+            quantity: Math.max(1, line.quantity ?? 1) * Math.max(1, opening.quantity),
+            unitOfMeasure: line.unitOfMeasure,
+            unitListPrice: 0,
+            extendedListPrice: 0,
+            discountMultiplier: null,
+            extendedNetPrice: 0,
+            sellPrice: 0,
+            manualSellPrice: null,
+            unitSellPrice: 0,
+            lineTotal: 0,
+            priceStatus: line.priceStatus,
+            reviewStatus: line.reviewStatus,
+            sortOrder: pricedSnapshots.length + includedSnapshots.length,
+            snapshotJson: {
+              displayKey: `engine-line:${line.id}`,
+              itemLabel: line.description,
+              canonicalCode: line.selectedOptionCode,
+              sourceQuantity: line.quantity,
+              openingQuantity: opening.quantity,
+              calculationExpression: line.calculationExpression,
+              matchedConditions: line.matchedConditions,
+              fields: Object.entries(line.matchedConditions ?? {}).map(([key, value]) => ({
+                key,
+                label: SPEC_FIELD_LABELS[key] ?? key,
+                value: String(value ?? ''),
+              })),
+              priceBookId: line.priceBookId,
+              manufacturerId: manufacturer.id,
+              manufacturerName: manufacturer.name,
+              openingOrderData,
+            },
+          });
+        }
+      }
+
+      return [...pricedSnapshots, ...includedSnapshots].map((snapshot) => {
+        const override = manufacturerOverrideBySourceKey[operationalSnapshotKey(snapshot)];
+        if (!override) return snapshot;
+        return {
+          ...snapshot,
+          manufacturerId: override.id,
+          manufacturerName: override.name,
+          snapshotJson: {
+            ...(snapshot.snapshotJson ?? {}),
+            manufacturerId: override.id,
+            manufacturerName: override.name,
+            manufacturerAssignmentSource: 'quote_override',
+          },
+        };
+      });
+    },
+    [estimateId, lineItems, linesByOpening, manufacturerNameById, manufacturerOverrideBySourceKey, openings, resolveLineManufacturer]
   );
 
   // ── Save quote ─────────────────────────────────────────────────────────────
@@ -1683,16 +2002,14 @@ export default function QuoteBuilderPage() {
     setIsSaving(true);
     try {
       // CPQ gate: block quoting non-buildable configurations (Phase 4).
-      await assertEstimateBuildable(estimateId);
+      if (!savedQuote) await assertEstimateBuildable(estimateId);
       const quote = savedQuote
-        ? await updateQuoteWithItems(savedQuote.id, {
-            markupMultiplier: effectiveMarkupMultiplier,
-            subtotal,
-            total,
+        ? await updateQuote(savedQuote.id, {
+            // Saved detail is immutable during presentation edits. Refreshing
+            // estimate lines belongs in a new quote revision, never an in-place
+            // replacement of the commercial snapshot that was already saved.
             notes: notes.trim() || null,
             displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
-            items: buildQuoteItems(),
-            snapshots: buildQuoteLineSnapshots(),
           })
         : await createQuote({
             estimateId,
@@ -1704,6 +2021,7 @@ export default function QuoteBuilderPage() {
             total,
             notes: notes.trim() || null,
             displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+            contextSnapshot: buildQuoteContextSnapshot(),
             items: buildQuoteItems(),
             snapshots: buildQuoteLineSnapshots(),
           });
@@ -1722,7 +2040,7 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [estimateId, user, savedQuote, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig, buildQuoteItems, buildQuoteLineSnapshots, customerId, quoteType, toast, navigate]);
+  }, [estimateId, user, savedQuote, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig, buildQuoteItems, buildQuoteLineSnapshots, buildQuoteContextSnapshot, customerId, quoteType, toast, navigate]);
 
   // ── PDF helpers ────────────────────────────────────────────────────────────
   const buildQuoteForPdf = useCallback((): Quote => {
@@ -1743,22 +2061,24 @@ export default function QuoteBuilderPage() {
       sentAt: null,
       sentToEmail: null,
       displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+      contextSnapshot: buildQuoteContextSnapshot(),
       createdAt: now,
       updatedAt: now,
     };
     return {
       ...base,
-      estimateId: estimateId ?? base.estimateId,
-      companyId: customerId ?? base.companyId,
-      quoteType,
-      markupMultiplier: effectiveMarkupMultiplier,
-      subtotal,
-      total,
+      estimateId: savedQuote ? base.estimateId : estimateId ?? base.estimateId,
+      companyId: savedQuote ? base.companyId : customerId ?? base.companyId,
+      quoteType: savedQuote ? base.quoteType : quoteType,
+      markupMultiplier: savedQuote ? base.markupMultiplier : effectiveMarkupMultiplier,
+      subtotal: savedQuote ? base.subtotal : subtotal,
+      total: savedQuote ? base.total : total,
       notes: notes.trim() || null,
       displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+      contextSnapshot: savedQuote ? base.contextSnapshot : buildQuoteContextSnapshot(),
       updatedAt: now,
     };
-  }, [savedQuote, estimateId, customerId, user, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig]);
+  }, [savedQuote, estimateId, customerId, user, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig, buildQuoteContextSnapshot]);
 
   const openingNameById = useMemo(
     () => new Map(openings.map((opening) => [opening.id, opening.name])),
@@ -1766,6 +2086,7 @@ export default function QuoteBuilderPage() {
   );
 
   const buildQuoteItemsForPdf = useCallback((): QuoteItem[] => {
+    if (savedQuote && savedQuoteItems.length > 0) return savedQuoteItems;
     const now = new Date().toISOString();
     return lineItems.map((li, idx) => {
       const isEngLine = li.estimateItem.isEngineLineDetail === true;
@@ -1796,7 +2117,7 @@ export default function QuoteBuilderPage() {
         createdAt: now,
       };
     });
-  }, [lineItems, openingNameById, savedQuote]);
+  }, [lineItems, openingNameById, savedQuote, savedQuoteItems]);
 
   // ── Reactive PDF data for live preview ────────────────────────────────────
   const pdfQuote = useMemo((): Quote => {
@@ -1817,24 +2138,27 @@ export default function QuoteBuilderPage() {
       sentAt: null,
       sentToEmail: null,
       displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+      contextSnapshot: buildQuoteContextSnapshot(),
       createdAt: now,
       updatedAt: now,
     };
     return {
       ...base,
-      estimateId: estimateId ?? base.estimateId,
-      companyId: customerId ?? base.companyId,
-      quoteType,
-      markupMultiplier: effectiveMarkupMultiplier,
-      subtotal,
-      total,
+      estimateId: savedQuote ? base.estimateId : estimateId ?? base.estimateId,
+      companyId: savedQuote ? base.companyId : customerId ?? base.companyId,
+      quoteType: savedQuote ? base.quoteType : quoteType,
+      markupMultiplier: savedQuote ? base.markupMultiplier : effectiveMarkupMultiplier,
+      subtotal: savedQuote ? base.subtotal : subtotal,
+      total: savedQuote ? base.total : total,
       notes: notes.trim() || null,
       displayConfigJson: serializeQuoteDisplayConfig(displayConfig),
+      contextSnapshot: savedQuote ? base.contextSnapshot : buildQuoteContextSnapshot(),
       updatedAt: now,
     };
-  }, [savedQuote, estimateId, customerId, user?.id, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig]);
+  }, [savedQuote, estimateId, customerId, user?.id, quoteType, effectiveMarkupMultiplier, subtotal, total, notes, displayConfig, buildQuoteContextSnapshot]);
 
   const pdfItems = useMemo((): QuoteItem[] => {
+    if (savedQuote && savedQuoteItems.length > 0) return savedQuoteItems;
     const now = new Date().toISOString();
     return lineItems.map((li, idx) => {
       const isEngLine = li.estimateItem.isEngineLineDetail === true;
@@ -1865,29 +2189,57 @@ export default function QuoteBuilderPage() {
         createdAt: now,
       };
     });
-  }, [lineItems, openingNameById, savedQuote?.id]);
+  }, [lineItems, openingNameById, savedQuote, savedQuoteItems]);
 
-  const pdfManufacturerItems = useMemo(
-    () =>
-      pdfItems.map((qi, idx) => ({
-        ...qi,
-        fields: lineItems[idx]?.estimateItem.fields ?? [],
-      })),
-    [pdfItems, lineItems]
+  const manufacturerRows = useMemo(
+    () => buildOperationalOutputRows(
+      savedQuote && savedQuoteSnapshots.length > 0 ? savedQuoteSnapshots : buildQuoteLineSnapshots(),
+      pdfQuote.contextSnapshot,
+      { includeIncluded: true },
+    ).filter(isManufacturerProcurementRow),
+    [savedQuote, savedQuoteSnapshots, buildQuoteLineSnapshots, pdfQuote.contextSnapshot],
   );
+  const manufacturerGroups = useMemo(
+    () => groupOperationalRowsByManufacturer(manufacturerRows),
+    [manufacturerRows],
+  );
+  const assignedManufacturerGroups = manufacturerGroups.filter((group) => group.key !== 'unassigned');
+  const selectedManufacturerGroup = manufacturerGroups.find((group) => group.key === selectedManufacturerKey)
+    ?? manufacturerGroups[0]
+    ?? null;
+  const unassignedManufacturerRows = manufacturerRows.filter((row) => row.vendor === 'Unassigned');
+
+  const setManufacturerOverride = useCallback((sourceKey: string, manufacturerId: string) => {
+    setManufacturerOverrideBySourceKey((current) => {
+      const next = { ...current };
+      if (manufacturerId === '__automatic__') {
+        delete next[sourceKey];
+        return next;
+      }
+      const manufacturer = rfqManufacturers.find((candidate) => candidate.id === manufacturerId);
+      if (manufacturer) next[sourceKey] = { id: manufacturer.id, name: manufacturer.name };
+      return next;
+    });
+  }, [rfqManufacturers]);
+
+  useEffect(() => {
+    if (!manufacturerGroups.some((group) => group.key === selectedManufacturerKey)) {
+      setSelectedManufacturerKey(manufacturerGroups[0]?.key ?? '');
+    }
+  }, [manufacturerGroups, selectedManufacturerKey]);
 
   const presentationLineOptions = useMemo<QuotePresentationLineOption[]>(
     () =>
-      lineItems.map((li) => ({
-        displayKey: getLineItemDisplayKey(li.estimateItem),
-        label: li.estimateItem.itemLabel,
-        canonicalCode: li.estimateItem.canonicalCode ?? null,
-        quantity: li.estimateItem.quantity * (li.estimateItem.openingQuantity ?? 1),
-        unitCost: li.unitCost,
-        unitPrice: li.unitPrice,
-        lineTotal: li.lineTotal,
+      pdfItems.map((item) => ({
+        displayKey: item.displayKey ?? `quote-item:${item.id}`,
+        label: item.itemLabel,
+        canonicalCode: item.canonicalCode ?? null,
+        quantity: item.quantity,
+        unitCost: item.unitCost,
+        unitPrice: item.unitPrice,
+        lineTotal: item.lineTotal,
       })),
-    [lineItems],
+    [pdfItems],
   );
 
   const quoteCopyItems = useMemo(
@@ -2026,13 +2378,15 @@ export default function QuoteBuilderPage() {
           quote={quote}
           items={items}
           company={company}
+          estimate={estimate}
+          primaryContact={primaryContact}
           aiSummary={aiSummary}
           displayConfig={displayConfig}
         />
       ).toBlob();
       const name = company?.name ?? 'Customer';
       const date = new Date().toISOString().slice(0, 10);
-      triggerDownload(blob, `Quote-${name.replace(/\s+/g, '-')}-${date}.pdf`);
+      triggerDownload(blob, `Sales-Estimate-${name.replace(/\s+/g, '-')}-${date}.pdf`);
     } catch (err) {
       toast({
         title: 'PDF generation failed',
@@ -2042,27 +2396,24 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsDownloadingCustomer(false);
     }
-  }, [buildQuoteForPdf, buildQuoteItemsForPdf, company, displayConfig, toast]);
+  }, [buildQuoteForPdf, buildQuoteItemsForPdf, company, estimate, primaryContact, displayConfig, toast]);
 
   const handleDownloadManufacturer = useCallback(async () => {
+    if (!selectedManufacturerGroup) return;
     setIsDownloadingManufacturer(true);
     try {
       const quote = buildQuoteForPdf();
-      const items = buildQuoteItemsForPdf().map((qi, idx) => ({
-        ...qi,
-        fields: lineItems[idx]?.estimateItem.fields ?? [],
-      }));
       const blob = await pdf(
         <ManufacturerQuotePdf
           quote={quote}
-          items={items}
+          rows={selectedManufacturerGroup.rows}
+          manufacturerName={selectedManufacturerGroup.manufacturerName}
           company={company}
+          context={quote.contextSnapshot}
           displayConfig={displayConfig}
         />
       ).toBlob();
-      const name = company?.name ?? 'Manufacturer';
-      const date = new Date().toISOString().slice(0, 10);
-      triggerDownload(blob, `RFQ-${name.replace(/\s+/g, '-')}-${date}.pdf`);
+      triggerDownload(blob, manufacturerRfqFilename(quote.contextSnapshot, selectedManufacturerGroup.manufacturerName));
     } catch (err) {
       toast({
         title: 'PDF generation failed',
@@ -2072,11 +2423,35 @@ export default function QuoteBuilderPage() {
     } finally {
       setIsDownloadingManufacturer(false);
     }
-  }, [buildQuoteForPdf, buildQuoteItemsForPdf, lineItems, company, displayConfig, toast]);
+  }, [selectedManufacturerGroup, buildQuoteForPdf, company, displayConfig, toast]);
+
+  const handleDownloadAllManufacturers = useCallback(async () => {
+    if (assignedManufacturerGroups.length === 0) return;
+    setIsDownloadingManufacturer(true);
+    try {
+      const quote = buildQuoteForPdf();
+      for (const group of assignedManufacturerGroups) {
+        const blob = await pdf(<ManufacturerQuotePdf quote={quote} rows={group.rows} manufacturerName={group.manufacturerName} company={company} context={quote.contextSnapshot} displayConfig={displayConfig} />).toBlob();
+        triggerDownload(blob, manufacturerRfqFilename(quote.contextSnapshot, group.manufacturerName));
+      }
+    } catch (err) {
+      toast({ title: 'PDF generation failed', description: err instanceof Error ? err.message : undefined, variant: 'destructive' });
+    } finally {
+      setIsDownloadingManufacturer(false);
+    }
+  }, [assignedManufacturerGroups, buildQuoteForPdf, company, displayConfig, toast]);
 
   const handleDownloadBoth = useCallback(async () => {
-    await Promise.all([handleDownloadCustomer(), handleDownloadManufacturer()]);
-  }, [handleDownloadCustomer, handleDownloadManufacturer]);
+    if (unassignedManufacturerRows.length > 0) {
+      toast({
+        title: 'Assign manufacturers first',
+        description: `${unassignedManufacturerRows.length} procurement line${unassignedManufacturerRows.length === 1 ? '' : 's'} still need an RFQ manufacturer.`,
+        variant: 'destructive',
+      });
+      return;
+    }
+    await Promise.all([handleDownloadCustomer(), handleDownloadAllManufacturers()]);
+  }, [handleDownloadCustomer, handleDownloadAllManufacturers, toast, unassignedManufacturerRows.length]);
 
   // ── Loading state ──────────────────────────────────────────────────────────
   if (isLoading) {
@@ -2130,14 +2505,18 @@ export default function QuoteBuilderPage() {
                   quote={pdfQuote}
                   items={pdfItems}
                   company={company}
+                  estimate={estimate}
+                  primaryContact={primaryContact}
                   aiSummary={previewAiSummary}
                   displayConfig={displayConfig}
                 />
               ) : (
                 <ManufacturerQuotePdf
                   quote={pdfQuote}
-                  items={pdfManufacturerItems}
+                  rows={selectedManufacturerGroup?.rows ?? []}
+                  manufacturerName={selectedManufacturerGroup?.manufacturerName ?? 'Unassigned'}
                   company={company}
+                  context={pdfQuote.contextSnapshot}
                   displayConfig={displayConfig}
                 />
               )}
@@ -2159,7 +2538,7 @@ export default function QuoteBuilderPage() {
           )}
           {previewType === 'manufacturer' && (
             <p className="text-xs text-muted-foreground">
-              Internal use only — not for customer distribution.
+              {selectedManufacturerGroup?.manufacturerName ?? 'Unassigned'} · {selectedManufacturerGroup?.rows.length ?? 0} assigned lines only.
             </p>
           )}
           <div className="flex items-center gap-2 ml-auto shrink-0">
@@ -2207,7 +2586,7 @@ export default function QuoteBuilderPage() {
               <div className="flex-1 min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <h1 className="font-display text-2xl sm:text-3xl tracking-wide">
-                    {isEditMode ? 'Edit Quote' : 'Quote Builder'}
+                    {isEditMode ? 'Edit Quote Presentation' : 'Quote Builder'}
                   </h1>
                   <span
                     className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${typeBadge.className}`}
@@ -2227,7 +2606,7 @@ export default function QuoteBuilderPage() {
                   </p>
                 )}
               </div>
-              <Button
+              {!isEditMode && <Button
                 variant="outline"
                 size="sm"
                 onClick={handleRefreshPricingTables}
@@ -2239,11 +2618,18 @@ export default function QuoteBuilderPage() {
                 ) : (
                   <><RefreshCw className="h-3.5 w-3.5 mr-1.5" />Refresh from Pricing Tables</>
                 )}
-              </Button>
+              </Button>}
             </div>
 
+            {isEditMode && (
+              <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-100">
+                <div className="font-medium">Saved commercial detail is locked</div>
+                <p className="mt-0.5 text-xs opacity-80">This screen updates notes and presentation settings only. To refresh pricing or line detail from the estimate, create a new quote revision from the quote detail page.</p>
+              </div>
+            )}
+
             {/* Markup banner (customer or both) */}
-            {(quoteType === 'customer' || quoteType === 'both') && (
+            {!isEditMode && (quoteType === 'customer' || quoteType === 'both') && (
               <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                 <Tag className="h-4 w-4 shrink-0" />
                 <span className="flex-1 min-w-0">
@@ -2504,7 +2890,7 @@ export default function QuoteBuilderPage() {
                 ) : (
                   <Save className="mr-2 h-4 w-4" />
                 )}
-                {savedQuote ? 'Update Quote' : 'Save Quote'}
+                {savedQuote ? 'Save Presentation' : 'Save Quote'}
               </Button>
 
               {/* Preview & Download buttons */}
@@ -2545,12 +2931,28 @@ export default function QuoteBuilderPage() {
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                       Manufacturer RFQ
                     </p>
+                    <Select value={selectedManufacturerGroup?.key ?? ''} onValueChange={setSelectedManufacturerKey}>
+                      <SelectTrigger><SelectValue placeholder="Select manufacturer" /></SelectTrigger>
+                      <SelectContent>
+                        {manufacturerGroups.map((group) => <SelectItem key={group.key} value={group.key}>{group.manufacturerName} ({group.rows.length})</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    {!savedQuote && (
+                      <Button variant="outline" size="sm" className="w-full" onClick={() => setIsManufacturerAssignmentOpen(true)}>
+                        <Wrench className="mr-2 h-4 w-4" />Assign RFQ manufacturers
+                      </Button>
+                    )}
+                    {unassignedManufacturerRows.length > 0 && (
+                      <p className="text-xs text-amber-700">
+                        {unassignedManufacturerRows.length} procurement line{unassignedManufacturerRows.length === 1 ? '' : 's'} must be assigned before its RFQ can be downloaded.
+                      </p>
+                    )}
                     <div className="flex gap-2">
                       <Button
                         variant="outline"
                         size="icon"
                         onClick={() => setPreviewType('manufacturer')}
-                        disabled={lineItems.length === 0}
+                        disabled={!selectedManufacturerGroup || selectedManufacturerGroup.key === 'unassigned'}
                       >
                         <Eye className="h-4 w-4" />
                       </Button>
@@ -2558,7 +2960,7 @@ export default function QuoteBuilderPage() {
                         variant="outline"
                         className="flex-1"
                         onClick={handleDownloadManufacturer}
-                        disabled={isDownloadingManufacturer || lineItems.length === 0}
+                        disabled={isDownloadingManufacturer || !selectedManufacturerGroup || selectedManufacturerGroup.key === 'unassigned'}
                       >
                         {isDownloadingManufacturer ? (
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -2568,6 +2970,11 @@ export default function QuoteBuilderPage() {
                         Download
                       </Button>
                     </div>
+                    {assignedManufacturerGroups.length > 1 && (
+                      <Button variant="outline" className="w-full" onClick={handleDownloadAllManufacturers} disabled={isDownloadingManufacturer}>
+                        <Download className="mr-2 h-4 w-4" />Download all {assignedManufacturerGroups.length} RFQs
+                      </Button>
+                    )}
                   </div>
                 )}
 
@@ -2579,6 +2986,7 @@ export default function QuoteBuilderPage() {
                     disabled={
                       isDownloadingCustomer ||
                       isDownloadingManufacturer ||
+                      unassignedManufacturerRows.length > 0 ||
                       lineItems.length === 0
                     }
                   >
@@ -2600,6 +3008,42 @@ export default function QuoteBuilderPage() {
           </Card>
         </div>
       </div>
+      <Dialog open={isManufacturerAssignmentOpen} onOpenChange={setIsManufacturerAssignmentOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Assign RFQ manufacturers</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Catalog matches are selected automatically. Override any line for this quote, and assign a manufacturer to manual or unmatched hardware before downloading RFQs.
+          </p>
+          <div className="space-y-3">
+            {manufacturerRows.map((row) => {
+              const override = manufacturerOverrideBySourceKey[row.sourceKey];
+              return (
+                <div key={row.sourceKey} className="grid gap-3 rounded-md border p-3 sm:grid-cols-[1fr_240px] sm:items-center">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{row.description || row.partNumber || 'Specified item'}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Opening {row.openingMark} · {row.partNumber || row.category} · Qty {row.quantity} {row.uom}
+                    </p>
+                  </div>
+                  <Select value={override?.id ?? '__automatic__'} onValueChange={(value) => setManufacturerOverride(row.sourceKey, value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__automatic__">
+                        {row.vendor === 'Unassigned' ? 'Unassigned — select vendor' : `Catalog: ${row.vendor}`}
+                      </SelectItem>
+                      {rfqManufacturers.map((manufacturer) => (
+                        <SelectItem key={manufacturer.id} value={manufacturer.id}>{manufacturer.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
     </>
   );

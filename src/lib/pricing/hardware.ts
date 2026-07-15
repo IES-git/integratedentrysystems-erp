@@ -33,19 +33,50 @@ import type { HardwareCatalog, VariantWithPrice } from './loader';
 export const MAX_PLAUSIBLE_HARDWARE_NET = 100000;
 
 /**
+ * Converts an industry discount chain such as `50/20/5` into a multiplier.
+ * Each segment is applied sequentially, so `50/20` becomes 0.50 x 0.80 =
+ * 0.40. Invalid or out-of-range segments reject the entire chain; silently
+ * using a partial chain would overstate cost and contaminate quote margins.
+ */
+export function parseDiscountChainMultiplier(chain: string | null | undefined): number | null {
+  const value = chain?.trim();
+  if (!value) return null;
+
+  const segments = value.split('/').map((segment) => segment.trim().replace(/%$/, '').trim());
+  if (segments.some((segment) => !/^\d+(?:\.\d+)?$/.test(segment))) return null;
+
+  let multiplier = 1;
+  for (const segment of segments) {
+    const percent = Number(segment);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) return null;
+    multiplier *= 1 - percent / 100;
+  }
+  return multiplier;
+}
+
+/**
  * Resolves a usable per-unit net cost from a (possibly dirty) price record.
- * Tries the stored net, then list × discount, then bare list — returning the
- * first value that is finite and within (0, MAX]. Returns null when nothing is
- * trustworthy (negative / zero / absurd), which callers treat as "no price"
- * (route to manual quote; never emit a garbage line or auto-select it).
+ * Tries the stored net, then list × multiplier, then list × discount chain,
+ * then bare list — returning the first value that is finite and within
+ * (0, MAX]. Returns null when nothing is trustworthy (negative / zero /
+ * absurd), which callers treat as "no price" (route to manual quote; never
+ * emit a garbage line or auto-select it).
  */
 export function resolveHardwareNet(
-  price: { netCost: number | null; listPrice: number | null; discountMultiplier: number | null } | null | undefined,
+  price: {
+    netCost: number | null;
+    listPrice: number | null;
+    discountMultiplier: number | null;
+    discountChain?: string | null;
+  } | null | undefined,
 ): number | null {
   if (!price) return null;
   const listTimesDisc =
     price.listPrice != null && price.discountMultiplier != null ? price.listPrice * price.discountMultiplier : null;
-  for (const candidate of [price.netCost, listTimesDisc, price.listPrice]) {
+  const chainMultiplier = parseDiscountChainMultiplier(price.discountChain);
+  const listTimesChain =
+    price.listPrice != null && chainMultiplier != null ? price.listPrice * chainMultiplier : null;
+  for (const candidate of [price.netCost, listTimesDisc, listTimesChain, price.listPrice]) {
     if (candidate != null && Number.isFinite(candidate) && candidate > 0 && candidate <= MAX_PLAUSIBLE_HARDWARE_NET) {
       return Math.round(candidate * 100) / 100;
     }
@@ -456,6 +487,8 @@ export function priceHardware(
       sourcePage: null,
       sourceRegionId: null,
       priceBookId: ctx.priceBookId,
+      manufacturerId: null,
+      manufacturerName: null,
       confidence: null,
       componentId: null,
       sortOrder: sortOrder++,
@@ -486,6 +519,8 @@ export function priceHardware(
     if (!vp || net == null) {
       lines.push({
         ...base,
+        manufacturerId: vp?.manufacturerId ?? null,
+        manufacturerName: vp?.manufacturerName ?? null,
         lineType: 'MANUAL_QUOTE',
         priceStatus: 'INVALID',
         unitListPrice: vp?.price?.listPrice ?? null, extendedListPrice: null,
@@ -509,6 +544,8 @@ export function priceHardware(
 
     lines.push({
       ...base,
+      manufacturerId: vp.manufacturerId ?? null,
+      manufacturerName: vp.manufacturerName ?? null,
       lineType: 'ADDER',
       priceStatus: 'PRICED',
       description: `${req.category.replace(/_/g, ' ')}${vp.variant.sku ? ` (${vp.variant.sku})` : ''}`,
@@ -565,7 +602,10 @@ export function priceHardware(
       priceStatus: 'PRICED',
       calculationExpression: `${perFoot.toFixed(2)}/ft × ${lengthFt.toFixed(2)}ft = ${net.toFixed(2)}`,
       matchedConditions: null, includedOrSuppressedBy: null, sourcePage: null, sourceRegionId: null,
-      priceBookId: ctx.priceBookId, confidence: null, exceptionMessage: null, componentId: null, sortOrder: sortOrder++,
+      priceBookId: ctx.priceBookId,
+      manufacturerId: vp?.manufacturerId ?? null,
+      manufacturerName: vp?.manufacturerName ?? null,
+      confidence: null, exceptionMessage: null, componentId: null, sortOrder: sortOrder++,
     });
   }
 

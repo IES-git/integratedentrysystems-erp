@@ -458,6 +458,8 @@ export interface EstimateLine {
   sourcePage: string | null;
   sourceRegionId: string | null;
   priceBookId: string | null;
+  manufacturerId: string | null;
+  manufacturerName: string | null;
   confidence: number | null;
   reviewStatus: string | null;
   exceptionMessage: string | null;
@@ -497,6 +499,34 @@ export interface QaIssue {
 }
 
 // ===== Hardware catalog =====
+export interface HardwareSpec {
+  id: string;
+  externalSpecId: string;
+  category: string;
+  productSubtype: string | null;
+  application: string | null;
+  function: string | null;
+  keying: string | null;
+  size: string | null;
+  rating: string | null;
+  dutyGrade: string | null;
+  mountingArm: string | null;
+  thicknessWeight: string | null;
+  material: string | null;
+  finish: string | null;
+  electrical: string | null;
+  otherRequirements: string | null;
+  matchConfidence: string | null;
+  active: boolean;
+  approvalState: HardwareApprovalState;
+  sourceFile: string | null;
+  sourceMetadata: Record<string, unknown>;
+  updatedBy: string | null;
+  lastReviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface HardwareProduct {
   id: string;
   category: string;
@@ -521,6 +551,8 @@ export interface HardwareProduct {
 export interface HardwareVariant {
   id: string;
   hardwareProductId: string;
+  hardwareSpecId?: string | null;
+  sourceOfferId?: string | null;
   sku: string | null;
   function: string | null;
   finish: string | null;
@@ -735,6 +767,7 @@ export interface OpeningHardwareItem {
   estimateId: string | null;
   componentId: string | null;
   hardwareVariantId: string | null;
+  hardwareSpecId?: string | null;
   category: string | null;
   quantity: number;
   selectedFinish: string | null;

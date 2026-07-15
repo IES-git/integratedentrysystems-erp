@@ -6,6 +6,7 @@ import {
   Building2,
   Calendar,
   CheckCircle,
+  CopyPlus,
   Download,
   Edit3,
   Eye,
@@ -43,7 +44,8 @@ import { FilePreview } from '@/components/estimates/wizard/PdfPreview';
 import { CustomerQuotePdf } from '@/components/quotes/CustomerQuotePdf';
 import { ManufacturerQuotePdf } from '@/components/quotes/ManufacturerQuotePdf';
 import { SendQuoteDialog } from '@/components/quotes/SendQuoteDialog';
-import type { ManufacturerQuoteItem } from '@/components/quotes/ManufacturerQuotePdf';
+import { OperationalOutputsCard } from '@/components/quotes/OperationalOutputsCard';
+import { QuoteWorkflowCard } from '@/components/quotes/QuoteWorkflowCard';
 import { useToast } from '@/hooks/use-toast';
 import { getQuoteWithItems, updateQuoteStatus, sendQuoteEmail } from '@/lib/quotes-api';
 import { getCompany, listContacts } from '@/lib/companies-api';
@@ -51,11 +53,17 @@ import { getEstimateWithItems, getEstimateFileUrl } from '@/lib/estimates-api';
 import { generateQuoteSummary } from '@/lib/gemini-api';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
 import {
+  buildOperationalOutputRows,
+  groupOperationalRowsByManufacturer,
+  manufacturerRfqFilename,
+  type ManufacturerOutputGroup,
+} from '@/lib/operational-outputs';
+import {
   createDefaultQuoteDisplayConfig,
   getBlock,
   parseQuoteDisplayConfigJson,
 } from '@/lib/quote-display';
-import type { Company, Contact, Estimate, HardwareSubcategory, ItemField, Quote, QuoteItem, QuoteStatus, QuoteType } from '@/types';
+import type { Company, Contact, Estimate, HardwareSubcategory, ItemField, Quote, QuoteItem, QuoteLineSnapshot, QuoteStatus, QuoteType } from '@/types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -79,6 +87,15 @@ function triggerDownload(blob: Blob, filename: string) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
 const STATUS_CONFIG: Record<
@@ -194,6 +211,7 @@ export default function QuoteDetailPage() {
 
   const [quote, setQuote] = useState<Quote | null>(null);
   const [items, setItems] = useState<QuoteItemWithFields[]>([]);
+  const [snapshots, setSnapshots] = useState<QuoteLineSnapshot[]>([]);
   const [company, setCompany] = useState<Company | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -208,7 +226,11 @@ export default function QuoteDetailPage() {
 
   // Email send state
   const [showSendDialog, setShowSendDialog] = useState(false);
+  const [showManufacturerSendDialog, setShowManufacturerSendDialog] = useState(false);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [selectedManufacturerKey, setSelectedManufacturerKey] = useState('');
+  const [manufacturerCompany, setManufacturerCompany] = useState<Company | null>(null);
+  const [manufacturerContacts, setManufacturerContacts] = useState<Contact[]>([]);
 
   // Estimate panel state
   const [showEstimatePanel, setShowEstimatePanel] = useState(false);
@@ -225,6 +247,24 @@ export default function QuoteDetailPage() {
     [quote],
   );
 
+  const operationalRows = useMemo(
+    () => buildOperationalOutputRows(snapshots, quote?.contextSnapshot, { includeIncluded: true }),
+    [quote?.contextSnapshot, snapshots],
+  );
+  const manufacturerGroups = useMemo(
+    () => groupOperationalRowsByManufacturer(operationalRows),
+    [operationalRows],
+  );
+  const selectedManufacturerGroup = manufacturerGroups.find((group) => group.key === selectedManufacturerKey)
+    ?? manufacturerGroups[0]
+    ?? null;
+
+  useEffect(() => {
+    if (!manufacturerGroups.some((group) => group.key === selectedManufacturerKey)) {
+      setSelectedManufacturerKey(manufacturerGroups[0]?.key ?? '');
+    }
+  }, [manufacturerGroups, selectedManufacturerKey]);
+
   useEffect(() => {
     if (!id) return;
 
@@ -237,15 +277,16 @@ export default function QuoteDetailPage() {
         }
         setQuote(result.quote);
         setItems(result.items);
+        setSnapshots(result.snapshots);
 
-        if (result.quote.companyId) {
-          const [co, cts] = await Promise.all([
-            getCompany(result.quote.companyId).catch(() => null),
-            listContacts(result.quote.companyId).catch(() => [] as Contact[]),
-          ]);
-          setCompany(co);
-          setContacts(cts);
-        }
+        const [sourceEstimate, co, cts] = await Promise.all([
+          getEstimateWithItems(result.quote.estimateId).catch(() => null),
+          result.quote.companyId ? getCompany(result.quote.companyId).catch(() => null) : Promise.resolve(null),
+          result.quote.companyId ? listContacts(result.quote.companyId).catch(() => [] as Contact[]) : Promise.resolve([] as Contact[]),
+        ]);
+        setEstimate(sourceEstimate?.estimate ?? null);
+        setCompany(co);
+        setContacts(cts);
       })
       .catch((err) => {
         toast({ title: 'Failed to load quote', description: err.message, variant: 'destructive' });
@@ -278,7 +319,10 @@ export default function QuoteDetailPage() {
   const buildCustomerPdfBlob = useCallback(async (): Promise<{ blob: Blob; fileName: string }> => {
     if (!quote) throw new Error('Quote not loaded');
 
-    const primaryContact = contacts.find((c) => c.isPrimary) ?? contacts[0] ?? null;
+    const primaryContact = contacts.find((c) => c.id === estimate?.customerContactId)
+      ?? contacts.find((c) => c.isPrimary)
+      ?? contacts[0]
+      ?? null;
 
     let aiSummary: string | null = null;
     try {
@@ -304,6 +348,7 @@ export default function QuoteDetailPage() {
         quote={quote}
         items={items}
         company={company}
+        estimate={estimate}
         primaryContact={primaryContact}
         aiSummary={aiSummary}
         displayConfig={displayConfig}
@@ -312,26 +357,25 @@ export default function QuoteDetailPage() {
 
     const name = company?.name ?? 'Customer';
     const date = new Date().toISOString().slice(0, 10);
-    return { blob, fileName: `Quote-${name.replace(/\s+/g, '-')}-${date}.pdf` };
-  }, [quote, items, company, contacts, displayConfig]);
+    return { blob, fileName: `Sales-Estimate-${name.replace(/\s+/g, '-')}-${date}.pdf` };
+  }, [quote, items, company, estimate, contacts, displayConfig]);
 
-  const buildManufacturerPdfBlob = useCallback(async (): Promise<{ blob: Blob; fileName: string }> => {
+  const buildManufacturerPdfBlob = useCallback(async (group: ManufacturerOutputGroup): Promise<{ blob: Blob; fileName: string }> => {
     if (!quote) throw new Error('Quote not loaded');
 
-    const mfrItems: ManufacturerQuoteItem[] = items.map((i) => ({ ...i, fields: i.fields }));
     const blob = await pdf(
       <ManufacturerQuotePdf
         quote={quote}
-        items={mfrItems}
+        rows={group.rows}
+        manufacturerName={group.manufacturerName}
         company={company}
+        context={quote.contextSnapshot}
         displayConfig={displayConfig}
       />
     ).toBlob();
 
-    const name = company?.name ?? 'Manufacturer';
-    const date = new Date().toISOString().slice(0, 10);
-    return { blob, fileName: `RFQ-${name.replace(/\s+/g, '-')}-${date}.pdf` };
-  }, [quote, items, company, displayConfig]);
+    return { blob, fileName: manufacturerRfqFilename(quote.contextSnapshot, group.manufacturerName) };
+  }, [quote, company, displayConfig]);
 
   // ── PDF downloads ──────────────────────────────────────────────────────────
 
@@ -353,10 +397,10 @@ export default function QuoteDetailPage() {
   }, [quote, buildCustomerPdfBlob, toast]);
 
   const handleDownloadManufacturer = useCallback(async () => {
-    if (!quote) return;
+    if (!quote || !selectedManufacturerGroup) return;
     setIsDownloadingManufacturer(true);
     try {
-      const { blob, fileName } = await buildManufacturerPdfBlob();
+      const { blob, fileName } = await buildManufacturerPdfBlob(selectedManufacturerGroup);
       triggerDownload(blob, fileName);
     } catch (err) {
       toast({
@@ -367,11 +411,39 @@ export default function QuoteDetailPage() {
     } finally {
       setIsDownloadingManufacturer(false);
     }
-  }, [quote, buildManufacturerPdfBlob, toast]);
+  }, [quote, selectedManufacturerGroup, buildManufacturerPdfBlob, toast]);
+
+  const handleDownloadAllManufacturers = useCallback(async () => {
+    if (!quote || manufacturerGroups.length === 0) return;
+    setIsDownloadingManufacturer(true);
+    try {
+      for (const group of manufacturerGroups) {
+        const { blob, fileName } = await buildManufacturerPdfBlob(group);
+        triggerDownload(blob, fileName);
+      }
+    } catch (err) {
+      toast({ title: 'PDF generation failed', description: err instanceof Error ? err.message : undefined, variant: 'destructive' });
+    } finally {
+      setIsDownloadingManufacturer(false);
+    }
+  }, [quote, manufacturerGroups, buildManufacturerPdfBlob, toast]);
+
+  const handleDownloadManufacturerGroup = useCallback(async (group: ManufacturerOutputGroup) => {
+    setSelectedManufacturerKey(group.key);
+    setIsDownloadingManufacturer(true);
+    try {
+      const { blob, fileName } = await buildManufacturerPdfBlob(group);
+      triggerDownload(blob, fileName);
+    } catch (err) {
+      toast({ title: 'PDF generation failed', description: err instanceof Error ? err.message : undefined, variant: 'destructive' });
+    } finally {
+      setIsDownloadingManufacturer(false);
+    }
+  }, [buildManufacturerPdfBlob, toast]);
 
   const handleDownloadBoth = useCallback(async () => {
-    await Promise.all([handleDownloadCustomer(), handleDownloadManufacturer()]);
-  }, [handleDownloadCustomer, handleDownloadManufacturer]);
+    await Promise.all([handleDownloadCustomer(), handleDownloadAllManufacturers()]);
+  }, [handleDownloadCustomer, handleDownloadAllManufacturers]);
 
   const handlePreviewCustomer = useCallback(async () => {
     if (!quote) return;
@@ -417,29 +489,7 @@ export default function QuoteDetailPage() {
     setIsSendingEmail(true);
     try {
       const { blob: customerBlob, fileName: customerFileName } = await buildCustomerPdfBlob();
-      const customerBase64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = reader.result as string;
-          // Strip the data URL prefix (e.g. "data:application/pdf;base64,")
-          resolve(result.split(',')[1]);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(customerBlob);
-      });
-
-      let mfrBase64: string | undefined;
-      let mfrFileName: string | undefined;
-      if (quote.quoteType === 'both') {
-        const { blob: mfrBlob, fileName: mfr } = await buildManufacturerPdfBlob();
-        mfrFileName = mfr;
-        mfrBase64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve((reader.result as string).split(',')[1]);
-          reader.onerror = reject;
-          reader.readAsDataURL(mfrBlob);
-        });
-      }
+      const customerBase64 = await blobToBase64(customerBlob);
 
       const { quote: updatedQuote } = await sendQuoteEmail({
         quoteId: quote.id,
@@ -449,8 +499,6 @@ export default function QuoteDetailPage() {
         message,
         pdfBase64: customerBase64,
         pdfFileName: customerFileName,
-        manufacturerPdfBase64: mfrBase64,
-        manufacturerPdfFileName: mfrFileName,
       });
 
       setQuote(updatedQuote);
@@ -468,7 +516,57 @@ export default function QuoteDetailPage() {
     } finally {
       setIsSendingEmail(false);
     }
-  }, [quote, buildCustomerPdfBlob, buildManufacturerPdfBlob, toast]);
+  }, [quote, buildCustomerPdfBlob, toast]);
+
+  const handleOpenManufacturerSend = useCallback(async (group: ManufacturerOutputGroup) => {
+    setSelectedManufacturerKey(group.key);
+    setManufacturerCompany(null);
+    setManufacturerContacts([]);
+    if (group.manufacturerId) {
+      const [targetCompany, targetContacts] = await Promise.all([
+        getCompany(group.manufacturerId).catch(() => null),
+        listContacts(group.manufacturerId).catch(() => [] as Contact[]),
+      ]);
+      setManufacturerCompany(targetCompany);
+      setManufacturerContacts(targetContacts);
+    }
+    setShowManufacturerSendDialog(true);
+  }, []);
+
+  const handleSendManufacturerEmail = useCallback(async ({
+    recipientEmail,
+    ccEmails,
+    subject,
+    message,
+  }: {
+    recipientEmail: string;
+    ccEmails: string[];
+    subject: string;
+    message: string;
+  }) => {
+    if (!quote || !selectedManufacturerGroup) return;
+    setIsSendingEmail(true);
+    try {
+      const { blob, fileName } = await buildManufacturerPdfBlob(selectedManufacturerGroup);
+      const { quote: updatedQuote } = await sendQuoteEmail({
+        quoteId: quote.id,
+        recipientEmail,
+        ccEmails,
+        subject,
+        message,
+        pdfBase64: await blobToBase64(blob),
+        pdfFileName: fileName,
+        updateQuoteDeliveryStatus: false,
+      });
+      setQuote(updatedQuote);
+      toast({ title: 'Manufacturer RFQ sent', description: `${selectedManufacturerGroup.manufacturerName} received only its ${selectedManufacturerGroup.rows.length} assigned line item${selectedManufacturerGroup.rows.length === 1 ? '' : 's'}.` });
+    } catch (err) {
+      toast({ title: 'Failed to send manufacturer RFQ', description: err instanceof Error ? err.message : 'Unknown error', variant: 'destructive' });
+      throw err;
+    } finally {
+      setIsSendingEmail(false);
+    }
+  }, [quote, selectedManufacturerGroup, buildManufacturerPdfBlob, toast]);
 
   // ── Estimate panel ─────────────────────────────────────────────────────────
 
@@ -524,12 +622,10 @@ export default function QuoteDetailPage() {
   const isBusy = isDownloadingCustomer || isDownloadingManufacturer || isSendingEmail;
   // "Send to Customer" is relevant on any quote with a customer PDF, regardless of status
   const canSendToCustomer = showCustomerPdf;
-  const primaryContact = contacts.find((c) => c.isPrimary) ?? contacts[0] ?? null;
-  const manufacturerPreviewItems: ManufacturerQuoteItem[] = items.map((i) => ({
-    ...i,
-    fields: i.fields,
-  }));
-
+  const primaryContact = contacts.find((c) => c.id === estimate?.customerContactId)
+    ?? contacts.find((c) => c.isPrimary)
+    ?? contacts[0]
+    ?? null;
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -551,6 +647,7 @@ export default function QuoteDetailPage() {
                     quote={quote}
                     items={items}
                     company={company}
+                    estimate={estimate}
                     primaryContact={primaryContact}
                     aiSummary={previewAiSummary}
                     displayConfig={displayConfig}
@@ -558,8 +655,10 @@ export default function QuoteDetailPage() {
                 ) : (
                   <ManufacturerQuotePdf
                     quote={quote}
-                    items={manufacturerPreviewItems}
+                    rows={selectedManufacturerGroup?.rows ?? []}
+                    manufacturerName={selectedManufacturerGroup?.manufacturerName ?? 'Unassigned'}
                     company={company}
+                    context={quote.contextSnapshot}
                     displayConfig={displayConfig}
                   />
                 )}
@@ -581,7 +680,7 @@ export default function QuoteDetailPage() {
             )}
             {previewType === 'manufacturer' && (
               <p className="text-xs text-muted-foreground">
-                Internal use only; not for customer distribution.
+                {selectedManufacturerGroup?.manufacturerName ?? 'Unassigned'} · {selectedManufacturerGroup?.rows.length ?? 0} assigned lines only.
               </p>
             )}
             <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -639,6 +738,22 @@ export default function QuoteDetailPage() {
           >
             <Edit3 className="h-4 w-4" />
             Edit Quote
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              const params = new URLSearchParams({
+                estimateId: quote.estimateId,
+                baseQuoteId: quote.id,
+                quoteType: quote.quoteType,
+              });
+              if (quote.companyId) params.set('customerId', quote.companyId);
+              navigate(`/app/quotes/new?${params.toString()}`);
+            }}
+            className="gap-2"
+          >
+            <CopyPlus className="h-4 w-4" />
+            Create Revision
           </Button>
 
           {showCustomerPdf && showManufacturerPdf ? (
@@ -931,6 +1046,47 @@ export default function QuoteDetailPage() {
               </CardContent>
             </Card>
           )}
+
+          {showManufacturerPdf && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Manufacturer RFQs</CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  One fulfillment-ready document per manufacturer. Each file contains only that manufacturer&apos;s assigned items.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {manufacturerGroups.length > 0 ? manufacturerGroups.map((group) => {
+                  const openingCount = new Set(group.rows.map((row) => row.openingMark).filter((mark) => mark !== 'Unassigned')).size;
+                  return (
+                    <div key={group.key} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="font-medium">{group.manufacturerName}</p>
+                        <p className="text-xs text-muted-foreground">{group.rows.length} line item{group.rows.length === 1 ? '' : 's'} across {openingCount} opening{openingCount === 1 ? '' : 's'}</p>
+                        {group.key === 'unassigned' && <p className="mt-1 text-xs text-amber-700">Assign these items to a manufacturer before sending.</p>}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" onClick={() => { setSelectedManufacturerKey(group.key); setPreviewType('manufacturer'); }}><Eye className="mr-1.5 h-3.5 w-3.5" />Preview</Button>
+                        <Button size="sm" variant="outline" onClick={() => void handleDownloadManufacturerGroup(group)}><Download className="mr-1.5 h-3.5 w-3.5" />Download</Button>
+                        <Button size="sm" onClick={() => void handleOpenManufacturerSend(group)} disabled={group.key === 'unassigned' || isSendingEmail}><Mail className="mr-1.5 h-3.5 w-3.5" />Send RFQ</Button>
+                      </div>
+                    </div>
+                  );
+                }) : <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No manufacturer assignments were captured in this quote. Create a revision after assigning manufacturers on the estimate.</div>}
+                {manufacturerGroups.length > 1 && <Button variant="outline" onClick={handleDownloadAllManufacturers} disabled={isDownloadingManufacturer}><Download className="mr-2 h-4 w-4" />Download all {manufacturerGroups.length} manufacturer RFQs</Button>}
+              </CardContent>
+            </Card>
+          )}
+
+          <OperationalOutputsCard
+            snapshots={snapshots}
+            context={quote.contextSnapshot}
+            currency={quote.currency}
+          />
+          <QuoteWorkflowCard
+            quoteId={quote.id}
+            recipientEmail={contacts.find((contact) => contact.isPrimary)?.email ?? contacts[0]?.email ?? null}
+          />
         </div>
 
         {/* Right: Details & Summary panel OR Estimate file preview */}
@@ -1066,8 +1222,22 @@ export default function QuoteDetailPage() {
           quote={quote}
           company={company}
           contacts={contacts}
-          includesManufacturerPdf={quote.quoteType === 'both'}
+          includesManufacturerPdf={false}
           onSend={handleSendEmail}
+        />
+      )}
+      {showManufacturerPdf && selectedManufacturerGroup && (
+        <SendQuoteDialog
+          open={showManufacturerSendDialog}
+          onOpenChange={setShowManufacturerSendDialog}
+          quote={quote}
+          company={manufacturerCompany}
+          contacts={manufacturerContacts}
+          includesManufacturerPdf={false}
+          audience="manufacturer"
+          attachmentLabel={`${selectedManufacturerGroup.manufacturerName} RFQ PDF`}
+          jobName={quote.contextSnapshot?.job.jobName}
+          onSend={handleSendManufacturerEmail}
         />
       )}
     </div>

@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
@@ -36,8 +37,9 @@ import { buildAuditableQuoteFromEngine } from '@/lib/cpq/auditable-quote';
 import { validateQuoteCompleteness, type BuilderStepTarget, type CompletenessIssue, type CompletenessReport } from '@/lib/cpq/completeness';
 import {
   loadSpecFieldDictionary, loadOptionDescriptors, loadHardwareCategories, loadBaseSignatures,
+  stageHardwareFromEstimate,
   type SpecFieldWithPath, type VariantOption, loadVariantsForCategory, type HardwareCategoryOption,
-  type BaseSignature, type BaseSignatures,
+  type BaseSignature, type BaseSignatures, type StageHardwareFromEstimateInput,
 } from '@/lib/cpq-catalog-api';
 import {
   loadHardwareCatalog, generateHardwareRequirements, derivePrepRequirements, resolveHardwareNet,
@@ -59,7 +61,8 @@ import {
   type VendorPackageCandidate,
 } from '@/lib/cpq/vendor-candidates';
 import { resolveInfill, type NgpInfillType, type ResolvedInfill } from '@/lib/cpq/ngp-infill';
-import { normalizeCompactNominalDimension, parsePlainInches } from '@/components/pricing/dimension-utils';
+import { formatArchitecturalSize, normalizeCompactNominalDimension, parsePlainInches } from '@/components/pricing/dimension-utils';
+import { applyComplementaryPairHanding } from '@/components/estimates/wizard/opening-rules';
 import {
   deriveBuilderContext, fieldTier, allowedEnumOptions, isStepVisible,
   doorHand, isHandedCategory, isFireRating, optionLabelsForField, deriveHardwareIntelligence,
@@ -446,6 +449,7 @@ export function SpecOpeningBuilder({
         const cur = existing.get(r.category);
         return {
           category: r.category,
+          hardwareSpecId: cur?.hardwareSpecId ?? null,
           variantId: cur?.variantId ?? null,
           quantity: cur?.variantId ? cur.quantity : r.quantity,
           required: r.required,
@@ -454,6 +458,8 @@ export function SpecOpeningBuilder({
           selectedSize: cur?.selectedSize ?? null,
           selectedHand: cur?.selectedHand ?? null,
           selectedRating: cur?.selectedRating ?? null,
+          stagedDescription: cur?.stagedDescription ?? null,
+          reviewState: cur?.reviewState ?? null,
           source: r.source,
         };
       });
@@ -505,14 +511,15 @@ export function SpecOpeningBuilder({
       const effHand = h.selectedHand ?? defaultHardwareHand(h.category, variants.map((v) => v.variant.hand), hand);
       const priced = filterVariants(variants, {
         function: h.selectedFunction ?? null, finish: effFinish, size: h.selectedSize ?? null,
-        hand: effHand, rating: h.selectedRating ?? null,
+        hand: effHand, rating: h.selectedRating ?? null, hardwareSpecId: h.hardwareSpecId ?? null,
       }, fireLabeled).filter(hasVariantPrice);
-      // Auto-select when there's a single clear match, OR pick the cheapest
-      // priced variant for a REQUIRED category so it never blocks (overridable).
-      // filterVariants sorts priced-first then cheapest, so priced[0] is cheapest.
-      const pick = priced.length === 1 ? priced[0] : (h.required && priced.length > 1 ? priced[0] : null);
+      // A vendor offer may be auto-selected only when the current spec resolves
+      // to one unambiguous priced option. Never choose the cheapest offer across
+      // multiple neutral specs; the estimator must finish the specification first.
+      const pick = priced.length === 1 ? priced[0] : null;
       if (pick) {
         updateHardware(h.category, {
+          hardwareSpecId: pick.spec?.id ?? h.hardwareSpecId ?? null,
           variantId: pick.variant.id, source: 'set_template',
           selectedFinish: effFinish, selectedHand: pick.variant.hand ? effHand : null,
         });
@@ -706,7 +713,29 @@ export function SpecOpeningBuilder({
   }, [spec.hardware, hwCatalog]);
 
   // ---- draft mutation helpers ----
-  const patch = (p: Partial<OpeningDraft>) => setDraft((prev) => ({ ...prev, ...p }));
+  const patch = (p: Partial<OpeningDraft>) => setDraft((prev) => {
+    const next = { ...prev, ...p };
+    if (p.configurationType) {
+      const pairLike = ['pair', 'double_egress', 'communicating'].includes(p.configurationType);
+      const targetDoorCount = pairLike ? 2 : ['single', 'dutch'].includes(p.configurationType) ? 1 : next.leafCount;
+      let doors = [...next.doors];
+      while (doors.length < targetDoorCount) doors.push(newComponent('door', `Door ${doors.length + 1}`));
+      if (['single', 'dutch', 'pair', 'double_egress', 'communicating'].includes(p.configurationType)) {
+        doors = doors.slice(0, targetDoorCount);
+      }
+      if (pairLike && doors.length === 2) {
+        doors = doors.map((door, index) => ({
+          ...door,
+          label: p.configurationType === 'double_egress'
+            ? `Active Leaf ${index + 1}`
+            : index === 0 ? 'Active Leaf' : 'Inactive Leaf',
+        }));
+      }
+      next.doors = doors;
+      next.leafCount = targetDoorCount;
+    }
+    return next;
+  });
 
   const setOpeningField = (path: string, value: string) =>
     setDraft((prev) => ({ ...prev, openingFields: { ...prev.openingFields, [path]: value } }));
@@ -730,6 +759,17 @@ export function SpecOpeningBuilder({
   const updateComponentField = (entity: RuleEntityType, id: string, path: string, value: string) =>
     setDraft((prev) => {
       const key = componentListKey(entity);
+      if (
+        entity === 'door' &&
+        path === 'door.door_hand' &&
+        prev.doors.length === 2 &&
+        ['pair', 'double_egress', 'communicating'].includes(prev.configurationType)
+      ) {
+        return {
+          ...prev,
+          doors: applyComplementaryPairHanding(prev.doors, id, value, path),
+        };
+      }
       return {
         ...prev,
         [key]: (prev[key] as ComponentDraft[]).map((c) =>
@@ -762,6 +802,35 @@ export function SpecOpeningBuilder({
         hardware: [...prev.hardware, { category, variantId: null, quantity: 1, required: false, source: 'manual' }],
       };
     });
+
+  const stageHardware = async (input: Omit<StageHardwareFromEstimateInput, 'estimateId' | 'openingId'>) => {
+    const result = await stageHardwareFromEstimate({
+      ...input,
+      estimateId,
+      openingId: editingOpeningId ?? draft.openingId,
+    });
+    const category = input.category.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    setDraft((prev) => ({
+      ...prev,
+      hardware: [
+        ...prev.hardware.filter((item) => item.category !== category),
+        {
+          category,
+          hardwareSpecId: result.specId,
+          variantId: null,
+          quantity: 1,
+          required: false,
+          selectedFunction: input.function ?? null,
+          selectedFinish: input.finish ?? null,
+          selectedSize: input.size ?? null,
+          selectedRating: input.rating ?? null,
+          source: 'manual',
+          stagedDescription: input.description,
+          reviewState: 'needs_review',
+        },
+      ],
+    }));
+  };
 
   const removeHardware = (category: string) =>
     setDraft((prev) => ({ ...prev, hardware: prev.hardware.filter((h) => h.category !== category) }));
@@ -960,6 +1029,7 @@ export function SpecOpeningBuilder({
             onUpdateComponentMeta={updateComponentMeta}
             onUpdateHardware={updateHardware}
             onAddHardware={addHardware}
+            onStageHardware={stageHardware}
             onRemoveHardware={removeHardware}
             onAddCutout={addCutout}
             onRemoveCutout={removeCutout}
@@ -1092,6 +1162,7 @@ interface StepContentProps {
   onUpdateComponentMeta: (entity: RuleEntityType, id: string, p: Partial<ComponentDraft>) => void;
   onUpdateHardware: (category: string, p: Partial<HardwareSelectionDraft>) => void;
   onAddHardware: (category: string) => void;
+  onStageHardware: (input: Omit<StageHardwareFromEstimateInput, 'estimateId' | 'openingId'>) => Promise<void>;
   onRemoveHardware: (category: string) => void;
   onAddCutout: (infillType: NgpInfillType) => void;
   onRemoveCutout: (id: string) => void;
@@ -1161,25 +1232,24 @@ function ClassifyStep({ draft, ctx, descriptors, specByEntity, onPatch, onSetOpe
   const essential = visible.filter((f) => fieldTier(f, draft, ctx) === 'essential');
   const advanced = visible.filter((f) => fieldTier(f, draft, ctx) === 'advanced');
   const leafFixed = LEAF_FIXED_CONFIGS.includes(draft.configurationType);
-  const handleOpeningWidthChange = (value: string) => {
+  const compactSize = draft.openingWidth && draft.openingHeight
+    ? `${draft.openingWidth}${draft.openingHeight}`
+    : '';
+  const [nominalSizeEntry, setNominalSizeEntry] = useState(compactSize);
+  useEffect(() => setNominalSizeEntry(compactSize), [compactSize]);
+  const architecturalSize = formatArchitecturalSize(draft.openingWidth, draft.openingHeight);
+  const handleNominalSizeChange = (value: string) => {
+    setNominalSizeEntry(value);
     const parsed = parseNominalSizeCode(value);
-    if (parsed) {
-      onPatch({ openingWidth: parsed.width, openingHeight: parsed.height });
-      return;
-    }
-    onPatch({ openingWidth: nominalSegmentFromDigits(value) ?? value });
+    if (parsed) onPatch({ openingWidth: parsed.width, openingHeight: parsed.height });
   };
-
-  const handleOpeningHeightChange = (value: string) => {
-    onPatch({ openingHeight: nominalSegmentFromDigits(value) ?? value });
-  };
-
   const renderOpeningField = (f: SpecFieldWithPath) => (
     <SpecFieldInput key={f.id} field={f}
       value={f.fieldPath ? draft.openingFields[f.fieldPath] ?? '' : ''}
       onChange={onSetOpeningField}
       derivedValue={f.fieldPath ? ctx.derivedOpeningFields[f.fieldPath]?.value ?? null : null}
       derivedReason={f.fieldPath ? ctx.derivedOpeningFields[f.fieldPath]?.reason ?? null : null}
+      locked={f.fieldId === 'OPN-029' || f.fieldId === 'OPN-036'}
       options={allowedEnumOptions(f, draft, ctx)}
       optionLabels={optionLabelsForField(f, descriptors)} />
   );
@@ -1217,15 +1287,25 @@ function ClassifyStep({ draft, ctx, descriptors, specByEntity, onPatch, onSetOpe
               onChange={(e) => onPatch({ leafCount: parseInt(e.target.value) || 1 })} className="h-8 text-sm" />
           )}
         </div>
-        <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">Nominal opening width</Label>
-          <Input value={draft.openingWidth} onChange={(e) => handleOpeningWidthChange(e.target.value)}
-            placeholder="e.g. 3070 or 30" className="h-8 text-sm" />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">Nominal opening height</Label>
-          <Input value={draft.openingHeight} onChange={(e) => handleOpeningHeightChange(e.target.value)}
-            placeholder="e.g. 70" className="h-8 text-sm" />
+        <div className="col-span-2 space-y-1">
+          <Label className="text-xs text-muted-foreground">Nominal opening size</Label>
+          <div className="flex items-center gap-3">
+            <Input
+              value={nominalSizeEntry}
+              onChange={(event) => handleNominalSizeChange(event.target.value)}
+              onBlur={() => {
+                if (!parseNominalSizeCode(nominalSizeEntry)) setNominalSizeEntry(compactSize);
+              }}
+              inputMode="numeric"
+              placeholder="3070"
+              aria-describedby="nominal-opening-size-display"
+              className="h-8 text-sm"
+            />
+            <div id="nominal-opening-size-display" className="min-w-[120px] text-sm font-medium tabular-nums">
+              {architecturalSize ?? '—'}
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">Enter width and height as one compact code; for example, 3070 displays as 3-0 x 7-0.</p>
         </div>
       </div>
 
@@ -1920,6 +2000,7 @@ interface HwCriteria {
   size: string | null;
   hand: string | null;
   rating: string | null;
+  hardwareSpecId: string | null;
 }
 
 const HW_AXES = ['function', 'finish', 'size', 'hand', 'rating'] as const;
@@ -1937,12 +2018,39 @@ function variantNet(v: VariantOption): number {
 }
 
 function matchesCriteria(v: VariantOption, c: Partial<HwCriteria>): boolean {
+  if (c.hardwareSpecId && v.spec?.id !== c.hardwareSpecId) return false;
   return HW_AXES.every((axis) => {
     const want = c[axis];
     if (!want) return true;
     if (axis === 'hand') return hardwareHandMatches(v.variant.hand, want);
     return (v.variant[axis] ?? '') === want;
   });
+}
+
+function hardwareSpecLabel(v: VariantOption): string {
+  if (!v.spec) return v.productDescription ?? v.variant.sku ?? 'Legacy catalog item';
+  const s = v.spec;
+  return [
+    s.productSubtype,
+    s.application,
+    s.function,
+    s.keying && s.keying !== 'NOT APPLICABLE' ? s.keying : null,
+    s.size,
+    s.rating,
+    s.dutyGrade,
+    s.mountingArm,
+    s.electrical,
+    s.finish,
+  ].filter(Boolean).join(' · ') || s.externalSpecId;
+}
+
+function vendorOptionLabel(v: VariantOption): string {
+  const identity = [v.manufacturerName, v.vendorSeries, v.vendorModel, v.variant.sku]
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .join(' · ');
+  const net = resolveHardwareNet(v.price);
+  return `${identity || v.productDescription || v.variant.id}${net != null ? ` — net $${net.toFixed(2)}` : ' — no price / manual quote'}`;
 }
 
 /**
@@ -1991,7 +2099,10 @@ function filterVariants(variants: VariantOption[], criteria: Partial<HwCriteria>
     (variantNet(a) - variantNet(b)));
 }
 
-function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCategories, onUpdateHardware, onAddHardware, onRemoveHardware, onPatch }: StepContentProps) {
+function HardwareStep({
+  draft, variantsByCategory, hardwareConflicts, hardwareCategories,
+  onUpdateHardware, onAddHardware, onStageHardware, onRemoveHardware, onPatch,
+}: StepContentProps) {
   const defaultFinish = draft.hardwareFinishDefault;
   const hand = doorHand(draft);
   const fireLabeled = draft.fireLabelRequired;
@@ -1999,6 +2110,43 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
   const allFinishes = [...new Set(
     Object.values(variantsByCategory).flat().map((v) => v.variant.finish).filter((x): x is string => !!x),
   )].sort();
+  const [stageDialogOpen, setStageDialogOpen] = useState(false);
+  const [stageSaving, setStageSaving] = useState(false);
+  const [stageError, setStageError] = useState<string | null>(null);
+  const [stageForm, setStageForm] = useState({
+    category: '', description: '', function: '', finish: '', size: '', rating: '',
+    manufacturerName: '', model: '', sku: '',
+  });
+  const submitStagedHardware = async () => {
+    if (!stageForm.category.trim() || !stageForm.description.trim()) {
+      setStageError('Category and description are required.');
+      return;
+    }
+    setStageSaving(true);
+    setStageError(null);
+    try {
+      await onStageHardware({
+        category: stageForm.category.trim(),
+        description: stageForm.description.trim(),
+        function: stageForm.function.trim() || null,
+        finish: stageForm.finish.trim() || null,
+        size: stageForm.size.trim() || null,
+        rating: stageForm.rating.trim() || null,
+        manufacturerName: stageForm.manufacturerName.trim() || null,
+        model: stageForm.model.trim() || null,
+        sku: stageForm.sku.trim() || null,
+      });
+      setStageDialogOpen(false);
+      setStageForm({
+        category: '', description: '', function: '', finish: '', size: '', rating: '',
+        manufacturerName: '', model: '', sku: '',
+      });
+    } catch (error) {
+      setStageError(error instanceof Error ? error.message : 'Failed to stage hardware.');
+    } finally {
+      setStageSaving(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -2041,11 +2189,58 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
       </div>
 
       {/* Always allow adding individual hardware, regardless of set templates. */}
-      <AddHardwareControl
-        categories={hardwareCategories}
-        existing={new Set(visibleHardware.map((h) => h.category))}
-        onAdd={onAddHardware}
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <AddHardwareControl
+          categories={hardwareCategories}
+          existing={new Set(visibleHardware.map((h) => h.category))}
+          onAdd={onAddHardware}
+        />
+        <Button type="button" variant="outline" size="sm" onClick={() => setStageDialogOpen(true)}>
+          <Plus className="mr-1.5 h-3.5 w-3.5" /> Stage missing hardware
+        </Button>
+      </div>
+
+      <Dialog open={stageDialogOpen} onOpenChange={setStageDialogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Stage missing hardware</DialogTitle>
+            <DialogDescription>
+              Capture the requirement now. It will stay on this estimate and enter catalog review as “needs review”; it cannot become a priced reusable option until an admin approves it.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label>Category *</Label>
+              <Input value={stageForm.category} onChange={(event) => setStageForm((form) => ({ ...form, category: event.target.value }))} placeholder="door_closers" />
+            </div>
+            <div className="space-y-1">
+              <Label>Function</Label>
+              <Input value={stageForm.function} onChange={(event) => setStageForm((form) => ({ ...form, function: event.target.value }))} placeholder="Regular arm" />
+            </div>
+            <div className="col-span-2 space-y-1">
+              <Label>Description *</Label>
+              <Textarea value={stageForm.description} onChange={(event) => setStageForm((form) => ({ ...form, description: event.target.value }))} placeholder="Describe the required device, application, and any special conditions." />
+            </div>
+            {(['finish', 'size', 'rating'] as const).map((field) => (
+              <div key={field} className="space-y-1">
+                <Label className="capitalize">{field}</Label>
+                <Input value={stageForm[field]} onChange={(event) => setStageForm((form) => ({ ...form, [field]: event.target.value }))} />
+              </div>
+            ))}
+            <div className="col-span-2 border-t pt-3 text-xs font-medium text-muted-foreground">Known vendor offer (optional)</div>
+            <div className="space-y-1"><Label>Manufacturer</Label><Input value={stageForm.manufacturerName} onChange={(event) => setStageForm((form) => ({ ...form, manufacturerName: event.target.value }))} /></div>
+            <div className="space-y-1"><Label>Model</Label><Input value={stageForm.model} onChange={(event) => setStageForm((form) => ({ ...form, model: event.target.value }))} /></div>
+            <div className="space-y-1"><Label>SKU</Label><Input value={stageForm.sku} onChange={(event) => setStageForm((form) => ({ ...form, sku: event.target.value }))} /></div>
+          </div>
+          {stageError && <p className="text-sm text-destructive">{stageError}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setStageDialogOpen(false)} disabled={stageSaving}>Cancel</Button>
+            <Button type="button" onClick={submitStagedHardware} disabled={stageSaving}>
+              {stageSaving && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />} Stage for review
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {visibleHardware.length === 0 && (
         <p className="text-sm text-muted-foreground italic">
@@ -2059,9 +2254,13 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
         const effHand = h.selectedHand ?? defaultHardwareHand(h.category, variants.map((v) => v.variant.hand), hand);
         const criteria: HwCriteria = {
           function: h.selectedFunction ?? null, finish: effFinish, size: h.selectedSize ?? null,
-          hand: effHand, rating: h.selectedRating ?? null,
+          hand: effHand, rating: h.selectedRating ?? null, hardwareSpecId: h.hardwareSpecId ?? null,
         };
         const filtered = filterVariants(variants, criteria, fireLabeled);
+        const beforeSpec = filterVariants(variants, { ...criteria, hardwareSpecId: null }, fireLabeled);
+        const neutralSpecs = [...new Map(
+          beforeSpec.filter((v) => v.spec).map((v) => [v.spec!.id, v] as const),
+        ).values()];
 
         // Cascading options: each axis's choices are computed from the set
         // filtered by every OTHER axis; axes with <=1 option auto-collapse.
@@ -2085,7 +2284,7 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
             : axis === 'size' ? { selectedSize: value }
             : axis === 'hand' ? { selectedHand: value }
             : { selectedRating: value };
-          onUpdateHardware(h.category, patch);
+          onUpdateHardware(h.category, { ...patch, hardwareSpecId: null, variantId: null });
         };
         const visibleAxes = HW_AXES.filter((axis) => {
           if (axis === 'hand' && !handed) return false;
@@ -2099,6 +2298,7 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
               <span className="text-sm font-medium capitalize">{h.category.replace(/_/g, ' ')}</span>
               {h.required && <Badge variant="secondary" className="text-[10px]">required</Badge>}
               <Badge variant="outline" className="text-[10px]">{h.source === 'set_template' ? 'auto' : 'manual'}</Badge>
+              {h.reviewState === 'needs_review' && <Badge variant="secondary" className="text-[10px]">needs review</Badge>}
               <div className="flex items-center gap-1 ml-auto">
                 <span className="text-[10px] text-muted-foreground">Qty</span>
                 <Input type="number" min={0} value={h.quantity}
@@ -2111,7 +2311,14 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
               </div>
             </div>
 
-            {visibleAxes.length > 0 && (
+            {h.reviewState === 'needs_review' && (
+              <div className="rounded-md border border-amber-300/60 bg-amber-50/60 p-2 text-xs text-amber-900 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
+                <div className="font-medium">Review-staged catalog requirement</div>
+                <div>{h.stagedDescription || 'Catalog and price verification required.'}</div>
+              </div>
+            )}
+
+            {h.reviewState !== 'needs_review' && visibleAxes.length > 0 && (
               <div className="grid grid-cols-4 gap-2">
                 {visibleAxes.map((axis) => (
                   <FilterSelect key={axis} label={axisLabel[axis]} value={axisValue[axis]}
@@ -2120,25 +2327,55 @@ function HardwareStep({ draft, variantsByCategory, hardwareConflicts, hardwareCa
               </div>
             )}
 
-            <div className="space-y-1">
+            {h.reviewState !== 'needs_review' && neutralSpecs.length > 0 && (
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Specification</Label>
+                <Select
+                  value={h.hardwareSpecId ?? ''}
+                  onValueChange={(v) => onUpdateHardware(h.category, {
+                    hardwareSpecId: v,
+                    variantId: null,
+                    source: 'manual',
+                  })}
+                >
+                  <SelectTrigger className="h-8 text-sm">
+                    <SelectValue placeholder="Complete the hardware specification…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {neutralSpecs.map((v) => (
+                      <SelectItem key={v.spec!.id} value={v.spec!.id} className="text-sm">
+                        {hardwareSpecLabel(v)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            {h.reviewState !== 'needs_review' && <div className="space-y-1">
               <Label className="text-xs text-muted-foreground flex items-center gap-1">
-                Variant
+                Manufacturer / vendor option
                 {autoSelected && <Badge variant="secondary" className="h-4 px-1 text-[9px] font-normal">auto-selected</Badge>}
               </Label>
               <Select value={h.variantId ?? ''} onValueChange={(v) => onUpdateHardware(h.category, { variantId: v, source: 'manual' })}>
                 <SelectTrigger className="h-8 text-sm">
-                  <SelectValue placeholder={filtered.length ? 'Select a variant…' : 'No catalog variants — route to manual quote'} />
+                  <SelectValue placeholder={
+                    neutralSpecs.length > 0 && !h.hardwareSpecId
+                      ? 'Select the specification first…'
+                      : filtered.length
+                        ? 'Select a manufacturer / vendor…'
+                        : 'No matching offer — route to manual quote'
+                  } />
                 </SelectTrigger>
                 <SelectContent>
-                  {filtered.map((v) => (
+                  {(neutralSpecs.length > 0 && !h.hardwareSpecId ? [] : filtered).map((v) => (
                     <SelectItem key={v.variant.id} value={v.variant.id} className="text-sm">
-                      {v.variant.sku ?? v.productDescription ?? v.variant.id}
-                      {(() => { const n = resolveHardwareNet(v.price); return n != null ? ` — net $${n.toFixed(2)}` : ' — no price'; })()}
+                      {vendorOptionLabel(v)}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+            </div>}
           </div>
         );
       })}

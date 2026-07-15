@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/command';
 import { WizardSteps, type WizardStep } from '@/components/estimates/wizard/WizardSteps';
 import { CustomerStep, type ExtractedCustomerData } from '@/components/estimates/wizard/CustomerStep';
+import { JobSetupStep } from '@/components/estimates/wizard/JobSetupStep';
 import { LineItemsStep } from '@/components/estimates/wizard/LineItemsStep';
 import { BatchProgress } from '@/components/estimates/wizard/BatchProgress';
 import { FilePreview } from '@/components/estimates/wizard/PdfPreview';
@@ -46,7 +47,7 @@ import {
   getItemTypes,
 } from '@/lib/estimates-api';
 import { supabase } from '@/lib/supabase';
-import type { Estimate, EstimateItem, ItemField, Company, FieldDefinition, ItemType, EstimateOpeningWithItems } from '@/types';
+import type { Estimate, EstimateItem, ItemField, Company, FieldDefinition, ItemType, EstimateJobInfo, EstimateOpeningWithItems } from '@/types';
 import { cn } from '@/lib/utils';
 
 interface LineItemWithFields extends EstimateItem {
@@ -62,8 +63,74 @@ interface EstimateData {
 
 const WIZARD_STEPS: WizardStep[] = [
   { id: 'customer', title: 'Customer', description: 'Confirm customer assignment' },
+  { id: 'job', title: 'Job Setup', description: 'Project and delivery details' },
   { id: 'line-items', title: 'Line Items', description: 'Verify extracted data' },
 ];
+
+function jobInfoFromEstimate(estimate: Estimate): EstimateJobInfo {
+  return {
+    jobName: estimate.jobName,
+    jobLocation: estimate.jobLocation,
+    jobNumber: estimate.jobNumber,
+    customerPo: estimate.customerPo,
+    quoteDate: estimate.quoteDate ?? new Date().toISOString().slice(0, 10),
+    shippingMethod: estimate.shippingMethod,
+    terms: estimate.terms,
+    delivery: estimate.delivery,
+    shipToSource: estimate.shipToSource ?? 'customer_shipping',
+    shipToAddress: estimate.shipToAddress,
+    shipToCity: estimate.shipToCity,
+    shipToState: estimate.shipToState,
+    shipToZip: estimate.shipToZip,
+    customerContactId: estimate.customerContactId,
+    customerRepName: estimate.customerRepName,
+    customerRepPhone: estimate.customerRepPhone,
+    customerRepEmail: estimate.customerRepEmail,
+    internalNotes: estimate.internalNotes,
+  };
+}
+
+function cleanJobInfo(value: EstimateJobInfo): EstimateJobInfo {
+  const clean = (input: string | null) => input?.trim() || null;
+  return {
+    ...value,
+    jobName: clean(value.jobName),
+    jobLocation: clean(value.jobLocation),
+    jobNumber: clean(value.jobNumber),
+    customerPo: clean(value.customerPo),
+    quoteDate: clean(value.quoteDate),
+    shippingMethod: clean(value.shippingMethod),
+    terms: clean(value.terms),
+    delivery: clean(value.delivery),
+    shipToAddress: clean(value.shipToAddress),
+    shipToCity: clean(value.shipToCity),
+    shipToState: clean(value.shipToState),
+    shipToZip: clean(value.shipToZip),
+    customerContactId: clean(value.customerContactId),
+    customerRepName: clean(value.customerRepName),
+    customerRepPhone: clean(value.customerRepPhone),
+    customerRepEmail: clean(value.customerRepEmail),
+    internalNotes: clean(value.internalNotes),
+  };
+}
+
+function formatCompanyAddress(company: Company | null | undefined): string {
+  if (!company) return '';
+
+  const shippingAddress = [
+    company.shippingAddress,
+    company.shippingCity,
+    company.shippingState,
+    company.shippingZip,
+  ].filter(Boolean).join(', ');
+
+  return shippingAddress || [
+    company.billingAddress,
+    company.billingCity,
+    company.billingState,
+    company.billingZip,
+  ].filter(Boolean).join(', ');
+}
 
 // Map Supabase companies row to our Company type
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -101,7 +168,7 @@ export default function EstimateWizardPage() {
     return [];
   })();
 
-  // Support ?step=1 to open directly on a specific wizard step (e.g. Line Items)
+  // Support ?step=N to open directly on a specific wizard step.
   const startStepParam = parseInt(searchParams.get('step') ?? '0', 10);
   const initialStep = Number.isFinite(startStepParam) && startStepParam > 0 ? startStepParam : 0;
 
@@ -271,6 +338,29 @@ export default function EstimateWizardPage() {
     }
   }, [currentEstimate]);
 
+  // Populate an existing customer's address when arriving at Job Setup directly.
+  // Once the user enters a job location, it remains fully editable and is not overwritten.
+  useEffect(() => {
+    if (!currentEstimate || !currentData?.selectedCustomerId || currentData.estimate.jobLocation?.trim()) return;
+
+    const customerAddress = formatCompanyAddress(
+      companies.find((company) => company.id === currentData.selectedCustomerId),
+    );
+    if (!customerAddress) return;
+
+    setEstimateDataMap((prev) => {
+      const next = new Map(prev);
+      const data = next.get(currentEstimate.id);
+      if (!data || data.estimate.jobLocation?.trim()) return prev;
+
+      next.set(currentEstimate.id, {
+        ...data,
+        estimate: { ...data.estimate, jobLocation: customerAddress },
+      });
+      return next;
+    });
+  }, [companies, currentData, currentEstimate]);
+
   const handleSelectCustomer = useCallback(
     (customerId: string | null, isNoCustomer: boolean) => {
       if (!currentEstimate) return;
@@ -279,16 +369,33 @@ export default function EstimateWizardPage() {
         const next = new Map(prev);
         const data = next.get(currentEstimate.id);
         if (data) {
+          const previousCustomerAddress = formatCompanyAddress(
+            companies.find((company) => company.id === data.selectedCustomerId),
+          );
+          const selectedCustomerAddress = formatCompanyAddress(
+            companies.find((company) => company.id === customerId),
+          );
+          const currentJobLocation = data.estimate.jobLocation?.trim() ?? '';
+          const shouldUpdateJobLocation = Boolean(
+            selectedCustomerAddress && (
+              !currentJobLocation ||
+              (data.selectedCustomerId !== customerId && currentJobLocation === previousCustomerAddress)
+            ),
+          );
+
           next.set(currentEstimate.id, {
             ...data,
             selectedCustomerId: customerId,
             noCustomer: isNoCustomer,
+            estimate: shouldUpdateJobLocation
+              ? { ...data.estimate, jobLocation: selectedCustomerAddress }
+              : data.estimate,
           });
         }
         return next;
       });
     },
-    [currentEstimate]
+    [companies, currentEstimate]
   );
 
   const handleNextStep = () => {
@@ -296,6 +403,52 @@ export default function EstimateWizardPage() {
       setCurrentStepIndex((prev) => prev + 1);
     }
   };
+
+  const handleJobInfoChange = useCallback((value: EstimateJobInfo) => {
+    if (!currentEstimate) return;
+    setEstimateDataMap((prev) => {
+      const next = new Map(prev);
+      const data = next.get(currentEstimate.id);
+      if (data) {
+        next.set(currentEstimate.id, {
+          ...data,
+          estimate: { ...data.estimate, ...value },
+        });
+      }
+      return next;
+    });
+  }, [currentEstimate]);
+
+  const handleSaveJobAndContinue = useCallback(async () => {
+    if (!currentEstimate || !currentData) return;
+    const jobInfo = cleanJobInfo(jobInfoFromEstimate(currentData.estimate));
+    if (!jobInfo.jobName) {
+      toast({
+        title: 'Job name required',
+        description: 'Add a job name before reviewing estimate line items.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      const updated = await apiUpdateEstimate(currentEstimate.id, jobInfo);
+      setEstimates((prev) => prev.map((estimate) => estimate.id === updated.id ? updated : estimate));
+      setEstimateDataMap((prev) => {
+        const next = new Map(prev);
+        const data = next.get(updated.id);
+        if (data) next.set(updated.id, { ...data, estimate: updated });
+        return next;
+      });
+      setCurrentStepIndex(2);
+    } catch (err) {
+      toast({
+        title: 'Failed to save job setup',
+        description: err instanceof Error ? err.message : 'Please try again.',
+        variant: 'destructive',
+      });
+    }
+  }, [currentData, currentEstimate, toast]);
 
   const handlePrevStep = () => {
     if (currentStepIndex > 0) {
@@ -547,6 +700,11 @@ export default function EstimateWizardPage() {
     if (!currentEstimate || !currentData) return;
 
     try {
+      const jobInfo = cleanJobInfo(jobInfoFromEstimate(currentData.estimate));
+      if (!jobInfo.jobName) {
+        setCurrentStepIndex(1);
+        throw new Error('Job name is required before this estimate can be saved as a draft.');
+      }
       let finalCustomerId = currentData.selectedCustomerId;
 
       // If no company selected but we have extracted customer data, create a new company
@@ -580,6 +738,7 @@ export default function EstimateWizardPage() {
       // Save company assignment to Supabase
       await apiUpdateEstimate(currentEstimate.id, {
         companyId: currentData.noCustomer ? null : finalCustomerId,
+        ...jobInfo,
       });
 
       // Mark as completed
@@ -869,8 +1028,8 @@ export default function EstimateWizardPage() {
                   {currentEstimate.originalFileName}
                 </p>
               </div>
-              {/* Preview Toggle (step 2 only) */}
-              {currentStepIndex === 1 && (
+              {/* Preview Toggle (line-items step only) */}
+              {currentStepIndex === 2 && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -917,6 +1076,16 @@ export default function EstimateWizardPage() {
           )}
 
           {currentStepIndex === 1 && (
+            <JobSetupStep
+              value={jobInfoFromEstimate(currentData.estimate)}
+              selectedCompany={companies.find((company) => company.id === currentData.selectedCustomerId) ?? null}
+              onChange={handleJobInfoChange}
+              onBack={handlePrevStep}
+              onNext={handleSaveJobAndContinue}
+            />
+          )}
+
+          {currentStepIndex === 2 && (
             <>
               {/* Mobile File Preview */}
               {currentFileUrl && (
@@ -956,8 +1125,8 @@ export default function EstimateWizardPage() {
         </div>
       </div>
 
-      {/* File Preview Panel (desktop, step 2 only) — independently scrollable right panel */}
-      {currentStepIndex === 1 && showPreview && currentFileUrl && (
+      {/* File Preview Panel (desktop, line-items step only) — independently scrollable right panel */}
+      {currentStepIndex === 2 && showPreview && currentFileUrl && (
         <div className="hidden lg:flex lg:flex-col w-[45%] shrink-0 border-l bg-muted/30 h-full overflow-hidden">
           <FilePreview
             fileUrl={currentFileUrl}

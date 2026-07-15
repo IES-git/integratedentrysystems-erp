@@ -325,14 +325,18 @@ function mapCompanySettings(raw: any): CompanySettings {
     defaultTemplateId: raw?.defaultTemplateId ?? raw?.default_template_id ?? null,
     markupOverrides: raw?.markupOverrides ?? raw?.markup_overrides ?? undefined,
     defaultQuoteTemplateKey: raw?.defaultQuoteTemplateKey ?? raw?.default_quote_template_key ?? null,
-    defaultQuoteDetailLevel: raw?.defaultQuoteDetailLevel ?? raw?.default_quote_detail_level ?? 'summary',
+    defaultQuoteDetailLevel: raw?.defaultQuoteDetailLevel ?? raw?.default_quote_detail_level ?? 'rolled_up',
     defaultQuoteOrganizationMode:
-      raw?.defaultQuoteOrganizationMode ?? raw?.default_quote_organization_mode ?? 'by_opening',
+      raw?.defaultQuoteOrganizationMode ?? raw?.default_quote_organization_mode ?? 'by_product_group',
     quoteValidityDays:
       raw?.quoteValidityDays ?? raw?.quote_validity_days ?? null,
     quoteHeaderText: raw?.quoteHeaderText ?? raw?.quote_header_text ?? null,
     quoteFooterText: raw?.quoteFooterText ?? raw?.quote_footer_text ?? null,
     quoteDisclaimerText: raw?.quoteDisclaimerText ?? raw?.quote_disclaimer_text ?? null,
+    showCustomerPartNumbers:
+      raw?.showCustomerPartNumbers ?? raw?.show_customer_part_numbers ?? false,
+    customerPartNumberMap:
+      raw?.customerPartNumberMap ?? raw?.customer_part_number_map ?? undefined,
   };
 }
 

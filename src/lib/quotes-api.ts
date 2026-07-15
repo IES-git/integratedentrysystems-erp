@@ -3,12 +3,14 @@
  */
 
 import { supabase } from './supabase';
-import type { Quote, QuoteItem, QuoteLineSnapshot, QuoteWithItems, QuoteStatus, QuoteType, HardwareSubcategory } from '@/types';
+import type { Quote, QuoteContextSnapshot, QuoteItem, QuoteLineSnapshot, QuoteWithItems, QuoteStatus, QuoteType, HardwareSubcategory } from '@/types';
 import type { EstimateItem, ItemField } from '@/types';
 
 let supportsQuoteDisplayConfig = true;
+let supportsQuoteContextSnapshot = true;
 let supportsQuoteItemDisplayKey = true;
 let supportsQuoteLineSnapshots = true;
+let supportsQuoteLineSnapshotV2 = true;
 
 function isMissingColumnError(error: unknown, columnName: string): boolean {
   const maybeError = error as { code?: string; message?: string; details?: string };
@@ -62,6 +64,8 @@ export interface SendQuoteEmailInput {
   /** Optional manufacturer RFQ PDF, base64-encoded. */
   manufacturerPdfBase64?: string;
   manufacturerPdfFileName?: string;
+  /** Manufacturer RFQs should be logged without replacing customer delivery status/email. */
+  updateQuoteDeliveryStatus?: boolean;
 }
 
 export interface SendQuoteEmailResult {
@@ -113,6 +117,7 @@ export interface CreateQuoteLineSnapshotInput {
   estimateLineId?: string | null;
   estimateItemId?: string | null;
   openingId?: string | null;
+  openingName?: string | null;
   componentId?: string | null;
   sourceTable: 'estimate_line' | 'estimate_items' | string;
   sourceLineType?: string | null;
@@ -120,6 +125,9 @@ export interface CreateQuoteLineSnapshotInput {
   chargeCategory?: string | null;
   description?: string | null;
   selectedOptionCode?: string | null;
+  manufacturerId?: string | null;
+  manufacturerName?: string | null;
+  partNumber?: string | null;
   quantity?: number | null;
   unitOfMeasure?: string | null;
   unitListPrice?: number | null;
@@ -147,6 +155,7 @@ export interface CreateQuoteInput {
   currency?: string;
   notes?: string | null;
   displayConfigJson?: string | null;
+  contextSnapshot?: QuoteContextSnapshot | null;
   items: CreateQuoteItemInput[];
   snapshots?: CreateQuoteLineSnapshotInput[];
 }
@@ -158,6 +167,7 @@ export interface UpdateQuoteInput {
   subtotal?: number;
   total?: number;
   displayConfigJson?: string | null;
+  contextSnapshot?: QuoteContextSnapshot | null;
   items?: CreateQuoteItemInput[];
   snapshots?: CreateQuoteLineSnapshotInput[];
 }
@@ -188,6 +198,9 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
   if (supportsQuoteDisplayConfig) {
     quoteInsert.display_config_json = input.displayConfigJson ?? null;
   }
+  if (supportsQuoteContextSnapshot) {
+    quoteInsert.context_snapshot = input.contextSnapshot ?? null;
+  }
 
   let { data: quoteRow, error: quoteError } = await supabase
     .from('quotes')
@@ -198,6 +211,14 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
   if (quoteError && isMissingColumnError(quoteError, 'display_config_json')) {
     supportsQuoteDisplayConfig = false;
     delete quoteInsert.display_config_json;
+    const retry = await supabase.from('quotes').insert(quoteInsert).select().single();
+    quoteRow = retry.data;
+    quoteError = retry.error;
+  }
+
+  if (quoteError && isMissingColumnError(quoteError, 'context_snapshot')) {
+    supportsQuoteContextSnapshot = false;
+    delete quoteInsert.context_snapshot;
     const retry = await supabase.from('quotes').insert(quoteInsert).select().single();
     quoteRow = retry.data;
     quoteError = retry.error;
@@ -335,7 +356,12 @@ export async function getQuoteWithItems(id: string): Promise<{
     }
   }
 
-  const openingIds = Array.from(new Set(snapshots.map((snapshot) => snapshot.openingId).filter(Boolean))) as string[];
+  const openingIds = Array.from(new Set(
+    snapshots
+      .filter((snapshot) => !snapshot.openingName)
+      .map((snapshot) => snapshot.openingId)
+      .filter(Boolean),
+  )) as string[];
   const openingNameById: Record<string, string> = {};
   if (openingIds.length > 0) {
     const { data: openingRows } = await supabase
@@ -354,7 +380,7 @@ export async function getQuoteWithItems(id: string): Promise<{
     .filter(Boolean) as string[];
 
   let fieldsByEstimateItemId: Record<string, ItemField[]> = {};
-  let estimateItemMetaById: Record<string, { parentItemId: string | null; subcategory: HardwareSubcategory | null }> = {};
+  const estimateItemMetaById: Record<string, { parentItemId: string | null; subcategory: HardwareSubcategory | null }> = {};
 
   if (estimateItemIds.length > 0) {
     const [fieldRes, metaRes] = await Promise.all([
@@ -397,7 +423,7 @@ export async function getQuoteWithItems(id: string): Promise<{
       parentItemId: meta?.parentItemId ?? null,
       subcategory: meta?.subcategory ?? null,
       openingId: snapshot?.openingId ?? null,
-      openingName: snapshot?.openingId ? openingNameById[snapshot.openingId] ?? null : null,
+      openingName: snapshot?.openingName ?? (snapshot?.openingId ? openingNameById[snapshot.openingId] ?? null : null),
       productGroup: snapshot ? getSnapshotProductGroup(snapshot) : null,
       unitOfMeasure: snapshot?.unitOfMeasure ?? null,
       grossMargin: readSnapshotNumber(snapshot?.snapshotJson, 'grossMargin'),
@@ -442,15 +468,17 @@ export async function listQuotesWithItems(): Promise<QuoteWithItems[]> {
 
   if (error) throw new Error(`Failed to list quotes with items: ${error.message}`);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (data ?? []).map((row: any) => ({
+  return (data ?? []).map((raw) => {
+    const row = raw as Record<string, unknown> & { quote_items?: Array<Record<string, unknown>> };
+    return {
     ...mapQuoteRow(row),
-    items: (row.quote_items || []).map((item: any) => ({
-      id: item.id,
-      canonicalCode: item.canonical_code ?? '',
-      itemLabel: item.item_label,
+    items: (row.quote_items || []).map((item) => ({
+      id: String(item.id),
+      canonicalCode: String(item.canonical_code ?? ''),
+      itemLabel: String(item.item_label ?? ''),
     })),
-  }));
+  };
+  });
 }
 
 /** List all quotes for a specific estimate. */
@@ -500,6 +528,9 @@ export async function updateQuote(
   if (updates.displayConfigJson !== undefined && supportsQuoteDisplayConfig) {
     row.display_config_json = updates.displayConfigJson;
   }
+  if (updates.contextSnapshot !== undefined && supportsQuoteContextSnapshot) {
+    row.context_snapshot = updates.contextSnapshot;
+  }
 
   let { data, error } = await supabase
     .from('quotes')
@@ -511,6 +542,14 @@ export async function updateQuote(
   if (error && isMissingColumnError(error, 'display_config_json')) {
     supportsQuoteDisplayConfig = false;
     delete row.display_config_json;
+    const retry = await supabase.from('quotes').update(row).eq('id', id).select().single();
+    data = retry.data;
+    error = retry.error;
+  }
+
+  if (error && isMissingColumnError(error, 'context_snapshot')) {
+    supportsQuoteContextSnapshot = false;
+    delete row.context_snapshot;
     const retry = await supabase.from('quotes').update(row).eq('id', id).select().single();
     data = retry.data;
     error = retry.error;
@@ -602,24 +641,54 @@ async function replaceQuoteLineSnapshots(
 ): Promise<void> {
   if (!supportsQuoteLineSnapshots) return;
 
-  const { error: deleteError } = await supabase
+  const { data: existingRows, error: existingError } = await supabase
     .from('quote_line_snapshots')
-    .delete()
+    .select('id')
     .eq('quote_id', quoteId);
 
-  if (deleteError) {
+  if (existingError) {
     supportsQuoteLineSnapshots = false;
     return;
   }
 
-  if (snapshots.length === 0) return;
+  const existingIds = (existingRows ?? []).map((row) => row.id as string);
+  if (snapshots.length === 0) {
+    if (existingIds.length > 0) {
+      const { error } = await supabase.from('quote_line_snapshots').delete().in('id', existingIds);
+      if (error) throw new Error(`Failed to clear quote detail snapshots: ${error.message}`);
+    }
+    return;
+  }
 
-  const { error: insertError } = await supabase
+  let { data: insertedRows, error: insertError } = await supabase
     .from('quote_line_snapshots')
-    .insert(snapshots.map((snapshot, idx) => quoteLineSnapshotInputToRow(quoteId, snapshot, idx)));
+    .insert(snapshots.map((snapshot, idx) => quoteLineSnapshotInputToRow(quoteId, snapshot, idx, supportsQuoteLineSnapshotV2)))
+    .select('id');
+
+  if (
+    insertError &&
+    ['opening_name', 'manufacturer_id', 'manufacturer_name', 'part_number'].some((column) => isMissingColumnError(insertError, column))
+  ) {
+    supportsQuoteLineSnapshotV2 = false;
+    const retry = await supabase
+      .from('quote_line_snapshots')
+      .insert(snapshots.map((snapshot, idx) => quoteLineSnapshotInputToRow(quoteId, snapshot, idx, false)))
+      .select('id');
+    insertedRows = retry.data;
+    insertError = retry.error;
+  }
 
   if (insertError) {
     throw new Error(`Failed to save quote detail snapshots: ${insertError.message}`);
+  }
+
+  if (existingIds.length > 0) {
+    const { error: deleteError } = await supabase.from('quote_line_snapshots').delete().in('id', existingIds);
+    if (deleteError) {
+      const insertedIds = (insertedRows ?? []).map((row) => row.id as string);
+      if (insertedIds.length > 0) await supabase.from('quote_line_snapshots').delete().in('id', insertedIds);
+      throw new Error(`Failed to replace old quote detail snapshots: ${deleteError.message}`);
+    }
   }
 }
 
@@ -655,6 +724,7 @@ function mapQuoteRow(row: any): Quote {
     sentAt: row.sent_at ?? null,
     sentToEmail: row.sent_to_email ?? null,
     displayConfigJson: row.display_config_json ?? null,
+    contextSnapshot: row.context_snapshot ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -688,6 +758,7 @@ function mapQuoteLineSnapshotRow(row: any): QuoteLineSnapshot {
     estimateLineId: row.estimate_line_id ?? null,
     estimateItemId: row.estimate_item_id ?? null,
     openingId: row.opening_id ?? null,
+    openingName: row.opening_name ?? null,
     componentId: row.component_id ?? null,
     sourceTable: row.source_table ?? 'estimate_line',
     sourceLineType: row.source_line_type ?? null,
@@ -695,6 +766,9 @@ function mapQuoteLineSnapshotRow(row: any): QuoteLineSnapshot {
     chargeCategory: row.charge_category ?? null,
     description: row.description ?? null,
     selectedOptionCode: row.selected_option_code ?? null,
+    manufacturerId: row.manufacturer_id ?? null,
+    manufacturerName: row.manufacturer_name ?? null,
+    partNumber: row.part_number ?? null,
     quantity: row.quantity != null ? Number(row.quantity) : null,
     unitOfMeasure: row.unit_of_measure ?? null,
     unitListPrice: row.unit_list_price != null ? Number(row.unit_list_price) : null,
@@ -716,9 +790,10 @@ function mapQuoteLineSnapshotRow(row: any): QuoteLineSnapshot {
 function quoteLineSnapshotInputToRow(
   quoteId: string,
   snapshot: CreateQuoteLineSnapshotInput,
-  idx: number
+  idx: number,
+  includeV2Fields = true,
 ): Record<string, unknown> {
-  return {
+  const row: Record<string, unknown> = {
     quote_id: quoteId,
     quote_item_id: snapshot.quoteItemId ?? null,
     estimate_id: snapshot.estimateId ?? null,
@@ -747,6 +822,13 @@ function quoteLineSnapshotInputToRow(
     sort_order: snapshot.sortOrder ?? idx,
     snapshot_json: snapshot.snapshotJson ?? {},
   };
+  if (includeV2Fields) {
+    row.opening_name = snapshot.openingName ?? null;
+    row.manufacturer_id = snapshot.manufacturerId ?? null;
+    row.manufacturer_name = snapshot.manufacturerName ?? null;
+    row.part_number = snapshot.partNumber ?? snapshot.selectedOptionCode ?? null;
+  }
+  return row;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

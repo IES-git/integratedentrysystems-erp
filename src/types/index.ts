@@ -30,6 +30,8 @@ export interface CompanySettings {
   quoteHeaderText?: string | null;
   quoteFooterText?: string | null;
   quoteDisclaimerText?: string | null;
+  showCustomerPartNumbers?: boolean;
+  customerPartNumberMap?: Record<string, string>;
 }
 
 export type CompanyType = 'customer' | 'manufacturer' | 'both';
@@ -218,6 +220,8 @@ export interface EstimateOpening {
   quantity: number;
   sortOrder: number;
   templateType: OpeningTemplateType | null;
+  /** Saved spec-builder source used for order/BOM callouts. */
+  specSnapshot?: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -536,6 +540,36 @@ export interface QuoteDisplayConfigV2 {
 
 export type QuoteDisplayConfig = QuoteDisplayConfigV1 | QuoteDisplayConfigV2;
 
+export interface QuoteContextSnapshot {
+  version: 1;
+  capturedAt: string;
+  job: EstimateJobInfo;
+  company: {
+    id: string;
+    name: string;
+    billingAddress: string | null;
+    billingCity: string | null;
+    billingState: string | null;
+    billingZip: string | null;
+    shippingAddress: string | null;
+    shippingCity: string | null;
+    shippingState: string | null;
+    shippingZip: string | null;
+    paymentTerms: string | null;
+    showCustomerPartNumbers?: boolean;
+    customerPartNumberMap?: Record<string, string>;
+  } | null;
+  contact: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    email: string | null;
+    phone: string | null;
+    title: string | null;
+  } | null;
+  openingNames: Record<string, string>;
+}
+
 export interface Quote {
   id: string;
   estimateId: string;
@@ -555,6 +589,8 @@ export interface Quote {
   /** Primary recipient email address the quote was last sent to. */
   sentToEmail: string | null;
   displayConfigJson: string | null;
+  /** Immutable customer/job/contact context captured when the quote was saved. */
+  contextSnapshot: QuoteContextSnapshot | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -605,6 +641,7 @@ export interface QuoteLineSnapshot {
   estimateLineId: string | null;
   estimateItemId: string | null;
   openingId: string | null;
+  openingName: string | null;
   componentId: string | null;
   sourceTable: 'estimate_line' | 'estimate_items' | string;
   sourceLineType: string | null;
@@ -612,6 +649,9 @@ export interface QuoteLineSnapshot {
   chargeCategory: string | null;
   description: string | null;
   selectedOptionCode: string | null;
+  manufacturerId: string | null;
+  manufacturerName: string | null;
+  partNumber: string | null;
   quantity: number | null;
   unitOfMeasure: string | null;
   unitListPrice: number | null;

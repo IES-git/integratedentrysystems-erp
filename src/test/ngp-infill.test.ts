@@ -56,6 +56,19 @@ function catalog(): NgpCatalog {
 }
 
 describe('ngp-infill pure logic', () => {
+  it('blocks vision lites at 120-minute and 3-hour fire ratings', () => {
+    const result = resolveInfill(catalog(), {
+      infillType: 'LITE', cutoutWidthIn: 12, cutoutHeightIn: 12,
+      doorThicknessIn: 1.75, fireRatingMinutes: 120,
+    });
+
+    expect(result.components).toHaveLength(0);
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      code: 'NGP_FIRE_RATING_BLOCKS_LITE',
+      severity: 'block',
+    }));
+  });
+
   it('rounds up to the next even inch', () => {
     expect(nextEvenSize(6)).toBe(6);
     expect(nextEvenSize(7)).toBe(8);

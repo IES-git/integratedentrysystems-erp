@@ -30,6 +30,7 @@ export {
   pickSellRule,
   computeSell,
   resolveHardwareNet,
+  parseDiscountChainMultiplier,
   MAX_PLAUSIBLE_HARDWARE_NET,
   requiresDoorFramePrep,
   SURFACE_MOUNTED_CATEGORIES,

@@ -15,7 +15,7 @@ import type { Estimate, Quote, Company, Template } from '@/types';
 
 const WIZARD_STEPS: WizardStep[] = [
   { id: 'existing', title: 'Previous Quotes', description: 'Use details from a previous quote' },
-  { id: 'recipient', title: 'Recipients', description: 'Select customer & manufacturer' },
+  { id: 'recipient', title: 'Customer', description: 'Confirm customer assignment' },
   { id: 'template', title: 'Templates', description: 'Choose output format' },
 ];
 
@@ -38,8 +38,7 @@ export default function QuoteWizardPage() {
   const [selectedExistingQuote, setSelectedExistingQuote] = useState<Quote | null>(null);
   const [useCurrentRecipients, setUseCurrentRecipients] = useState(true);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
-  const [selectedManufacturerId, setSelectedManufacturerId] = useState<string | null>(null);
-  const [quoteType, setQuoteType] = useState<'customer' | 'manufacturer' | 'both'>(initialQuoteType || 'customer');
+  const quoteType: 'customer' | 'manufacturer' | 'both' = initialQuoteType || 'customer';
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
 
   const currentCustomer = useMemo(
@@ -140,13 +139,12 @@ export default function QuoteWizardPage() {
       estimateId: estimate.id,
     });
     if (selectedCustomerId) params.set('customerId', selectedCustomerId);
-    if (selectedManufacturerId) params.set('manufacturerId', selectedManufacturerId);
     params.set('quoteType', quoteType);
     if (selectedTemplateId) params.set('templateId', selectedTemplateId);
     if (selectedExistingQuote) params.set('baseQuoteId', selectedExistingQuote.id);
 
     navigate(`/app/quotes/new?${params.toString()}`);
-  }, [estimate, selectedCustomerId, selectedManufacturerId, quoteType, selectedTemplateId, selectedExistingQuote, navigate]);
+  }, [estimate, selectedCustomerId, quoteType, selectedTemplateId, selectedExistingQuote, navigate]);
 
   const handleCancel = () => {
     navigate('/app/estimates');
@@ -198,10 +196,9 @@ export default function QuoteWizardPage() {
               companies={companies}
               useCurrentRecipients={useCurrentRecipients}
               selectedCustomerId={selectedCustomerId}
-              selectedManufacturerId={selectedManufacturerId}
+              customerRequired={quoteType !== 'manufacturer'}
               onUseCurrentChange={setUseCurrentRecipients}
               onCustomerChange={setSelectedCustomerId}
-              onManufacturerChange={setSelectedManufacturerId}
               onBack={handleBack}
               onNext={handleRecipientNext}
             />

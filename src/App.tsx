@@ -12,6 +12,7 @@ import LoginPage from "@/pages/LoginPage";
 import AcceptInvitePage from "@/pages/AcceptInvitePage";
 import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
+import PublicQuoteApprovalPage from "@/pages/PublicQuoteApprovalPage";
 import DashboardPage from "@/pages/DashboardPage";
 import CustomersPage from "@/pages/CustomersPage";
 import CompanyDetailPage from "@/pages/CompanyDetailPage";
@@ -63,6 +64,7 @@ const App = () => (
                 <Route path="/accept-invite" element={<AcceptInvitePage />} />
                 <Route path="/forgot-password" element={<ForgotPasswordPage />} />
                 <Route path="/reset-password" element={<ResetPasswordPage />} />
+                <Route path="/quote-approval/:token" element={<PublicQuoteApprovalPage />} />
 
                 {/* Protected app routes — AppLayout enforces authentication */}
                 <Route path="/app" element={<AppLayout />}>

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatArchitecturalSize,
   formatCompactNominalDimension,
+  normalizeArchitecturalDimension,
   normalizeCompactNominalDimension,
   parseDoorDimension,
   parsePlainInches,
@@ -41,5 +43,12 @@ describe('compact nominal dimensions', () => {
     expect(parseDoorDimension('70')).toBe(84);
     expect(parseDoorDimension('3-0')).toBe(36);
     expect(parseDoorDimension('7-0')).toBe(84);
+  });
+
+  it('renders compact nominal dimensions in architectural display notation', () => {
+    expect(normalizeArchitecturalDimension('30')).toBe('3-0');
+    expect(normalizeArchitecturalDimension('70')).toBe('7-0');
+    expect(normalizeArchitecturalDimension('210')).toBe('2-10');
+    expect(formatArchitecturalSize('30', '70')).toBe('3-0 x 7-0');
   });
 });

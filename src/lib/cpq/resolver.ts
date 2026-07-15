@@ -98,13 +98,14 @@ function isStiffenedCore(core: string | null): boolean {
   return /steel\s*stiffened/i.test(core ?? '');
 }
 
-/** The five performance requirements that mark a specialty opening (Release 1: manual quote). */
+/** Performance requirements that mark a specialty opening (Release 1: manual quote). */
 const SPECIALTY_FIELDS = [
   'opening.windstorm_design_pressure_requirement',
   'opening.storm_shelter_fema_requirement',
   'opening.stc_rating_and_gasket_type',
   'opening.blast_resistance_requirement',
   'opening.bullet_resistance_level',
+  'opening.forced_entry_requirement',
 ] as const;
 
 // ---------------------------------------------------------------------------

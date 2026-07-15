@@ -16,10 +16,11 @@ import {
   forcedBaseValues,
   autoFillBaseValues,
   priceableEnumOptions,
+  generateFrameOrderCallout,
   type OptionDescriptors,
 } from '@/lib/cpq/builder-logic';
 import type { BaseSignature } from '@/lib/cpq-catalog-api';
-import { hingesPerLeaf } from '@/components/estimates/wizard/opening-rules';
+import { applyComplementaryPairHanding, hingesPerLeaf } from '@/components/estimates/wizard/opening-rules';
 import { createOpeningDraft, buildNormalizedSpec, type OpeningDraft, type ComponentDraft } from '@/lib/cpq/opening-spec';
 import type { SpecFieldWithPath } from '@/lib/cpq-catalog-api';
 import type { SpecFieldEntity } from '@/types';
@@ -66,6 +67,59 @@ describe('derivedLeafCount', () => {
     expect(derivedLeafCount('double_egress', 1)).toBe(2);
     expect(derivedLeafCount('communicating', 1)).toBe(2);
     expect(derivedLeafCount('specialty', 3)).toBe(3); // falls back to draft value
+  });
+});
+
+describe('transom and frame order dimensions', () => {
+  it('generates a callout while keeping DOD, transom, and overall sizes distinct', () => {
+    expect(generateFrameOrderCallout({
+      openingMark: '101',
+      transomScope: 'Pair',
+      transomType: 'Panel',
+      dodWidth: '60',
+      dodHeight: '70',
+      transomWidth: '60',
+      transomHeight: '10',
+      overallFrameWidth: '60',
+      overallFrameHeight: '80',
+    })).toBe('101 | PAIR | DOD 6070 | PANEL TRANSOM 6010 | O/A 6080');
+  });
+
+  it('does not invent a callout without a complete DOD', () => {
+    expect(generateFrameOrderCallout({ dodWidth: '30', transomType: 'Glass' })).toBeNull();
+  });
+
+  it('defaults shared transom dimensions but leaves overall height explicit', () => {
+    const draft = createOpeningDraft({
+      name: 'T-1',
+      configurationType: 'sidelite_transom',
+      leafCount: 2,
+      openingWidth: '60',
+      openingHeight: '70',
+      openingFields: {
+        'opening.transom_infill_type': 'Glass',
+        'opening.transom_height': '10',
+        'opening.overall_frame_height': '80',
+      },
+    });
+    const ctx = deriveBuilderContext(draft);
+    expect(ctx.derivedOpeningFields['opening.door_opening_dimension_width']?.value).toBe('60');
+    expect(ctx.derivedOpeningFields['opening.door_opening_dimension_height']?.value).toBe('70');
+    expect(ctx.derivedOpeningFields['opening.overall_frame_width']?.value).toBe('60');
+    expect(ctx.derivedOpeningFields['opening.overall_frame_height']).toBeUndefined();
+    expect(ctx.derivedOpeningFields['opening.frame_order_callout']?.value)
+      .toBe('T-1 | PAIR | DOD 6070 | GLASS TRANSOM 6010 | O/A 6080');
+  });
+});
+
+describe('pair handing', () => {
+  it('sets the inactive leaf to the complementary hand', () => {
+    const active = door();
+    const inactive = door();
+    const updated = applyComplementaryPairHanding([active, inactive], active.id, 'RHR');
+
+    expect(updated[0].fields['door.door_hand']).toBe('RHR');
+    expect(updated[1].fields['door.door_hand']).toBe('LHR');
   });
 });
 
@@ -574,6 +628,17 @@ describe('priceable-combination filtering (only offer values that price)', () =>
     const comp = door({ 'door.door_series_construction': 'H' });
     expect(priceableEnumOptions(['CRS', 'Galvannealed', 'A40', 'A60', 'Stainless'], matField, comp, signatures))
       .toEqual(['CRS', 'Galvannealed', 'A40', 'A60']);
+  });
+
+  it('keeps specialty materials selectable so they can route to manual quote', () => {
+    const matField = makeField('DOR-006', 'door', { fieldPath: 'door.door_material' });
+    const comp = door({ 'door.door_series_construction': 'H' });
+    expect(priceableEnumOptions(
+      ['CRS', 'Galvannealed', 'Stainless 304', 'Stainless 316', 'Aluminum', 'Fiberglass/FRP'],
+      matField,
+      comp,
+      signatures,
+    )).toEqual(['CRS', 'Galvannealed', 'Stainless 304', 'Stainless 316', 'Aluminum', 'Fiberglass/FRP']);
   });
 
   it('ignores signature metadata when computing base-driving fields', () => {

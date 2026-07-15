@@ -955,7 +955,7 @@ export async function getPricedSpecValues(
 export async function getPricedGaugeValues(
   category?: PricingTable['category'],
 ): Promise<string[]> {
-  let q = supabase.from('pricing_columns').select('criteria, pricing_tables!inner(kind, category)');
+  const q = supabase.from('pricing_columns').select('criteria, pricing_tables!inner(kind, category)');
   // Join via FK — filter on kind='base' and optional category
   const { data, error } = await q;
   if (error || !data) return [];

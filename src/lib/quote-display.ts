@@ -1,5 +1,6 @@
 import type {
   QuoteAudienceDisplayConfig,
+  CompanySettings,
   QuoteDisplayBlock,
   QuoteDisplayBlockId,
   QuoteDisplayConfig,
@@ -191,8 +192,8 @@ export function createDefaultQuoteDisplayConfig(
         ? createDefaultAudienceDisplayConfig('manufacturer')
         : manufacturerTemplate ??
           createDefaultAudienceDisplayConfig('manufacturer', template?.audience === 'manufacturer' ? template.name : null),
-    organizationMode: 'by_opening',
-    detailMode: 'summary',
+    organizationMode: 'by_product_group',
+    detailMode: 'rolled_up',
     customerTemplateKey: template?.audience === 'customer' ? template.id : null,
     visibleColumns: DEFAULT_VISIBLE_COLUMNS,
     validityDays: 90,
@@ -200,6 +201,41 @@ export function createDefaultQuoteDisplayConfig(
     footerText: '',
     disclaimerText: '',
   };
+}
+
+/** Applies persisted customer/company presentation defaults to a fresh quote config. */
+export function applyCompanyQuoteDefaults(
+  config: QuoteDisplayConfig,
+  settings?: CompanySettings | null,
+): QuoteDisplayConfigV2 {
+  const normalized = normalizeQuoteDisplayConfig(config);
+  if (!settings) return normalized;
+
+  return normalizeQuoteDisplayConfig({
+    ...normalized,
+    organizationMode: settings.defaultQuoteOrganizationMode ?? normalized.organizationMode,
+    detailMode: settings.defaultQuoteDetailLevel ?? normalized.detailMode,
+    customerTemplateKey: settings.defaultQuoteTemplateKey ?? normalized.customerTemplateKey,
+    validityDays: settings.quoteValidityDays ?? normalized.validityDays,
+    headerText: settings.quoteHeaderText ?? normalized.headerText,
+    footerText: settings.quoteFooterText ?? normalized.footerText,
+    disclaimerText: settings.quoteDisclaimerText ?? normalized.disclaimerText,
+  });
+}
+
+/** Resolves an internal code to a customer-specific part number when enabled. */
+export function resolveCustomerPartNumber(
+  internalCode: string | null | undefined,
+  enabled: boolean,
+  partNumberMap?: Record<string, string> | null,
+): string | null {
+  const code = internalCode?.trim();
+  if (!code) return null;
+  if (!enabled) return code;
+  const exact = partNumberMap?.[code]?.trim();
+  if (exact) return exact;
+  const insensitive = Object.entries(partNumberMap ?? {}).find(([key]) => key.trim().toLowerCase() === code.toLowerCase())?.[1]?.trim();
+  return insensitive || code;
 }
 
 export function parseQuoteDisplayConfigJson(raw?: string | null): QuoteDisplayConfig | null {
@@ -243,8 +279,8 @@ export function serializeAudienceDisplayConfig(config: QuoteAudienceDisplayConfi
 }
 
 export function normalizeQuoteDisplayConfig(config: QuoteDisplayConfig): QuoteDisplayConfigV2 {
-  const detailMode = 'detailMode' in config ? config.detailMode : 'summary';
-  const organizationMode = 'organizationMode' in config ? config.organizationMode : 'by_opening';
+  const detailMode = 'detailMode' in config ? config.detailMode : 'rolled_up';
+  const organizationMode = 'organizationMode' in config ? config.organizationMode : 'by_product_group';
   const visibleColumns = 'visibleColumns' in config && Array.isArray(config.visibleColumns)
     ? config.visibleColumns
     : DEFAULT_VISIBLE_COLUMNS;

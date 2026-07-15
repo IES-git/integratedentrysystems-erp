@@ -1,6 +1,8 @@
 import { supabase } from '@/lib/supabase';
 import { loadPricingDefaults, type PricingDefaults } from '@/lib/pricing-defaults-api';
+import { parseDiscountChainMultiplier, resolveHardwareNet } from '@/lib/pricing/hardware';
 import type {
+  HardwareApprovalState,
   PriceActionType,
   PriceStatus,
   PriceTableArchetype,
@@ -12,7 +14,88 @@ export interface EnginePricingLibrary {
   ruleTables: CpqRuleTableSummary[];
   hardwarePrices: HardwarePricingRow[];
   hardwarePriceTotal: number;
+  hardwareSpecs: HardwareSpecReviewRow[];
   defaults: PricingDefaults;
+}
+
+export interface HardwareSpecReviewRow {
+  id: string;
+  externalSpecId: string;
+  category: string;
+  description: string | null;
+  func: string | null;
+  finish: string | null;
+  size: string | null;
+  rating: string | null;
+  approvalState: HardwareApprovalState;
+  active: boolean;
+  sourceFile: string | null;
+  sourceMetadata: Record<string, unknown>;
+  variantIds: string[];
+  productIds: string[];
+  manufacturerNames: string[];
+  models: string[];
+  skus: string[];
+  updatedAt: string;
+}
+
+export interface HardwareSpecReviewUpdate {
+  category: string;
+  description: string | null;
+  func: string | null;
+  finish: string | null;
+  size: string | null;
+  rating: string | null;
+  approvalState: HardwareApprovalState;
+}
+
+export async function updateHardwareSpecReview(
+  row: HardwareSpecReviewRow,
+  input: HardwareSpecReviewUpdate,
+): Promise<void> {
+  if (!input.category.trim()) throw new Error('Category is required.');
+  if (input.approvalState === 'approved' && !input.description?.trim()) {
+    throw new Error('Approved hardware requires a reviewed description.');
+  }
+  const { data: auth } = await supabase.auth.getUser();
+  const active = !['inactive', 'rejected'].includes(input.approvalState);
+  const reviewedAt = ['approved', 'rejected', 'inactive'].includes(input.approvalState)
+    ? new Date().toISOString()
+    : null;
+  const { error } = await supabase.from('hardware_spec').update({
+    category: input.category.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''),
+    other_requirements: input.description?.trim() || null,
+    function: input.func?.trim() || null,
+    finish: input.finish?.trim() || null,
+    size: input.size?.trim() || null,
+    rating: input.rating?.trim() || null,
+    approval_state: input.approvalState,
+    active,
+    updated_by: auth.user?.id ?? null,
+    last_reviewed_at: reviewedAt,
+  }).eq('id', row.id);
+  if (error) throw new Error(`Failed to update hardware specification: ${error.message}`);
+
+  if (row.variantIds.length > 0) {
+    const { error: variantError } = await supabase.from('hardware_variant').update({
+      approval_state: input.approvalState,
+      active,
+      updated_by: auth.user?.id ?? null,
+      last_reviewed_at: reviewedAt,
+    }).in('id', row.variantIds);
+    if (variantError) throw new Error(`Specification saved, but linked offers were not updated: ${variantError.message}`);
+  }
+  if (row.productIds.length > 0) {
+    const { error: productError } = await supabase.from('hardware_product').update({
+      category: input.category.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''),
+      description: input.description?.trim() || null,
+      approval_state: input.approvalState,
+      active,
+      updated_by: auth.user?.id ?? null,
+      last_reviewed_at: reviewedAt,
+    }).in('id', row.productIds);
+    if (productError) throw new Error(`Specification saved, but linked products were not updated: ${productError.message}`);
+  }
 }
 
 export interface CpqRuleTableDetail {
@@ -82,11 +165,69 @@ export interface HardwarePricingRow {
   size: string | null;
   listPrice: number | null;
   discountMultiplier: number | null;
+  discountChain: string | null;
   netCost: number | null;
   uom: string;
   reviewStatus: string;
   sourceRowRef: string | null;
   updatedAt: string;
+}
+
+export interface HardwarePricingUpdate {
+  listPrice: number | null;
+  discountMultiplier: number | null;
+  discountChain: string | null;
+  netCost: number | null;
+  uom: string;
+  reviewStatus: ReviewStatus;
+}
+
+/**
+ * Maintains a normalized hardware price observation. Approval is deliberately
+ * explicit: edited rows can stay NEEDS_REVIEW, and APPROVED is refused unless
+ * the engine can resolve a plausible net from the supplied values.
+ */
+export async function updateHardwarePricingRow(id: string, input: HardwarePricingUpdate): Promise<void> {
+  if (input.listPrice != null && (!Number.isFinite(input.listPrice) || input.listPrice <= 0)) {
+    throw new Error('List price must be greater than zero.');
+  }
+  if (
+    input.discountMultiplier != null &&
+    (!Number.isFinite(input.discountMultiplier) || input.discountMultiplier <= 0 || input.discountMultiplier > 1)
+  ) {
+    throw new Error('Discount multiplier must be greater than 0 and no more than 1.');
+  }
+  if (input.discountChain && parseDiscountChainMultiplier(input.discountChain) == null) {
+    throw new Error('Discount chain must contain percentages from 0 to 100 separated by “/” (for example 50/20).');
+  }
+  if (input.netCost != null && (!Number.isFinite(input.netCost) || input.netCost <= 0)) {
+    throw new Error('Net cost must be greater than zero.');
+  }
+  if (input.reviewStatus === 'APPROVED' && resolveHardwareNet(input) == null) {
+    throw new Error('Approved hardware pricing requires a plausible net, list × multiplier, or list × discount chain.');
+  }
+
+  const { data: auth } = await supabase.auth.getUser();
+  const approvalState = input.reviewStatus === 'APPROVED'
+    ? 'approved'
+    : input.reviewStatus === 'REJECTED'
+      ? 'rejected'
+      : 'needs_review';
+  const { error } = await supabase
+    .from('hardware_price')
+    .update({
+      list_price: input.listPrice,
+      discount_multiplier: input.discountMultiplier,
+      discount_chain: input.discountChain?.trim() || null,
+      net_cost: input.netCost,
+      uom: input.uom.trim() || 'EA',
+      review_status: input.reviewStatus,
+      approval_state: approvalState,
+      updated_by: auth.user?.id ?? null,
+      last_reviewed_at: input.reviewStatus === 'APPROVED' ? new Date().toISOString() : null,
+    })
+    .eq('id', id);
+  if (error) throw new Error(`Failed to update hardware price: ${error.message}`);
 }
 
 async function loadRuleCounts(): Promise<Map<string, { total: number; approved: number }>> {
@@ -114,13 +255,14 @@ async function loadRuleCounts(): Promise<Map<string, { total: number; approved: 
 }
 
 export async function loadEnginePricingLibrary(): Promise<EnginePricingLibrary> {
-  const [{ data: tableRows, error: tableError }, ruleCounts, hardware, defaults] = await Promise.all([
+  const [{ data: tableRows, error: tableError }, ruleCounts, hardware, hardwareSpecs, defaults] = await Promise.all([
     supabase
       .from('price_table')
       .select('id, price_book_id, entity_type, archetype, name, section, basis, unit, precedence, updated_at')
       .order('name', { ascending: true }),
     loadRuleCounts(),
     listHardwarePricingRows(1000),
+    listHardwareSpecsForReview(1000),
     loadPricingDefaults(),
   ]);
 
@@ -181,8 +323,43 @@ export async function loadEnginePricingLibrary(): Promise<EnginePricingLibrary> 
     ruleTables,
     hardwarePrices: hardware.rows,
     hardwarePriceTotal: hardware.total,
+    hardwareSpecs,
     defaults,
   };
+}
+
+async function listHardwareSpecsForReview(limit: number): Promise<HardwareSpecReviewRow[]> {
+  const { data, error } = await supabase
+    .from('hardware_spec')
+    .select('id, external_spec_id, category, other_requirements, function, finish, size, rating, approval_state, active, source_file, source_metadata, updated_at, hardware_variant(id, sku, hardware_product_id, hardware_product(manufacturer_name, model))')
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`Failed to load hardware specifications: ${error.message}`);
+  return (data ?? []).map((raw) => {
+    const row = raw as Record<string, unknown>;
+    const variants = ((row.hardware_variant as Record<string, unknown>[] | null) ?? []);
+    const products = variants.map((variant) => (variant.hardware_product as Record<string, unknown> | null) ?? {});
+    return {
+      id: String(row.id),
+      externalSpecId: String(row.external_spec_id),
+      category: String(row.category ?? ''),
+      description: (row.other_requirements as string | null) ?? null,
+      func: (row.function as string | null) ?? null,
+      finish: (row.finish as string | null) ?? null,
+      size: (row.size as string | null) ?? null,
+      rating: (row.rating as string | null) ?? null,
+      approvalState: (row.approval_state as HardwareApprovalState) ?? 'needs_review',
+      active: (row.active as boolean | null) ?? true,
+      sourceFile: (row.source_file as string | null) ?? null,
+      sourceMetadata: (row.source_metadata as Record<string, unknown> | null) ?? {},
+      variantIds: variants.map((variant) => String(variant.id)).filter(Boolean),
+      productIds: [...new Set(variants.map((variant) => String(variant.hardware_product_id ?? '')).filter(Boolean))],
+      manufacturerNames: [...new Set(products.map((product) => String(product.manufacturer_name ?? '')).filter(Boolean))],
+      models: [...new Set(products.map((product) => String(product.model ?? '')).filter(Boolean))],
+      skus: [...new Set(variants.map((variant) => String(variant.sku ?? '')).filter(Boolean))],
+      updatedAt: String(row.updated_at ?? ''),
+    };
+  });
 }
 
 export async function listCpqRulesForPriceTable(priceTableId: string, limit = 1000): Promise<CpqRuleRow[]> {
@@ -286,7 +463,7 @@ export async function getCpqRuleTableDetail(priceTableId: string): Promise<CpqRu
 async function listHardwarePricingRows(limit: number): Promise<{ rows: HardwarePricingRow[]; total: number }> {
   const { data, error, count } = await supabase
     .from('hardware_price')
-    .select('id, hardware_price_book_id, list_price, discount_multiplier, net_cost, uom, review_status, source_row_ref, updated_at, hardware_price_book(title, supplier_name), hardware_variant!inner(id, sku, finish, function, size, hardware_product!inner(category, manufacturer_name, description))', { count: 'exact' })
+    .select('id, hardware_price_book_id, list_price, discount_multiplier, discount_chain, net_cost, uom, review_status, source_row_ref, updated_at, hardware_price_book(title, supplier_name), hardware_variant!inner(id, sku, finish, function, size, hardware_product!inner(category, manufacturer_name, description))', { count: 'exact' })
     .order('updated_at', { ascending: false })
     .limit(limit);
   if (error) throw new Error(`Failed to load hardware prices: ${error.message}`);
@@ -311,6 +488,7 @@ async function listHardwarePricingRows(limit: number): Promise<{ rows: HardwareP
         size: (variant?.size as string | null) ?? null,
         listPrice: (row.list_price as number | null) ?? null,
         discountMultiplier: (row.discount_multiplier as number | null) ?? null,
+        discountChain: (row.discount_chain as string | null) ?? null,
         netCost: (row.net_cost as number | null) ?? null,
         uom: (row.uom as string) ?? 'EA',
         reviewStatus: (row.review_status as string) ?? 'UNREVIEWED',

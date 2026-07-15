@@ -7,9 +7,10 @@ import {
   getEnabledBlocks,
   hasHiddenDisplayLines,
   resolveQuoteDocumentDisplayConfig,
+  resolveCustomerPartNumber,
   type QuoteDocumentDisplayConfigInput,
 } from '@/lib/quote-display';
-import type { Quote, QuoteItem, Company, Contact } from '@/types';
+import type { Quote, QuoteItem, Company, Contact, Estimate } from '@/types';
 import iesLogo from '@/assets/ies-logo.png';
 
 Font.register({
@@ -43,6 +44,14 @@ const styles = StyleSheet.create({
   logoImage: {
     width: 140,
     objectFit: 'contain',
+  },
+  tagline: {
+    marginTop: 3,
+    fontSize: 8,
+    fontFamily: 'Helvetica-Bold',
+    color: '#6b7280',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
   },
   quoteMetaBlock: {
     flexDirection: 'column',
@@ -92,6 +101,31 @@ const styles = StyleSheet.create({
     fontSize: 8.5,
     color: '#374151',
     lineHeight: 1.4,
+  },
+  projectMeta: {
+    marginTop: -12,
+    marginBottom: 20,
+    padding: 10,
+    backgroundColor: '#f9fafb',
+    borderRadius: 3,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  projectMetaItem: {
+    width: '31%',
+  },
+  projectMetaLabel: {
+    fontSize: 6.5,
+    fontFamily: 'Helvetica-Bold',
+    color: '#9ca3af',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  projectMetaValue: {
+    fontSize: 8,
+    color: '#374151',
   },
   // ── Line Items Table ────────────────────────────────────────────────────────
   table: {
@@ -317,6 +351,7 @@ interface CustomerQuotePdfProps {
   quote: Quote;
   items: QuoteItem[];
   company: Company | null;
+  estimate?: Estimate | null;
   primaryContact?: Contact | null;
   aiSummary?: string | null;
   displayConfig?: QuoteDocumentDisplayConfigInput;
@@ -326,6 +361,7 @@ export function CustomerQuotePdf({
   quote,
   items,
   company,
+  estimate,
   primaryContact,
   aiSummary,
   displayConfig,
@@ -337,13 +373,29 @@ export function CustomerQuotePdf({
   const detailMode = getEffectiveQuoteDetailMode(config, documentConfig);
   const visibleColumns = new Set(getEffectiveVisibleColumns(config, documentConfig));
   const enabledBlocks = getEnabledBlocks(config);
-  const displayRows = buildCustomerDisplayRows(items, config, {
+  const rawDisplayRows = buildCustomerDisplayRows(items, config, {
     organizationMode: documentConfig?.organizationMode,
     detailMode,
   });
   const hiddenLines = hasHiddenDisplayLines(items, config);
+  const savedContext = quote.contextSnapshot;
+  const job = savedContext?.job ?? estimate ?? null;
+  const savedCompany = savedContext?.company ?? null;
+  const savedContact = savedContext?.contact ?? null;
+  const showCustomerPartNumbers = savedCompany?.showCustomerPartNumbers
+    ?? company?.settings?.showCustomerPartNumbers
+    ?? false;
+  const customerPartNumberMap = savedCompany?.customerPartNumberMap
+    ?? company?.settings?.customerPartNumberMap
+    ?? {};
+  const displayRows = rawDisplayRows.map((row) => ({
+    ...row,
+    canonicalCode: resolveCustomerPartNumber(row.canonicalCode, showCustomerPartNumbers, customerPartNumberMap),
+  }));
   const quoteNumber = `Q-${quote.id.slice(-8).toUpperCase()}`;
-  const createdDate = new Date(quote.createdAt);
+  const createdDate = job?.quoteDate
+    ? new Date(`${job.quoteDate}T00:00:00`)
+    : new Date(quote.createdAt);
   const quoteDate = createdDate.toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'long',
@@ -357,18 +409,54 @@ export function CustomerQuotePdf({
     : null;
 
   const billingLines = [
-    company?.billingAddress,
-    [company?.billingCity, company?.billingState, company?.billingZip]
+    savedCompany?.billingAddress ?? company?.billingAddress,
+    [
+      savedCompany?.billingCity ?? company?.billingCity,
+      savedCompany?.billingState ?? company?.billingState,
+      savedCompany?.billingZip ?? company?.billingZip,
+    ]
       .filter(Boolean)
       .join(', '),
   ].filter(Boolean);
 
-  const contactName = primaryContact
-    ? `${primaryContact.firstName} ${primaryContact.lastName}`
-    : null;
-  const contactEmail = primaryContact?.email ?? null;
+  const companyShippingLines = [
+    savedCompany?.shippingAddress ?? company?.shippingAddress,
+    [
+      savedCompany?.shippingCity ?? company?.shippingCity,
+      savedCompany?.shippingState ?? company?.shippingState,
+      savedCompany?.shippingZip ?? company?.shippingZip,
+    ]
+      .filter(Boolean)
+      .join(', '),
+  ].filter(Boolean);
 
-  const paymentTerms = company?.settings?.paymentTerms ?? 'Net 30';
+  const overrideShipToLines = [
+    job?.shipToAddress,
+    [job?.shipToCity, job?.shipToState, job?.shipToZip]
+      .filter(Boolean)
+      .join(', '),
+  ].filter(Boolean);
+
+  const shipToLines = job?.shipToSource === 'will_call'
+    ? ['Will call']
+    : job?.shipToSource === 'customer_billing'
+      ? billingLines
+      : job?.shipToSource === 'override'
+        ? overrideShipToLines
+        : companyShippingLines.length > 0
+          ? companyShippingLines
+          : billingLines;
+
+  const contactName = savedContact
+    ? `${savedContact.firstName} ${savedContact.lastName}`
+    : primaryContact
+      ? `${primaryContact.firstName} ${primaryContact.lastName}`
+    : null;
+  const contactEmail = savedContact?.email ?? primaryContact?.email ?? null;
+  const contactPhone = savedContact?.phone ?? primaryContact?.phone ?? null;
+  const contactTitle = savedContact?.title ?? primaryContact?.title ?? null;
+
+  const paymentTerms = job?.terms ?? savedCompany?.paymentTerms ?? company?.settings?.paymentTerms ?? 'Net 30';
   const overviewText = config.summaryText.trim() || aiSummary || '';
   const termsText =
     config.termsText.trim() ||
@@ -379,19 +467,20 @@ export function CustomerQuotePdf({
 
   return (
     <Document
-      title={`Quote ${quoteNumber}`}
+      title={`Sales Estimate ${quoteNumber}`}
       author="Integrated Entry Systems"
-      subject="Customer Quote"
+      subject="Customer Sales Estimate"
     >
       <Page size="LETTER" style={styles.page}>
         {/* ── Header ── */}
         <View style={styles.header}>
           <View style={styles.brandBlock}>
             <Image src={iesLogo} style={styles.logoImage} />
+            <Text style={styles.tagline}>Count On It</Text>
           </View>
           <View style={styles.quoteMetaBlock}>
-            <Text style={styles.quoteTitle}>QUOTE</Text>
-            <Text style={styles.quoteNumber}>Quote No: {quoteNumber}</Text>
+            <Text style={styles.quoteTitle}>SALES ESTIMATE</Text>
+            <Text style={styles.quoteNumber}>Estimate No: {quoteNumber}</Text>
             <Text style={styles.quoteDate}>Date: {quoteDate}</Text>
             {validUntil && <Text style={styles.quoteDate}>Valid Until: {validUntil}</Text>}
           </View>
@@ -406,23 +495,47 @@ export function CustomerQuotePdf({
 
         {enabledBlocks.map((block) => {
           if (block.id === 'project') {
+            const projectMeta = [
+              ['Job Number', job?.jobNumber],
+              ['Customer PO', job?.customerPo],
+              ['Shipping Method', job?.shippingMethod],
+              ['Terms', paymentTerms],
+              ['Delivery', job?.delivery],
+              ['Customer Rep', job?.customerRepName],
+            ].filter((entry): entry is [string, string] => Boolean(entry[1]));
             return (
-              <View key={block.id} style={styles.addressSection}>
-                <View style={styles.addressBlock}>
-                  <Text style={styles.addressLabel}>Bill To</Text>
-                  {company && <Text style={styles.addressCompany}>{company.name}</Text>}
-                  {contactName && <Text style={styles.addressLine}>{contactName}</Text>}
-                  {contactEmail && <Text style={styles.addressLine}>{contactEmail}</Text>}
-                  {billingLines.map((line, i) => (
-                    <Text key={i} style={styles.addressLine}>{line}</Text>
-                  ))}
+              <View key={block.id}>
+                <View style={styles.addressSection}>
+                  <View style={styles.addressBlock}>
+                    <Text style={styles.addressLabel}>Customer / Bill To</Text>
+                    {(savedCompany?.name ?? company?.name) && <Text style={styles.addressCompany}>{savedCompany?.name ?? company?.name}</Text>}
+                    {contactName && <Text style={styles.addressLine}>{contactName}</Text>}
+                    {contactTitle && <Text style={styles.addressLine}>{contactTitle}</Text>}
+                    {contactEmail && <Text style={styles.addressLine}>{contactEmail}</Text>}
+                    {contactPhone && <Text style={styles.addressLine}>{contactPhone}</Text>}
+                    {billingLines.map((line, i) => (
+                      <Text key={i} style={styles.addressLine}>{line}</Text>
+                    ))}
+                  </View>
+                  <View style={styles.addressBlock}>
+                    <Text style={styles.addressLabel}>Job / Ship To</Text>
+                    {job?.jobName && <Text style={styles.addressCompany}>{job.jobName}</Text>}
+                    {job?.jobLocation && <Text style={styles.addressLine}>{job.jobLocation}</Text>}
+                    {shipToLines.map((line, i) => (
+                      <Text key={i} style={styles.addressLine}>{line}</Text>
+                    ))}
+                  </View>
                 </View>
-                <View style={styles.addressBlock}>
-                  <Text style={styles.addressLabel}>From</Text>
-                  <Text style={styles.addressCompany}>Integrated Entry Systems</Text>
-                  <Text style={styles.addressLine}>Commercial Door &amp; Hardware</Text>
-                  <Text style={styles.addressLine}>solutions@ies-access.com</Text>
-                </View>
+                {projectMeta.length > 0 && (
+                  <View style={styles.projectMeta}>
+                    {projectMeta.map(([label, value]) => (
+                      <View key={label} style={styles.projectMetaItem}>
+                        <Text style={styles.projectMetaLabel}>{label}</Text>
+                        <Text style={styles.projectMetaValue}>{value}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
               </View>
             );
           }
@@ -470,7 +583,7 @@ export function CustomerQuotePdf({
                   )}
                   {showProductCodes && (
                     <View style={styles.colCode}>
-                      <Text style={styles.tableHeaderCell}>Code</Text>
+                      <Text style={styles.tableHeaderCell}>{showCustomerPartNumbers ? 'Customer Part' : 'Code'}</Text>
                     </View>
                   )}
                   {showQuantities && (
@@ -505,7 +618,7 @@ export function CustomerQuotePdf({
                       <View style={styles.colDescription}>
                         <Text style={styles.cellTextBold}>{item.label}</Text>
                         {!showProductCodes && item.canonicalCode && (
-                          <Text style={styles.cellText}>Item Code: {item.canonicalCode}</Text>
+                          <Text style={styles.cellText}>{showCustomerPartNumbers ? 'Customer Part' : 'Item Code'}: {item.canonicalCode}</Text>
                         )}
                         {detailMode === 'full_internal' && item.sourceItemCount > 1 && (
                           <Text style={styles.cellText}>
@@ -615,7 +728,7 @@ export function CustomerQuotePdf({
         {/* ── Footer ── */}
         <View style={styles.footer} fixed>
           <Text style={styles.footerText}>
-            {quoteNumber} · {quoteDate}
+            {quoteNumber} · {job?.jobName ?? quoteDate}
           </Text>
           <Text style={styles.footerThankYou}>{footerText}</Text>
           <Text style={styles.footerText}>Integrated Entry Systems</Text>

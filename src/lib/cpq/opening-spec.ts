@@ -37,6 +37,7 @@ export interface ComponentDraft {
 
 export interface HardwareSelectionDraft {
   category: string;
+  hardwareSpecId?: string | null;
   variantId: string | null;
   quantity: number;
   required: boolean;
@@ -46,6 +47,10 @@ export interface HardwareSelectionDraft {
   selectedHand?: string | null;
   selectedRating?: string | null;
   source?: 'set_template' | 'manual';
+  /** Human-readable requirement captured in-estimate before catalog review. */
+  stagedDescription?: string | null;
+  /** Review state for a newly staged catalog requirement/offer. */
+  reviewState?: 'needs_review' | null;
 }
 
 /**

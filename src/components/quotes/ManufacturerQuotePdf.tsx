@@ -1,654 +1,174 @@
 import { Document, Page, Text, View, StyleSheet, Image } from '@react-pdf/renderer';
-import {
-  createDefaultAudienceDisplayConfig,
-  getEffectiveQuoteDetailMode,
-  getEffectiveVisibleColumns,
-  getEnabledBlocks,
-  getLineDisplayKey,
-  getLineDisplayLabel,
-  hasHiddenDisplayLines,
-  isLineVisible,
-  resolveQuoteDocumentDisplayConfig,
-  type QuoteDocumentDisplayConfigInput,
-} from '@/lib/quote-display';
-import type { Quote, QuoteItem, ItemField, Company } from '@/types';
+import { createDefaultAudienceDisplayConfig, resolveQuoteDocumentDisplayConfig, type QuoteDocumentDisplayConfigInput } from '@/lib/quote-display';
+import type { OperationalOutputRow } from '@/lib/operational-outputs';
+import type { Company, Quote, QuoteContextSnapshot } from '@/types';
 import iesLogo from '@/assets/ies-logo.png';
 
 const styles = StyleSheet.create({
-  page: {
-    fontFamily: 'Helvetica',
-    fontSize: 9,
-    paddingTop: 40,
-    paddingBottom: 60,
-    paddingHorizontal: 40,
-    color: '#1a1a1a',
-    backgroundColor: '#ffffff',
-  },
-  // ── Header ─────────────────────────────────────────────────────────────────
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 28,
-    paddingBottom: 20,
-    borderBottom: '1.5pt solid #1a1a1a',
-  },
-  brandBlock: {
-    flexDirection: 'column',
-    justifyContent: 'center',
-  },
-  logoImage: {
-    width: 140,
-    objectFit: 'contain',
-  },
-  rfqMetaBlock: {
-    flexDirection: 'column',
-    alignItems: 'flex-end',
-    gap: 3,
-  },
-  rfqTitle: {
-    fontSize: 18,
-    fontFamily: 'Helvetica-Bold',
-    color: '#1a1a1a',
-    letterSpacing: 2,
-  },
-  rfqSubtitle: {
-    fontSize: 8,
-    color: '#6b7280',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  rfqNumber: {
-    fontSize: 9,
-    color: '#6b7280',
-  },
-  rfqDate: {
-    fontSize: 9,
-    color: '#6b7280',
-  },
-  // ── Project Info ────────────────────────────────────────────────────────────
-  infoSection: {
-    flexDirection: 'row',
-    marginBottom: 24,
-    gap: 12,
-  },
-  infoBlock: {
-    flex: 1,
-    padding: 10,
-    backgroundColor: '#f9fafb',
-    borderRadius: 3,
-    borderLeft: '3pt solid #374151',
-    flexDirection: 'column',
-    gap: 3,
-  },
-  infoLabel: {
-    fontSize: 7,
-    fontFamily: 'Helvetica-Bold',
-    color: '#9ca3af',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginBottom: 3,
-  },
-  infoValue: {
-    fontSize: 9,
-    fontFamily: 'Helvetica-Bold',
-    color: '#1a1a1a',
-  },
-  infoLine: {
-    fontSize: 8.5,
-    color: '#374151',
-    lineHeight: 1.4,
-  },
-  // ── Section Header ──────────────────────────────────────────────────────────
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#374151',
-    paddingVertical: 7,
-    paddingHorizontal: 10,
-    borderRadius: 2,
-    marginBottom: 8,
-    marginTop: 4,
-  },
-  sectionHeaderText: {
-    fontSize: 7.5,
-    fontFamily: 'Helvetica-Bold',
-    color: '#ffffff',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  sectionHeaderRight: {
-    fontSize: 7.5,
-    color: '#d1d5db',
-  },
-  // ── Item Block ──────────────────────────────────────────────────────────────
-  itemBlock: {
-    marginBottom: 16,
-    border: '0.5pt solid #e5e7eb',
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  itemHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#f3f4f6',
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderBottom: '0.5pt solid #e5e7eb',
-  },
-  itemHeaderLeft: {
-    flex: 3,
-    flexDirection: 'column',
-    gap: 1,
-  },
-  itemLabel: {
-    fontSize: 9.5,
-    fontFamily: 'Helvetica-Bold',
-    color: '#111827',
-  },
-  itemCode: {
-    fontSize: 7.5,
-    color: '#6b7280',
-    fontFamily: 'Helvetica',
-  },
-  itemHeaderRight: {
-    flex: 2,
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 20,
-    alignItems: 'center',
-  },
-  itemMeta: {
-    flexDirection: 'column',
-    alignItems: 'flex-end',
-    gap: 1,
-  },
-  itemMetaLabel: {
-    fontSize: 6.5,
-    color: '#9ca3af',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  itemMetaValue: {
-    fontSize: 9,
-    fontFamily: 'Helvetica-Bold',
-    color: '#1a1a1a',
-  },
-  // ── Spec Grid ───────────────────────────────────────────────────────────────
-  specGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    padding: 8,
-    gap: 0,
-  },
-  specCell: {
-    width: '25%',
-    paddingVertical: 5,
-    paddingHorizontal: 8,
-    borderBottom: '0.5pt solid #f3f4f6',
-  },
-  specKey: {
-    fontSize: 7,
-    color: '#9ca3af',
-    letterSpacing: 0.3,
-    marginBottom: 2,
-  },
-  specValue: {
-    fontSize: 8.5,
-    color: '#374151',
-    fontFamily: 'Helvetica-Bold',
-  },
-  noSpecsText: {
-    fontSize: 8,
-    color: '#9ca3af',
-    padding: 8,
-    fontStyle: 'italic',
-  },
-  hiddenNotice: {
-    marginTop: -6,
-    marginBottom: 12,
-    fontSize: 7.5,
-    color: '#6b7280',
-  },
-  // ── Totals ──────────────────────────────────────────────────────────────────
-  totalsSection: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: 8,
-    marginBottom: 24,
-  },
-  totalsBox: {
-    width: 220,
-    border: '0.5pt solid #e5e7eb',
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  totalsHeader: {
-    backgroundColor: '#374151',
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-  },
-  totalsHeaderText: {
-    fontSize: 7.5,
-    fontFamily: 'Helvetica-Bold',
-    color: '#ffffff',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  totalRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderBottom: '0.5pt solid #f3f4f6',
-  },
-  totalLabel: {
-    fontSize: 8,
-    color: '#6b7280',
-  },
-  totalValue: {
-    fontSize: 8,
-    color: '#374151',
-  },
-  grandTotalRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 7,
-    paddingHorizontal: 10,
-    backgroundColor: '#f3f4f6',
-  },
-  grandTotalLabel: {
-    fontSize: 9.5,
-    fontFamily: 'Helvetica-Bold',
-    color: '#1a1a1a',
-  },
-  grandTotalValue: {
-    fontSize: 9.5,
-    fontFamily: 'Helvetica-Bold',
-    color: '#1a1a1a',
-  },
-  // ── Notes ───────────────────────────────────────────────────────────────────
-  notesSection: {
-    marginBottom: 20,
-    padding: 12,
-    backgroundColor: '#fef9c3',
-    borderRadius: 3,
-    borderLeft: '3pt solid #fbbf24',
-  },
-  notesLabel: {
-    fontSize: 7.5,
-    fontFamily: 'Helvetica-Bold',
-    color: '#92400e',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-    marginBottom: 4,
-  },
-  notesText: {
-    fontSize: 8.5,
-    color: '#78350f',
-    lineHeight: 1.5,
-  },
-  // ── Footer ──────────────────────────────────────────────────────────────────
-  footer: {
-    position: 'absolute',
-    bottom: 30,
-    left: 40,
-    right: 40,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: 10,
-    borderTop: '0.5pt solid #e5e7eb',
-  },
-  footerText: {
-    fontSize: 7.5,
-    color: '#9ca3af',
-  },
-  // ── Delivery notice ─────────────────────────────────────────────────────────
-  deliverySection: {
-    marginBottom: 16,
-    flexDirection: 'row',
-    gap: 20,
-    padding: 10,
-    border: '0.5pt solid #e5e7eb',
-    borderRadius: 3,
-  },
-  deliveryItem: {
-    flex: 1,
-    flexDirection: 'column',
-    gap: 2,
-  },
-  deliveryLabel: {
-    fontSize: 7,
-    fontFamily: 'Helvetica-Bold',
-    color: '#9ca3af',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  deliveryValue: {
-    fontSize: 8.5,
-    color: '#374151',
-  },
-  customSection: {
-    marginBottom: 16,
-    padding: 10,
-    border: '0.5pt solid #e5e7eb',
-    borderRadius: 3,
-  },
-  customLabel: {
-    fontSize: 7,
-    fontFamily: 'Helvetica-Bold',
-    color: '#374151',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-    marginBottom: 4,
-  },
-  customText: {
-    fontSize: 8.5,
-    color: '#374151',
-    lineHeight: 1.45,
-  },
+  page: { fontFamily: 'Helvetica', fontSize: 8, paddingTop: 34, paddingBottom: 54, paddingHorizontal: 34, color: '#111827' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', paddingBottom: 14, marginBottom: 14, borderBottom: '1.5pt solid #111827' },
+  logo: { width: 126, objectFit: 'contain' },
+  titleBlock: { alignItems: 'flex-end', gap: 2 },
+  title: { fontFamily: 'Helvetica-Bold', fontSize: 17, letterSpacing: 1.4 },
+  subtitle: { color: '#6b7280', fontSize: 7, letterSpacing: 0.7 },
+  meta: { fontSize: 8, color: '#374151' },
+  infoGrid: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  infoBox: { flex: 1, padding: 8, backgroundColor: '#f8fafc', border: '0.5pt solid #e5e7eb' },
+  infoLabel: { fontFamily: 'Helvetica-Bold', fontSize: 6.5, color: '#6b7280', letterSpacing: 0.6, marginBottom: 3, textTransform: 'uppercase' },
+  infoStrong: { fontFamily: 'Helvetica-Bold', fontSize: 8.5, marginBottom: 2 },
+  infoLine: { color: '#374151', fontSize: 7.5, lineHeight: 1.35 },
+  instruction: { padding: 9, marginBottom: 14, backgroundColor: '#eff6ff', borderLeft: '3pt solid #2563eb' },
+  instructionTitle: { fontFamily: 'Helvetica-Bold', fontSize: 7.5, color: '#1e3a8a', marginBottom: 3 },
+  instructionText: { color: '#1e3a8a', fontSize: 7.5, lineHeight: 1.4 },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#1f2937', paddingVertical: 6, paddingHorizontal: 8, marginBottom: 7 },
+  sectionHeaderText: { color: '#fff', fontFamily: 'Helvetica-Bold', fontSize: 7.5, letterSpacing: 0.5 },
+  sectionHeaderMeta: { color: '#d1d5db', fontSize: 7 },
+  item: { border: '0.5pt solid #d1d5db', marginBottom: 9 },
+  itemHeader: { flexDirection: 'row', justifyContent: 'space-between', gap: 8, padding: 7, backgroundColor: '#f3f4f6', borderBottom: '0.5pt solid #d1d5db' },
+  itemIdentity: { flex: 1 },
+  itemTitle: { fontFamily: 'Helvetica-Bold', fontSize: 9, marginBottom: 2 },
+  itemSub: { color: '#4b5563', fontSize: 7.5 },
+  qtyBox: { minWidth: 62, alignItems: 'flex-end' },
+  qtyLabel: { color: '#6b7280', fontSize: 6.5 },
+  qty: { fontFamily: 'Helvetica-Bold', fontSize: 10 },
+  callout: { paddingHorizontal: 7, paddingVertical: 5, backgroundColor: '#fffbeb', borderBottom: '0.5pt solid #fde68a' },
+  calloutLabel: { fontFamily: 'Helvetica-Bold', fontSize: 6.5, color: '#92400e' },
+  calloutValue: { fontSize: 7.5, color: '#78350f', marginTop: 1 },
+  detailGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingVertical: 3, paddingHorizontal: 4 },
+  detailCell: { width: '25%', paddingVertical: 4, paddingHorizontal: 4 },
+  detailLabel: { color: '#6b7280', fontSize: 6.5, marginBottom: 1 },
+  detailValue: { color: '#1f2937', fontFamily: 'Helvetica-Bold', fontSize: 7.5 },
+  specs: { padding: 7, borderTop: '0.5pt solid #e5e7eb' },
+  specsTitle: { fontFamily: 'Helvetica-Bold', color: '#4b5563', fontSize: 6.5, letterSpacing: 0.4, marginBottom: 4 },
+  specGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  spec: { width: '33.333%', paddingRight: 8, paddingBottom: 3 },
+  specText: { fontSize: 7, color: '#374151', lineHeight: 1.3 },
+  specLabel: { fontFamily: 'Helvetica-Bold' },
+  notes: { marginTop: 5, padding: 9, border: '0.5pt solid #d1d5db' },
+  notesTitle: { fontFamily: 'Helvetica-Bold', fontSize: 7, marginBottom: 3 },
+  notesText: { fontSize: 7.5, lineHeight: 1.4, color: '#374151' },
+  footer: { position: 'absolute', left: 34, right: 34, bottom: 25, paddingTop: 7, borderTop: '0.5pt solid #d1d5db', flexDirection: 'row', justifyContent: 'space-between' },
+  footerText: { color: '#6b7280', fontSize: 6.5 },
 });
-
-const fmt = (amount: number, currency = 'USD') =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
-
-export interface ManufacturerQuoteItem extends QuoteItem {
-  fields: ItemField[];
-}
 
 interface ManufacturerQuotePdfProps {
   quote: Quote;
-  items: ManufacturerQuoteItem[];
+  rows: OperationalOutputRow[];
+  manufacturerName: string;
   company: Company | null;
+  context?: QuoteContextSnapshot | null;
   displayConfig?: QuoteDocumentDisplayConfigInput;
 }
 
-export function ManufacturerQuotePdf({
-  quote,
-  items,
-  company,
-  displayConfig,
-}: ManufacturerQuotePdfProps) {
-  const { documentConfig, audienceConfig: config } = resolveQuoteDocumentDisplayConfig(
+function addressLines(context: QuoteContextSnapshot | null | undefined, company: Company | null): string[] {
+  const job = context?.job;
+  const companySnapshot = context?.company;
+  const street = job?.shipToAddress || companySnapshot?.shippingAddress || company?.shippingAddress || companySnapshot?.billingAddress || company?.billingAddress;
+  const city = job?.shipToCity || companySnapshot?.shippingCity || company?.shippingCity || companySnapshot?.billingCity || company?.billingCity;
+  const state = job?.shipToState || companySnapshot?.shippingState || company?.shippingState || companySnapshot?.billingState || company?.billingState;
+  const zip = job?.shipToZip || companySnapshot?.shippingZip || company?.shippingZip || companySnapshot?.billingZip || company?.billingZip;
+  return [street, [city, state, zip].filter(Boolean).join(', ')].filter((value): value is string => Boolean(value));
+}
+
+function detailPairs(row: OperationalOutputRow): Array<[string, string]> {
+  return [
+    ['Opening', row.openingMark], ['Product type', row.entityType], ['Category', row.category],
+    ['Part / series', row.partNumber], ['Size', row.size], ['Finish', row.finish],
+    ['Cutout size', row.cutoutSize], ['Kit order size', row.kitOrderSize],
+    ['Visible glass', row.visibleGlassSize], ['Glass type', row.glassType],
+  ].filter((pair) => pair[1]);
+}
+
+function uniqueSpecs(row: OperationalOutputRow): OperationalOutputRow['specifications'] {
+  const known = new Set(['opening', 'mark', 'size', 'finish', 'quantity', 'qty', 'part number', 'product code']);
+  const seen = new Set<string>();
+  return row.specifications.filter((spec) => {
+    const key = (spec.label || spec.key).trim().toLowerCase();
+    if (!spec.value || known.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function ManufacturerQuotePdf({ quote, rows, manufacturerName, company, context, displayConfig }: ManufacturerQuotePdfProps) {
+  const { audienceConfig } = resolveQuoteDocumentDisplayConfig(
     displayConfig ?? createDefaultAudienceDisplayConfig('manufacturer'),
     'manufacturer',
   );
-  const detailMode = getEffectiveQuoteDetailMode(config, documentConfig);
-  const visibleColumns = new Set(getEffectiveVisibleColumns(config, documentConfig));
-  const enabledBlocks = getEnabledBlocks(config);
-  const visibleItems = items.filter((item) => isLineVisible(item, config));
-  const hiddenLines = hasHiddenDisplayLines(items, config);
-  const visibleCostTotal = visibleItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
-  const allCostTotal = items.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
   const rfqNumber = `RFQ-${quote.id.slice(-8).toUpperCase()}`;
-  const rfqDate = new Date(quote.createdAt).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
-
-  const shipToLines = [
-    company?.shippingAddress ?? company?.billingAddress,
-    [
-      company?.shippingCity ?? company?.billingCity,
-      company?.shippingState ?? company?.billingState,
-      company?.shippingZip ?? company?.billingZip,
-    ]
-      .filter(Boolean)
-      .join(', '),
-  ].filter(Boolean);
+  const job = context?.job;
+  const shipTo = addressLines(context, company);
+  const openings = new Set(rows.map((row) => row.openingMark).filter((mark) => mark !== 'Unassigned'));
+  const date = new Date(quote.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
   return (
-    <Document
-      title={`RFQ ${rfqNumber}`}
-      author="Integrated Entry Systems"
-      subject="Request for Quote"
-    >
+    <Document title={`${rfqNumber} - ${manufacturerName}`} author="Integrated Entry Systems" subject={`Manufacturer RFQ for ${manufacturerName}`}>
       <Page size="LETTER" style={styles.page}>
-        {/* ── Header ── */}
         <View style={styles.header}>
-          <View style={styles.brandBlock}>
-            <Image src={iesLogo} style={styles.logoImage} />
-          </View>
-          <View style={styles.rfqMetaBlock}>
-            <Text style={styles.rfqTitle}>REQUEST FOR QUOTE</Text>
-            <Text style={styles.rfqSubtitle}>Technical Specification Document</Text>
-            <Text style={styles.rfqNumber}>RFQ No: {rfqNumber}</Text>
-            <Text style={styles.rfqDate}>Date: {rfqDate}</Text>
+          <Image src={iesLogo} style={styles.logo} />
+          <View style={styles.titleBlock}>
+            <Text style={styles.title}>REQUEST FOR QUOTE</Text>
+            <Text style={styles.subtitle}>MANUFACTURER-SPECIFIC PROCUREMENT SCOPE</Text>
+            <Text style={styles.meta}>{rfqNumber} · {date}</Text>
           </View>
         </View>
 
-        {enabledBlocks.map((block) => {
-          if (block.id === 'project') {
-            return (
-              <View key={block.id} style={styles.infoSection}>
-                <View style={styles.infoBlock}>
-                  <Text style={styles.infoLabel}>Ship To</Text>
-                  {company && <Text style={styles.infoValue}>{company.name}</Text>}
-                  {shipToLines.map((line, i) => (
-                    <Text key={i} style={styles.infoLine}>{line}</Text>
-                  ))}
+        <View style={styles.infoGrid}>
+          <View style={styles.infoBox}>
+            <Text style={styles.infoLabel}>Requested From</Text>
+            <Text style={styles.infoStrong}>{manufacturerName}</Text>
+            <Text style={styles.infoLine}>{rows.length} line item{rows.length === 1 ? '' : 's'} · {openings.size} opening{openings.size === 1 ? '' : 's'}</Text>
+          </View>
+          <View style={styles.infoBox}>
+            <Text style={styles.infoLabel}>Project</Text>
+            <Text style={styles.infoStrong}>{job?.jobName || 'Project not specified'}</Text>
+            {job?.jobNumber && <Text style={styles.infoLine}>Job: {job.jobNumber}</Text>}
+            {job?.jobLocation && <Text style={styles.infoLine}>Location: {job.jobLocation}</Text>}
+            {job?.customerPo && <Text style={styles.infoLine}>Customer PO: {job.customerPo}</Text>}
+          </View>
+          <View style={styles.infoBox}>
+            <Text style={styles.infoLabel}>Ship To</Text>
+            {company?.name && <Text style={styles.infoStrong}>{company.name}</Text>}
+            {shipTo.length ? shipTo.map((line) => <Text key={line} style={styles.infoLine}>{line}</Text>) : <Text style={styles.infoLine}>Confirm with IES before fulfillment</Text>}
+          </View>
+        </View>
+
+        <View style={styles.instruction}>
+          <Text style={styles.instructionTitle}>QUOTE RESPONSE REQUEST</Text>
+          <Text style={styles.instructionText}>{audienceConfig.termsText || 'Please quote only the items listed below and confirm unit pricing, freight, availability, lead time, and any specification exceptions.'}</Text>
+        </View>
+
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionHeaderText}>ITEMS REQUESTED FROM {manufacturerName.toUpperCase()}</Text>
+          <Text style={styles.sectionHeaderMeta}>{rows.length} line{rows.length === 1 ? '' : 's'}</Text>
+        </View>
+
+        {rows.map((row, index) => {
+          const specs = uniqueSpecs(row);
+          return (
+            <View key={`${row.openingId ?? 'none'}-${row.partNumber}-${index}`} style={styles.item}>
+              <View style={styles.itemHeader}>
+                <View style={styles.itemIdentity}>
+                  <Text style={styles.itemTitle}>{index + 1}. {row.description || row.partNumber || 'Specified item'}</Text>
+                  <Text style={styles.itemSub}>{row.openingMark !== 'Unassigned' ? `Opening ${row.openingMark}` : 'Opening not assigned'}{row.partNumber ? ` · ${row.partNumber}` : ''}</Text>
                 </View>
-                <View style={styles.infoBlock}>
-                  <Text style={styles.infoLabel}>Issued By</Text>
-                  <Text style={styles.infoValue}>Integrated Entry Systems</Text>
-                  <Text style={styles.infoLine}>Commercial Door &amp; Hardware</Text>
-                  <Text style={styles.infoLine}>procurement@ies-access.com</Text>
-                </View>
-                <View style={styles.infoBlock}>
-                  <Text style={styles.infoLabel}>Quote Info</Text>
-                  <Text style={styles.infoLine}>RFQ: {rfqNumber}</Text>
-                  <Text style={styles.infoLine}>Date: {rfqDate}</Text>
-                  <Text style={styles.infoLine}>Items: {visibleItems.length}</Text>
-                </View>
+                <View style={styles.qtyBox}><Text style={styles.qtyLabel}>QUANTITY</Text><Text style={styles.qty}>{row.quantity} {row.uom}</Text></View>
               </View>
-            );
-          }
-
-          if (block.id === 'openings') {
-            const isSummary = detailMode === 'summary';
-            const isDetailed = detailMode === 'per_item_sell' || detailMode === 'full_internal';
-            const showProductCodes = !isSummary && (visibleColumns.has('product_code') || (isDetailed && config.showProductCodes));
-            const showCosts = detailMode === 'full_internal' || visibleColumns.has('unit_cost') || visibleColumns.has('net_cost');
-
-            return (
-              <View key={block.id}>
-                <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionHeaderText}>{block.title}</Text>
-                  <Text style={styles.sectionHeaderRight}>
-                    {visibleItems.length} item{visibleItems.length !== 1 ? 's' : ''}
-                  </Text>
-                </View>
-                {visibleItems.map((item, idx) => (
-                  <View key={getLineDisplayKey(item)} style={idx % 2 === 0 ? styles.totalRow : [styles.totalRow, { backgroundColor: '#f9fafb' }]}>
-                    <Text style={styles.totalLabel}>
-                      {idx + 1}. {getLineDisplayLabel(item, config)}
-                      {showProductCodes && item.canonicalCode ? ` · ${item.canonicalCode}` : ''}
-                    </Text>
-                    {(config.showQuantities || showCosts) && (
-                      <Text style={styles.totalValue}>
-                        Qty {item.quantity}
-                        {showCosts ? ` · ${fmt(item.quantity * item.unitCost, quote.currency)}` : ''}
-                      </Text>
-                    )}
-                  </View>
-                ))}
-                {hiddenLines && (
-                  <Text style={styles.hiddenNotice}>
-                    Some source lines are intentionally omitted from this display version.
-                  </Text>
-                )}
+              {row.frameOrderCallout && <View style={styles.callout}><Text style={styles.calloutLabel}>ORDER CALLOUT</Text><Text style={styles.calloutValue}>{row.frameOrderCallout}</Text></View>}
+              <View style={styles.detailGrid}>
+                {detailPairs(row).map(([label, value]) => <View key={label} style={styles.detailCell}><Text style={styles.detailLabel}>{label}</Text><Text style={styles.detailValue}>{value}</Text></View>)}
               </View>
-            );
-          }
-
-          if (block.id === 'lineItems') {
-            const isSummary = detailMode === 'summary';
-            const isDetailed = detailMode === 'per_item_sell' || detailMode === 'full_internal';
-            const showProductCodes = !isSummary && (visibleColumns.has('product_code') || (isDetailed && config.showProductCodes));
-            const showQuantities = visibleColumns.has('quantity') || config.showQuantities;
-            const showUnitCosts = detailMode === 'full_internal' || visibleColumns.has('unit_cost') || visibleColumns.has('net_cost');
-            const showUnitPrices = !isSummary && (visibleColumns.has('unit_price') || (isDetailed && config.showUnitPrices));
-            const showLineTotals = visibleColumns.has('line_total') || config.showLineTotals;
-            const showSpecFields = isDetailed || (!isSummary && config.showSpecFields);
-
-            return (
-              <View key={block.id}>
-                <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionHeaderText}>{block.title}</Text>
-                  <Text style={styles.sectionHeaderRight}>
-                    {visibleItems.length} item{visibleItems.length !== 1 ? 's' : ''}
-                  </Text>
-                </View>
-
-                {visibleItems.map((item, idx) => {
-                  const displayLabel = getLineDisplayLabel(item, config);
-                  return (
-                    <View key={getLineDisplayKey(item)} style={styles.itemBlock} wrap={false}>
-                      <View style={styles.itemHeader}>
-                        <View style={styles.itemHeaderLeft}>
-                          <Text style={styles.itemLabel}>
-                            {idx + 1}. {displayLabel}
-                          </Text>
-                          {showProductCodes && item.canonicalCode && (
-                            <Text style={styles.itemCode}>Item Code: {item.canonicalCode}</Text>
-                          )}
-                        </View>
-                        <View style={styles.itemHeaderRight}>
-                          {showQuantities && (
-                            <View style={styles.itemMeta}>
-                              <Text style={styles.itemMetaLabel}>Qty</Text>
-                              <Text style={styles.itemMetaValue}>{item.quantity}</Text>
-                            </View>
-                          )}
-                          {showUnitCosts && (
-                            <View style={styles.itemMeta}>
-                              <Text style={styles.itemMetaLabel}>Unit Cost</Text>
-                              <Text style={styles.itemMetaValue}>{fmt(item.unitCost, quote.currency)}</Text>
-                            </View>
-                          )}
-                          {showUnitPrices && (
-                            <View style={styles.itemMeta}>
-                              <Text style={styles.itemMetaLabel}>Sell</Text>
-                              <Text style={styles.itemMetaValue}>{fmt(item.unitPrice, quote.currency)}</Text>
-                            </View>
-                          )}
-                          {showLineTotals && (
-                            <View style={styles.itemMeta}>
-                              <Text style={styles.itemMetaLabel}>Line Total</Text>
-                              <Text style={styles.itemMetaValue}>
-                                {fmt(item.quantity * (showUnitCosts ? item.unitCost : item.unitPrice), quote.currency)}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                      </View>
-
-                      {showSpecFields ? (
-                        item.fields.length > 0 ? (
-                          <View style={styles.specGrid}>
-                            {item.fields.map((field) => (
-                              <View key={field.id} style={styles.specCell}>
-                                <Text style={styles.specKey}>{field.fieldLabel}</Text>
-                                <Text style={styles.specValue}>{field.fieldValue}</Text>
-                              </View>
-                            ))}
-                          </View>
-                        ) : (
-                          <Text style={styles.noSpecsText}>No additional specifications recorded.</Text>
-                        )
-                      ) : null}
-                    </View>
-                  );
-                })}
-
-                {hiddenLines && (
-                  <Text style={styles.hiddenNotice}>
-                    Some source lines are intentionally omitted from this display version.
-                  </Text>
-                )}
-              </View>
-            );
-          }
-
-          if (block.id === 'totals') {
-            return (
-              <View key={block.id} style={styles.totalsSection}>
-                <View style={styles.totalsBox}>
-                  <View style={styles.totalsHeader}>
-                    <Text style={styles.totalsHeaderText}>{block.title}</Text>
-                  </View>
-                  {visibleItems.map((item) => (
-                    <View key={getLineDisplayKey(item)} style={styles.totalRow}>
-                      <Text style={styles.totalLabel}>
-                        {getLineDisplayLabel(item, config)} (×{item.quantity})
-                      </Text>
-                      <Text style={styles.totalValue}>
-                        {fmt(item.quantity * (config.showUnitCosts ? item.unitCost : item.unitPrice), quote.currency)}
-                      </Text>
-                    </View>
-                  ))}
-                  <View style={styles.grandTotalRow}>
-                    <Text style={styles.grandTotalLabel}>
-                      {config.showUnitCosts ? 'TOTAL COST' : 'TOTAL'}
-                    </Text>
-                    <Text style={styles.grandTotalValue}>
-                      {fmt(config.showUnitCosts ? (hiddenLines ? allCostTotal : visibleCostTotal) : quote.total, quote.currency)}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            );
-          }
-
-          if (block.id === 'notes' && quote.notes) {
-            return (
-              <View key={block.id} style={styles.notesSection}>
-                <Text style={styles.notesLabel}>{block.title}</Text>
-                <Text style={styles.notesText}>{quote.notes}</Text>
-              </View>
-            );
-          }
-
-          if (block.id === 'delivery') {
-            return (
-              <View key={block.id} style={styles.deliverySection}>
-                <View style={styles.deliveryItem}>
-                  <Text style={styles.deliveryLabel}>{block.title}</Text>
-                  <Text style={styles.deliveryValue}>
-                    {config.termsText || 'Please confirm lead times and availability before acceptance.'}
-                  </Text>
-                </View>
-                <View style={styles.deliveryItem}>
-                  <Text style={styles.deliveryLabel}>Response Required By</Text>
-                  <Text style={styles.deliveryValue}>Within 5 business days of receipt</Text>
-                </View>
-              </View>
-            );
-          }
-
-          if (block.id === 'custom' && config.customText.trim()) {
-            return (
-              <View key={block.id} style={styles.customSection}>
-                <Text style={styles.customLabel}>{block.title}</Text>
-                <Text style={styles.customText}>{config.customText}</Text>
-              </View>
-            );
-          }
-
-          return null;
+              {specs.length > 0 && <View style={styles.specs}><Text style={styles.specsTitle}>TECHNICAL SPECIFICATIONS</Text><View style={styles.specGrid}>{specs.map((spec) => <View key={`${spec.key}-${spec.label}`} style={styles.spec}><Text style={styles.specText}><Text style={styles.specLabel}>{spec.label || spec.key}: </Text>{spec.value}</Text></View>)}</View></View>}
+            </View>
+          );
         })}
 
-        {/* ── Footer ── */}
+        {(quote.notes || audienceConfig.customText.trim()) && <View style={styles.notes}><Text style={styles.notesTitle}>PROJECT / PROCUREMENT NOTES</Text>{quote.notes && <Text style={styles.notesText}>{quote.notes}</Text>}{audienceConfig.customText.trim() && <Text style={styles.notesText}>{audienceConfig.customText}</Text>}</View>}
+
         <View style={styles.footer} fixed>
-          <Text style={styles.footerText}>{rfqNumber} · Confidential</Text>
-          <Text style={styles.footerText}>
-            This document is for procurement purposes only. Not for customer distribution.
-          </Text>
-          <Text style={styles.footerText}>IES · Page 1</Text>
+          <Text style={styles.footerText}>{rfqNumber} · {manufacturerName} · Confidential</Text>
+          <Text style={styles.footerText}>Integrated Entry Systems · procurement@ies-access.com</Text>
+          <Text style={styles.footerText} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
         </View>
       </Page>
     </Document>

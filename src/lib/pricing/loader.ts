@@ -430,6 +430,9 @@ export interface VariantWithPrice {
   category: string;
   /** hardware_product.subcategory — drives the subcategory-keyed prep crosswalk. */
   subcategory: string | null;
+  /** Procurement manufacturer identity from the owning hardware product. */
+  manufacturerId?: string | null;
+  manufacturerName?: string | null;
   price: HardwarePrice | null;
 }
 
@@ -437,6 +440,8 @@ function mapVariant(row: Record<string, unknown>): HardwareVariant {
   return {
     id: row.id as string,
     hardwareProductId: row.hardware_product_id as string,
+    hardwareSpecId: (row.hardware_spec_id as string | null) ?? null,
+    sourceOfferId: (row.source_offer_id as string | null) ?? null,
     sku: (row.sku as string | null) ?? null,
     function: (row.function as string | null) ?? null,
     finish: (row.finish as string | null) ?? null,
@@ -446,6 +451,12 @@ function mapVariant(row: Record<string, unknown>): HardwareVariant {
     rating: (row.rating as string | null) ?? null,
     material: (row.material as string | null) ?? null,
     optionAttributes: (row.option_attributes as Record<string, unknown>) ?? {},
+    active: (row.active as boolean | null) ?? true,
+    approvalState: (row.approval_state as HardwareVariant['approvalState']) ?? 'approved',
+    sourceRowNumber: (row.source_row_number as number | null) ?? null,
+    taxonomyNotes: (row.taxonomy_notes as string | null) ?? null,
+    updatedBy: (row.updated_by as string | null) ?? null,
+    lastReviewedAt: (row.last_reviewed_at as string | null) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -458,6 +469,7 @@ function mapPrice(row: Record<string, unknown>): HardwarePrice {
     hardwarePriceBookId: (row.hardware_price_book_id as string | null) ?? null,
     listPrice: num(row.list_price),
     discountMultiplier: num(row.discount_multiplier),
+    discountChain: (row.discount_chain as string | null) ?? null,
     netCost: num(row.net_cost),
     uom: (row.uom as string) ?? 'each',
     effectiveFrom: (row.effective_from as string | null) ?? null,
@@ -465,6 +477,10 @@ function mapPrice(row: Record<string, unknown>): HardwarePrice {
     minimumQuantity: num(row.minimum_quantity),
     sourceRowRef: (row.source_row_ref as string | null) ?? null,
     reviewStatus: row.review_status as HardwarePrice['reviewStatus'],
+    active: (row.active as boolean | null) ?? true,
+    approvalState: (row.approval_state as HardwarePrice['approvalState']) ?? 'approved',
+    updatedBy: (row.updated_by as string | null) ?? null,
+    lastReviewedAt: (row.last_reviewed_at as string | null) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -483,8 +499,8 @@ export async function loadVariantsWithPrices(
   if (ids.length === 0) return result;
 
   const [{ data: variants, error: vErr }, { data: prices, error: pErr }] = await Promise.all([
-    supabase.from('hardware_variant').select('*, hardware_product(category, subcategory)').in('id', ids),
-    supabase.from('hardware_price').select('*').in('hardware_variant_id', ids).eq('review_status', 'APPROVED'),
+    supabase.from('hardware_variant').select('*, hardware_product(category, subcategory, manufacturer_id, manufacturer_name, active, approval_state)').in('id', ids),
+    supabase.from('hardware_price').select('*').in('hardware_variant_id', ids).eq('review_status', 'APPROVED').eq('active', true),
   ]);
   if (vErr) throw new Error(`Failed to load hardware variants: ${vErr.message}`);
   if (pErr) throw new Error(`Failed to load hardware prices: ${pErr.message}`);
@@ -503,10 +519,29 @@ export async function loadVariantsWithPrices(
   for (const v of variants ?? []) {
     const row = v as Record<string, unknown>;
     const variant = mapVariant(row);
-    const product = row.hardware_product as { category?: string; subcategory?: string | null } | null;
+    const product = row.hardware_product as {
+      category?: string;
+      subcategory?: string | null;
+      manufacturer_id?: string | null;
+      manufacturer_name?: string | null;
+      active?: boolean | null;
+      approval_state?: HardwareVariant['approvalState'];
+    } | null;
     const category = product?.category ?? '';
     const subcategory = product?.subcategory ?? null;
-    result.set(variant.id, { variant, category, subcategory, price: priceByVariant.get(variant.id) ?? null });
+    const selectable =
+      variant.active !== false &&
+      !['draft', 'needs_review', 'inactive', 'rejected'].includes(variant.approvalState ?? 'approved') &&
+      product?.active !== false &&
+      !['draft', 'needs_review', 'inactive', 'rejected'].includes(product?.approval_state ?? 'approved');
+    result.set(variant.id, {
+      variant,
+      category,
+      subcategory,
+      manufacturerId: product?.manufacturer_id ?? null,
+      manufacturerName: product?.manufacturer_name?.trim() || null,
+      price: selectable ? priceByVariant.get(variant.id) ?? null : null,
+    });
   }
   return result;
 }

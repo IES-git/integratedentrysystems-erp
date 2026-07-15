@@ -28,7 +28,7 @@ import {
   type ComponentDraft,
   type CutoutDraft,
 } from './opening-spec';
-import { deriveBuilderContext, type BuilderContext } from './builder-logic';
+import { deriveBuilderContext, mergeDerived, type BuilderContext } from './builder-logic';
 import type { NgpCatalog } from '@/lib/ngp-catalog-api';
 import { parsePlainInches } from '@/components/pricing/dimension-utils';
 import { RESOLVER_VERSION, type EstimateOpening, type SpecFieldMapping } from '@/types';
@@ -187,6 +187,7 @@ function componentSnapshot(
 function draftWithEffectiveSnapshot(draft: OpeningDraft, ctx: BuilderContext): OpeningDraft {
   return {
     ...draft,
+    openingFields: mergeDerived(draft.openingFields, ctx.derivedOpeningFields),
     doors: draft.doors.map((c) => componentSnapshot(c, 'door', ctx)),
     frames: draft.frames.map((c) => componentSnapshot(c, 'frame', ctx)),
     panels: draft.panels.map((c) => componentSnapshot(c, 'panel', ctx)),
@@ -248,6 +249,7 @@ function mapOpeningRow(r: Record<string, unknown>): EstimateOpening {
     quantity: (r.quantity as number) ?? 1,
     sortOrder: (r.sort_order as number) ?? 0,
     templateType: (r.template_type as EstimateOpening['templateType']) ?? null,
+    specSnapshot: (r.spec_snapshot as Record<string, unknown> | null) ?? null,
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string,
   };
@@ -294,7 +296,7 @@ export async function loadOpeningDraft(openingId: string): Promise<OpeningDraft 
 
   const { data: hwItems } = await supabase
     .from('opening_hardware_item')
-    .select('category, hardware_variant_id, quantity, selected_finish, selected_function, selected_hand, source')
+    .select('category, hardware_spec_id, hardware_variant_id, quantity, selected_finish, selected_function, selected_hand, source')
     .eq('opening_id', openingId);
 
   const doors: ComponentDraft[] = [];
@@ -335,6 +337,7 @@ export async function loadOpeningDraft(openingId: string): Promise<OpeningDraft 
 
   const hardware = (hwItems ?? []).map((h) => ({
     category: h.category as string,
+    hardwareSpecId: (h.hardware_spec_id as string | null) ?? null,
     variantId: (h.hardware_variant_id as string | null) ?? null,
     quantity: Math.max(1, (h.quantity as number) ?? 1),
     required: false,
@@ -410,6 +413,7 @@ export async function saveOpeningDraft(
       opening_id: opening.id,
       estimate_id: estimateId,
       hardware_variant_id: h.variantId,
+      hardware_spec_id: h.hardwareSpecId ?? null,
       category: h.category,
       quantity: h.quantity,
       selected_finish: h.selectedFinish ?? null,

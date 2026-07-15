@@ -48,6 +48,10 @@ export interface EngineLine {
   sourcePage: string | null;
   sourceRegionId: string | null;
   priceBookId: string | null;
+  /** Manufacturer that must receive this line on a procurement RFQ. */
+  manufacturerId?: string | null;
+  /** Immutable display fallback when the catalog manufacturer is not linked to a company yet. */
+  manufacturerName?: string | null;
   confidence: number | null;
   exceptionMessage: string | null;
   componentId: string | null;
