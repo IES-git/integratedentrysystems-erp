@@ -200,6 +200,33 @@ describe('pricing engine core', () => {
     expect(res.manualQuotes).toHaveLength(0);
   });
 
+  it('routes an estimator-added hardware option to manual pricing with its staged description', () => {
+    const spec = baseSpec({
+      hardware: [{
+        category: 'custom_closer',
+        variantId: null,
+        quantity: 2,
+        required: true,
+        source: 'manual',
+        stagedDescription: 'Special overhead closer for an existing opening',
+      }],
+    });
+    const firstPass = priceOpeningCore(spec, { rules: [], dependencyRules: [] }, emptyCatalog, new Map(), opts);
+    const hardwareLine = firstPass.lines.find((line) => line.chargeCategory === 'custom_closer');
+
+    expect(hardwareLine?.description).toBe('Special overhead closer for an existing opening');
+    expect(hardwareLine?.priceStatus).toBe('INVALID');
+    expect(firstPass.manualQuotes.some((quote) => quote.requestedInputs.includes('custom_closer'))).toBe(true);
+
+    const priced = priceOpeningCore(spec, { rules: [], dependencyRules: [] }, emptyCatalog, new Map(), {
+      ...opts,
+      manualSellPriceByLineKey: { [engineLineOverrideKey(hardwareLine!)]: 825 },
+    });
+    const manuallyPriced = priced.lines.find((line) => line.chargeCategory === 'custom_closer');
+    expect(manuallyPriced?.priceStatus).toBe('PRICED');
+    expect(manuallyPriced?.manualSellPrice).toBe(825);
+  });
+
   it('evaluates a BETWEEN condition against a dimension field', () => {
     const ruleSet: LoadedRuleSet = {
       rules: [rule({

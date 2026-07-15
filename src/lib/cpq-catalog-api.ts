@@ -342,6 +342,66 @@ export interface HardwareCategoryOption {
   variantCount: number;
 }
 
+export type HardwareOptionAxis = 'function' | 'finish' | 'size' | 'hand' | 'rating';
+
+export interface HardwareAxisOption {
+  id: string;
+  category: string;
+  axis: HardwareOptionAxis;
+  value: string;
+  context: Partial<Record<HardwareOptionAxis, string>>;
+}
+
+export interface AddHardwareAxisOptionInput {
+  category: string;
+  axis: HardwareOptionAxis;
+  value: string;
+  context?: Partial<Record<HardwareOptionAxis, string | null>>;
+  estimateId?: string | null;
+  openingId?: string | null;
+}
+
+/** Loads estimator-created values that belong to an individual hardware axis. */
+export async function loadHardwareAxisOptions(category: string): Promise<HardwareAxisOption[]> {
+  const { data, error } = await supabase
+    .from('hardware_option_value')
+    .select('id, category, axis, value, context')
+    .eq('category', category)
+    .eq('active', true)
+    .order('value', { ascending: true });
+  if (error) throw new Error(`Failed to load hardware options for ${category}: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    id: row.id as string,
+    category: row.category as string,
+    axis: row.axis as HardwareOptionAxis,
+    value: row.value as string,
+    context: ((row.context as Record<string, string> | null) ?? {}) as Partial<Record<HardwareOptionAxis, string>>,
+  }));
+}
+
+/** Adds one live value beneath function/finish/size/hand/rating, never as a spec. */
+export async function addHardwareAxisOption(
+  input: AddHardwareAxisOptionInput,
+): Promise<HardwareAxisOption> {
+  const { data, error } = await supabase.rpc('add_hardware_option_from_estimate', {
+    p_category: input.category,
+    p_axis: input.axis,
+    p_value: input.value,
+    p_context: input.context ?? {},
+    p_estimate_id: input.estimateId ?? null,
+    p_opening_id: input.openingId ?? null,
+  });
+  if (error) throw new Error(`Failed to add hardware ${input.axis} option: ${error.message}`);
+  const row = data as Record<string, unknown>;
+  return {
+    id: String(row.id),
+    category: String(row.category),
+    axis: row.axis as HardwareOptionAxis,
+    value: String(row.value),
+    context: ((row.context as Record<string, string> | null) ?? {}) as Partial<Record<HardwareOptionAxis, string>>,
+  };
+}
+
 export interface StageHardwareFromEstimateInput {
   category: string;
   description: string;
@@ -349,6 +409,9 @@ export interface StageHardwareFromEstimateInput {
   finish?: string | null;
   size?: string | null;
   rating?: string | null;
+  hand?: string | null;
+  /** Existing vendor-neutral specification selected before adding an offer. */
+  hardwareSpecId?: string | null;
   manufacturerName?: string | null;
   model?: string | null;
   sku?: string | null;
@@ -361,18 +424,151 @@ export interface StagedHardwareResult {
   productId: string | null;
   variantId: string | null;
   externalSpecId: string;
-  approvalState: 'needs_review';
+  approvalState: 'approved';
+}
+
+function missingStageHardwareRpc(error: { code?: string; message: string }): boolean {
+  return error.code === 'PGRST202' || error.message.includes('Could not find the function');
+}
+
+async function stageHardwareDirectly(
+  input: StageHardwareFromEstimateInput,
+): Promise<StagedHardwareResult> {
+  const { data: authData, error: authError } = await supabase.auth.getUser();
+  if (authError || !authData.user) throw new Error('Authentication is required to stage hardware.');
+
+  const category = input.category.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  const stagingId = `EST-${crypto.randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()}`;
+  let spec: { id: string; external_spec_id: string } | null = null;
+  let createdSpec = false;
+
+  if (input.hardwareSpecId) {
+    const { data, error } = await supabase
+      .from('hardware_spec')
+      .select('id, external_spec_id')
+      .eq('id', input.hardwareSpecId)
+      .eq('category', category)
+      .eq('active', true)
+      .eq('approval_state', 'approved')
+      .maybeSingle();
+    if (error || !data) {
+      throw new Error(`Failed to stage hardware: the selected specification is not available for ${category.replace(/_/g, ' ')}.`);
+    }
+    spec = data as { id: string; external_spec_id: string };
+  } else {
+    const { data, error } = await supabase
+      .from('hardware_spec')
+      .insert({
+        external_spec_id: stagingId,
+        category,
+        function: input.function ?? null,
+        finish: input.finish ?? null,
+        size: input.size ?? null,
+        rating: input.rating ?? null,
+        other_requirements: input.description,
+        active: true,
+        approval_state: 'approved',
+        source_file: 'in-estimate',
+        source_metadata: {
+          estimate_id: input.estimateId ?? null,
+          opening_id: input.openingId ?? null,
+          submitted_description: input.description,
+          submitted_hand: input.hand ?? null,
+          submitted_by: authData.user.id,
+          submitted_at: new Date().toISOString(),
+        },
+        updated_by: authData.user.id,
+      })
+      .select('id, external_spec_id')
+      .single();
+    if (error || !data) throw new Error(`Failed to stage hardware: ${error?.message ?? 'No specification was returned.'}`);
+    spec = data as { id: string; external_spec_id: string };
+    createdSpec = true;
+  }
+
+  let productId: string | null = null;
+  let variantId: string | null = null;
+  const hasVendor = !!(input.manufacturerName?.trim() || input.model?.trim() || input.sku?.trim());
+  if (hasVendor) {
+    const { data: product, error: productError } = await supabase
+      .from('hardware_product')
+      .insert({
+        source_import_key: stagingId,
+        category,
+        manufacturer_name: input.manufacturerName?.trim() || null,
+        model: input.model?.trim() || null,
+        description: input.description,
+        active: true,
+        approval_state: 'approved',
+        taxonomy_notes: 'Created live from an estimate; manual pricing required until a price is supplied.',
+        updated_by: authData.user.id,
+      })
+      .select('id')
+      .single();
+    if (productError || !product) {
+      if (createdSpec) await supabase.from('hardware_spec').delete().eq('id', spec.id);
+      throw new Error(`Failed to stage hardware vendor: ${productError?.message ?? 'No product was returned.'}`);
+    }
+    productId = product.id as string;
+
+    const { data: variant, error: variantError } = await supabase
+      .from('hardware_variant')
+      .insert({
+        hardware_product_id: productId,
+        hardware_spec_id: spec.id,
+        source_offer_id: `${stagingId}-OFFER`,
+        sku: input.sku?.trim() || null,
+        function: input.function ?? null,
+        finish: input.finish ?? null,
+        size: input.size ?? null,
+        hand: input.hand ?? null,
+        rating: input.rating ?? null,
+        option_attributes: {
+          staged_from_estimate: true,
+          estimate_id: input.estimateId ?? null,
+          opening_id: input.openingId ?? null,
+          selected_hardware_spec_id: spec.id,
+          selected_context: {
+            function: input.function ?? null,
+            finish: input.finish ?? null,
+            size: input.size ?? null,
+            hand: input.hand ?? null,
+            rating: input.rating ?? null,
+          },
+        },
+        active: true,
+        approval_state: 'approved',
+        taxonomy_notes: 'Created live from an estimate; manual pricing required until a price is supplied.',
+        updated_by: authData.user.id,
+      })
+      .select('id')
+      .single();
+    if (variantError || !variant) {
+      await supabase.from('hardware_product').delete().eq('id', productId);
+      if (createdSpec) await supabase.from('hardware_spec').delete().eq('id', spec.id);
+      throw new Error(`Failed to stage hardware offer: ${variantError?.message ?? 'No variant was returned.'}`);
+    }
+    variantId = variant.id as string;
+  }
+
+  return {
+    specId: spec.id as string,
+    productId,
+    variantId,
+    externalSpecId: spec.external_spec_id,
+    approvalState: 'approved',
+  };
 }
 
 /**
- * Captures missing hardware during estimating. The database RPC intentionally
- * stages the spec/offer as needs_review, so it cannot enter priced selections
- * until an admin verifies taxonomy, source, and price.
+ * Creates missing hardware during estimating. The spec/offer becomes selectable
+ * immediately; when no governed price exists, the pricing engine routes the
+ * selected item to manual pricing for this estimate.
  */
 export async function stageHardwareFromEstimate(
   input: StageHardwareFromEstimateInput,
 ): Promise<StagedHardwareResult> {
-  const { data, error } = await supabase.rpc('stage_hardware_from_estimate', {
+  const legacyPayload = {
     p_category: input.category,
     p_description: input.description,
     p_function: input.function ?? null,
@@ -384,7 +580,34 @@ export async function stageHardwareFromEstimate(
     p_sku: input.sku ?? null,
     p_estimate_id: input.estimateId ?? null,
     p_opening_id: input.openingId ?? null,
+  };
+  const handAwarePayload = {
+    ...legacyPayload,
+    p_hand: input.hand ?? null,
+  };
+  let { data, error } = await supabase.rpc('stage_hardware_from_estimate', {
+    ...handAwarePayload,
+    p_hardware_spec_id: input.hardwareSpecId ?? null,
   });
+
+  // Reusing a selected spec is the important integrity boundary for a final
+  // end-item addition. An older RPC cannot express that association, so use
+  // the direct governed path instead of silently creating a duplicate spec.
+  if (error && missingStageHardwareRpc(error) && input.hardwareSpecId) {
+    return stageHardwareDirectly(input);
+  }
+
+  // Deployments can briefly run the updated UI before the hand-aware RPC
+  // migration reaches PostgREST's schema cache. The prior RPC can still stage
+  // the category/spec safely; the draft retains hand locally and the migration
+  // will preserve it in catalog metadata once deployed.
+  if (error && missingStageHardwareRpc(error) && error.message.includes('p_hardware_spec_id')) {
+    ({ data, error } = await supabase.rpc('stage_hardware_from_estimate', handAwarePayload));
+  }
+  if (error && missingStageHardwareRpc(error) && error.message.includes('p_hand')) {
+    ({ data, error } = await supabase.rpc('stage_hardware_from_estimate', legacyPayload));
+  }
+  if (error && missingStageHardwareRpc(error)) return stageHardwareDirectly(input);
   if (error) throw new Error(`Failed to stage hardware: ${error.message}`);
   const row = data as Record<string, unknown>;
   return {
@@ -392,7 +615,7 @@ export async function stageHardwareFromEstimate(
     productId: row.product_id ? String(row.product_id) : null,
     variantId: row.variant_id ? String(row.variant_id) : null,
     externalSpecId: String(row.external_spec_id),
-    approvalState: 'needs_review',
+    approvalState: 'approved',
   };
 }
 

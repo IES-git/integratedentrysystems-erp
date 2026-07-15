@@ -478,7 +478,7 @@ export function priceHardware(
       priceRuleId: null,
       entityType: 'hardware',
       chargeCategory: req.category,
-      description: `${req.category.replace(/_/g, ' ')}`,
+      description: req.stagedDescription?.trim() || req.category.replace(/_/g, ' '),
       selectedOptionCode: null,
       quantity: req.quantity,
       unitOfMeasure: 'each',

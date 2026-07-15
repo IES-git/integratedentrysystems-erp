@@ -47,10 +47,8 @@ export interface HardwareSelectionDraft {
   selectedHand?: string | null;
   selectedRating?: string | null;
   source?: 'set_template' | 'manual';
-  /** Human-readable requirement captured in-estimate before catalog review. */
+  /** Human-readable requirement created directly from the estimate. */
   stagedDescription?: string | null;
-  /** Review state for a newly staged catalog requirement/offer. */
-  reviewState?: 'needs_review' | null;
 }
 
 /**
@@ -346,6 +344,7 @@ export function buildNormalizedSpec(
     selectedSize: h.selectedSize ?? null,
     selectedHand: h.selectedHand ?? null,
     selectedRating: h.selectedRating ?? null,
+    stagedDescription: h.stagedDescription ?? null,
     source: h.source,
   }));
 

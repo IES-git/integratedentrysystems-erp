@@ -10,6 +10,9 @@ import {
   deriveHardwareIntelligence,
   validateBuilderIntegrity,
   defaultHardwareHand,
+  resolveHardwareSelectionAxes,
+  liveHardwareAxisOptionPatch,
+  isLegacyHardwareAxisSpecDescription,
   hardwareHandMatches,
   baseFieldPaths,
   availableBaseValues,
@@ -551,6 +554,49 @@ describe('hardware hand defaults', () => {
     expect(defaultHardwareHand('exit_devices', ['LH', 'RH'], 'RH')).toBe('RH');
     expect(defaultHardwareHand('exit_devices', ['LH'], 'RH')).toBeNull();
     expect(hardwareHandMatches('LH', 'RH')).toBe(false);
+  });
+
+  it('retains every explicit selection when staging a new specification or end item', () => {
+    expect(resolveHardwareSelectionAxes({
+      category: 'exit_devices',
+      selectedFunction: 'Rim exit',
+      selectedFinish: 'US32D',
+      selectedSize: '36 in',
+      selectedHand: 'LHR',
+      selectedRating: '3 hour',
+    }, 'US26D', 'RH', ['RH', 'LHR'])).toEqual({
+      function: 'Rim exit',
+      finish: 'US32D',
+      size: '36 in',
+      hand: 'LHR',
+      rating: '3 hour',
+    });
+  });
+
+  it('includes inherited finish and compatible door hand in staged context', () => {
+    expect(resolveHardwareSelectionAxes({
+      category: 'exit_devices',
+      selectedFunction: 'Rim exit',
+      selectedSize: '36 in',
+    }, 'US32D', 'RH', ['LH', 'RH'])).toEqual({
+      function: 'Rim exit',
+      finish: 'US32D',
+      size: '36 in',
+      hand: 'RH',
+      rating: null,
+    });
+  });
+
+  it('keeps an estimator-added finish on the finish axis instead of selecting a spec', () => {
+    expect(liveHardwareAxisOptionPatch('finish', 'US10B')).toEqual({
+      selectedFinish: 'US10B',
+      hardwareSpecId: null,
+      variantId: null,
+      required: true,
+      source: 'manual',
+    });
+    expect(isLegacyHardwareAxisSpecDescription('Estimator-added finish option "650" for butt hinges.')).toBe(true);
+    expect(isLegacyHardwareAxisSpecDescription('Estimator-added hardware specification')).toBe(false);
   });
 });
 

@@ -56,6 +56,8 @@ export interface HardwareSelection {
   selectedSize?: string | null;
   selectedHand?: string | null;
   selectedRating?: string | null;
+  /** Estimate description retained for a newly created option. */
+  stagedDescription?: string | null;
   /** Origin: 'set_template' (auto) or 'manual'. */
   source?: 'set_template' | 'manual';
 }

@@ -819,6 +819,66 @@ export function defaultHardwareHand(category: string, variantHands: Array<string
   return variantHands.some((h) => normalizedHardwareHand(h) === want) ? hand : null;
 }
 
+export interface HardwareSelectionAxes {
+  function: string | null;
+  finish: string | null;
+  size: string | null;
+  hand: string | null;
+  rating: string | null;
+}
+
+export type HardwareSelectionAxis = keyof HardwareSelectionAxes;
+
+/** A newly added axis value stays on that axis and explicitly clears the spec. */
+export function liveHardwareAxisOptionPatch(axis: HardwareSelectionAxis, value: string) {
+  const selected = axis === 'function' ? { selectedFunction: value }
+    : axis === 'finish' ? { selectedFinish: value }
+    : axis === 'size' ? { selectedSize: value }
+    : axis === 'hand' ? { selectedHand: value }
+    : { selectedRating: value };
+  return {
+    ...selected,
+    hardwareSpecId: null,
+    variantId: null,
+    required: true,
+    source: 'manual' as const,
+  };
+}
+
+/** Identifies drafts saved while axis values were incorrectly assigned spec ids. */
+export function isLegacyHardwareAxisSpecDescription(description: string | null | undefined): boolean {
+  return /^Estimator-added (function|finish|size|hand|rating) option\b/i.test(description?.trim() ?? '');
+}
+
+/**
+ * Resolves the complete option context behind a hardware selection. Explicit
+ * per-item choices win, followed by the opening-wide finish and compatible
+ * door hand defaults. This same context must drive both catalog filtering and
+ * contextual "Add New" staging so the new spec/offer is tagged exactly where
+ * the estimator created it.
+ */
+export function resolveHardwareSelectionAxes(
+  selection: {
+    category: string;
+    selectedFunction?: string | null;
+    selectedFinish?: string | null;
+    selectedSize?: string | null;
+    selectedHand?: string | null;
+    selectedRating?: string | null;
+  },
+  defaultFinish: string | null,
+  openingHand: string | null,
+  variantHands: Array<string | null | undefined>,
+): HardwareSelectionAxes {
+  return {
+    function: selection.selectedFunction ?? null,
+    finish: selection.selectedFinish ?? defaultFinish ?? null,
+    size: selection.selectedSize ?? null,
+    hand: selection.selectedHand ?? defaultHardwareHand(selection.category, variantHands, openingHand),
+    rating: selection.selectedRating ?? null,
+  };
+}
+
 /** Heuristic: does a rating string denote a fire/UL rating? */
 export function isFireRating(rating: string | null | undefined): boolean {
   const r = (rating ?? '').toLowerCase();

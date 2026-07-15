@@ -20,7 +20,6 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
@@ -37,9 +36,10 @@ import { buildAuditableQuoteFromEngine } from '@/lib/cpq/auditable-quote';
 import { validateQuoteCompleteness, type BuilderStepTarget, type CompletenessIssue, type CompletenessReport } from '@/lib/cpq/completeness';
 import {
   loadSpecFieldDictionary, loadOptionDescriptors, loadHardwareCategories, loadBaseSignatures,
-  stageHardwareFromEstimate,
+  stageHardwareFromEstimate, loadHardwareAxisOptions, addHardwareAxisOption,
   type SpecFieldWithPath, type VariantOption, loadVariantsForCategory, type HardwareCategoryOption,
-  type BaseSignature, type BaseSignatures, type StageHardwareFromEstimateInput,
+  type BaseSignature, type BaseSignatures, type StageHardwareFromEstimateInput, type StagedHardwareResult,
+  type HardwareAxisOption, type AddHardwareAxisOptionInput,
 } from '@/lib/cpq-catalog-api';
 import {
   loadHardwareCatalog, generateHardwareRequirements, derivePrepRequirements, resolveHardwareNet,
@@ -66,7 +66,9 @@ import { applyComplementaryPairHanding } from '@/components/estimates/wizard/ope
 import {
   deriveBuilderContext, fieldTier, allowedEnumOptions, isStepVisible,
   doorHand, isHandedCategory, isFireRating, optionLabelsForField, deriveHardwareIntelligence,
-  defaultHardwareHand, hardwareHandMatches,
+  defaultHardwareHand, resolveHardwareSelectionAxes, hardwareHandMatches,
+  liveHardwareAxisOptionPatch,
+  isLegacyHardwareAxisSpecDescription,
   validateBuilderIntegrity, priceableEnumOptions, autoFillBaseValues,
   baseFieldPaths,
   type BuilderContext, type OptionDescriptors, type IntegrityIssue,
@@ -345,6 +347,7 @@ export function SpecOpeningBuilder({
   const [manufacturerCatalogs, setManufacturerCatalogs] = useState<ManufacturerCatalogOption[]>([]);
   const [ngpCatalog, setNgpCatalog] = useState<NgpCatalog>(() => emptyNgpCatalog());
   const [variantsByCategory, setVariantsByCategory] = useState<Record<string, VariantOption[]>>({});
+  const [axisOptionsByCategory, setAxisOptionsByCategory] = useState<Record<string, HardwareAxisOption[]>>({});
   const [engineResult, setEngineResult] = useState<EngineResult | null>(null);
   const [manualSellPriceByLineKey, setManualSellPriceByLineKey] = useState<Record<string, number>>({});
   const [pricing, setPricing] = useState(false);
@@ -452,15 +455,14 @@ export function SpecOpeningBuilder({
           hardwareSpecId: cur?.hardwareSpecId ?? null,
           variantId: cur?.variantId ?? null,
           quantity: cur?.variantId ? cur.quantity : r.quantity,
-          required: r.required,
+          required: cur?.required ?? r.required,
           selectedFunction: cur?.selectedFunction ?? null,
           selectedFinish: cur?.selectedFinish ?? null,
           selectedSize: cur?.selectedSize ?? null,
           selectedHand: cur?.selectedHand ?? null,
           selectedRating: cur?.selectedRating ?? null,
           stagedDescription: cur?.stagedDescription ?? null,
-          reviewState: cur?.reviewState ?? null,
-          source: r.source,
+          source: cur?.source ?? r.source,
         };
       });
       // Preserve any purely-manual categories not in the template.
@@ -491,6 +493,34 @@ export function SpecOpeningBuilder({
     Promise.all(missing.map(async (c) => [c, await loadVariantsForCategory(c)] as const))
       .then((entries) => setVariantsByCategory((prev) => ({ ...prev, ...Object.fromEntries(entries) })))
       .catch(() => { /* non-fatal — variant lists just stay empty */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, draft.hardware]);
+
+  // Repair in-progress/session-stored drafts created before axis values were
+  // separated from specifications. The selected finish/function/etc. remains;
+  // only the mistakenly assigned specification id is removed.
+  useEffect(() => {
+    if (!open) return;
+    setDraft((prev) => {
+      let changed = false;
+      const hardware = prev.hardware.map((item) => {
+        if (!item.hardwareSpecId || !isLegacyHardwareAxisSpecDescription(item.stagedDescription)) return item;
+        changed = true;
+        return { ...item, hardwareSpecId: null, variantId: null };
+      });
+      return changed ? { ...prev, hardware } : prev;
+    });
+  }, [open, draft.hardware]);
+
+  // Axis-level additions (finish/function/size/hand/rating) live separately
+  // from complete specifications and are merged into their proper dropdown.
+  useEffect(() => {
+    if (!open) return;
+    const missing = draft.hardware.map((h) => h.category).filter((c) => !(c in axisOptionsByCategory));
+    if (missing.length === 0) return;
+    Promise.all(missing.map(async (c) => [c, await loadHardwareAxisOptions(c)] as const))
+      .then((entries) => setAxisOptionsByCategory((prev) => ({ ...prev, ...Object.fromEntries(entries) })))
+      .catch(() => { /* non-fatal — catalog variants still provide their values */ });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, draft.hardware]);
 
@@ -803,33 +833,50 @@ export function SpecOpeningBuilder({
       };
     });
 
-  const stageHardware = async (input: Omit<StageHardwareFromEstimateInput, 'estimateId' | 'openingId'>) => {
+  const stageHardware = async (input: Omit<StageHardwareFromEstimateInput, 'estimateId' | 'openingId'>): Promise<StagedHardwareResult> => {
     const result = await stageHardwareFromEstimate({
       ...input,
       estimateId,
       openingId: editingOpeningId ?? draft.openingId,
     });
     const category = input.category.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-    setDraft((prev) => ({
-      ...prev,
-      hardware: [
-        ...prev.hardware.filter((item) => item.category !== category),
-        {
+    // A newly created offer is approved by the RPC and should appear in the
+    // current selector immediately. Refreshing only this category keeps the
+    // in-progress opening intact and avoids a full catalog reload.
+    const refreshedVariants = result.variantId
+      ? await loadVariantsForCategory(category).catch(() => null)
+      : null;
+    if (refreshedVariants) {
+      setVariantsByCategory((prev) => ({ ...prev, [category]: refreshedVariants }));
+    }
+    setHardwareCategories((prev) => prev.some((item) => item.category === category)
+      ? prev.map((item) => item.category === category && refreshedVariants
+        ? { ...item, variantCount: refreshedVariants.length }
+        : item)
+      : [...prev, {
           category,
-          hardwareSpecId: result.specId,
-          variantId: null,
-          quantity: 1,
-          required: false,
-          selectedFunction: input.function ?? null,
-          selectedFinish: input.finish ?? null,
-          selectedSize: input.size ?? null,
-          selectedRating: input.rating ?? null,
-          source: 'manual',
-          stagedDescription: input.description,
-          reviewState: 'needs_review',
-        },
+          label: category.replace(/_/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase()),
+          variantCount: refreshedVariants?.length ?? 0,
+        }].sort((a, b) => a.label.localeCompare(b.label)));
+    return result;
+  };
+
+  const addAxisOption = async (
+    input: Omit<AddHardwareAxisOptionInput, 'estimateId' | 'openingId'>,
+  ): Promise<HardwareAxisOption> => {
+    const option = await addHardwareAxisOption({
+      ...input,
+      estimateId,
+      openingId: editingOpeningId ?? draft.openingId,
+    });
+    setAxisOptionsByCategory((prev) => ({
+      ...prev,
+      [option.category]: [
+        ...(prev[option.category] ?? []).filter((existing) => existing.id !== option.id),
+        option,
       ],
     }));
+    return option;
   };
 
   const removeHardware = (category: string) =>
@@ -1016,6 +1063,7 @@ export function SpecOpeningBuilder({
             manufacturerCatalogs={manufacturerCatalogs}
             specByEntity={specByEntity}
             variantsByCategory={variantsByCategory}
+            axisOptionsByCategory={axisOptionsByCategory}
             prepRequirements={prepRequirements}
             engineResult={effectiveEngineResult}
             rawEngineResult={engineResult}
@@ -1030,6 +1078,7 @@ export function SpecOpeningBuilder({
             onUpdateHardware={updateHardware}
             onAddHardware={addHardware}
             onStageHardware={stageHardware}
+            onAddHardwareAxisOption={addAxisOption}
             onRemoveHardware={removeHardware}
             onAddCutout={addCutout}
             onRemoveCutout={removeCutout}
@@ -1149,6 +1198,7 @@ interface StepContentProps {
   manufacturerCatalogs: ManufacturerCatalogOption[];
   specByEntity: Map<SpecFieldEntity, SpecFieldWithPath[]>;
   variantsByCategory: Record<string, VariantOption[]>;
+  axisOptionsByCategory: Record<string, HardwareAxisOption[]>;
   prepRequirements: PrepRequirement[];
   engineResult: EngineResult | null;
   rawEngineResult: EngineResult | null;
@@ -1162,7 +1212,10 @@ interface StepContentProps {
   onUpdateComponentMeta: (entity: RuleEntityType, id: string, p: Partial<ComponentDraft>) => void;
   onUpdateHardware: (category: string, p: Partial<HardwareSelectionDraft>) => void;
   onAddHardware: (category: string) => void;
-  onStageHardware: (input: Omit<StageHardwareFromEstimateInput, 'estimateId' | 'openingId'>) => Promise<void>;
+  onStageHardware: (input: Omit<StageHardwareFromEstimateInput, 'estimateId' | 'openingId'>) => Promise<StagedHardwareResult>;
+  onAddHardwareAxisOption: (
+    input: Omit<AddHardwareAxisOptionInput, 'estimateId' | 'openingId'>,
+  ) => Promise<HardwareAxisOption>;
   onRemoveHardware: (category: string) => void;
   onAddCutout: (infillType: NgpInfillType) => void;
   onRemoveCutout: (id: string) => void;
@@ -2005,6 +2058,35 @@ interface HwCriteria {
 
 const HW_AXES = ['function', 'finish', 'size', 'hand', 'rating'] as const;
 type HwAxis = (typeof HW_AXES)[number];
+const ADD_NEW_HARDWARE_OPTION = '__add_new_hardware_option__';
+const HW_AXIS_LABEL: Record<HwAxis, string> = {
+  function: 'Function',
+  finish: 'Finish',
+  size: 'Size',
+  hand: 'Hand',
+  rating: 'Rating',
+};
+
+type AddNewHardwareTarget =
+  | { kind: 'category' }
+  | { kind: 'defaultFinish' }
+  | { kind: 'axis'; category: string; axis: HwAxis }
+  | { kind: 'specification'; category: string }
+  | { kind: 'vendor'; category: string };
+
+interface AddNewHardwareForm {
+  value: string;
+  manufacturerName: string;
+  model: string;
+  sku: string;
+}
+
+const EMPTY_ADD_NEW_HARDWARE_FORM: AddNewHardwareForm = {
+  value: '',
+  manufacturerName: '',
+  model: '',
+  sku: '',
+};
 
 function hasVariantPrice(v: VariantOption): boolean {
   // Only a TRUSTWORTHY price counts — negative / zero / absurd net (dirty
@@ -2100,51 +2182,174 @@ function filterVariants(variants: VariantOption[], criteria: Partial<HwCriteria>
 }
 
 function HardwareStep({
-  draft, variantsByCategory, hardwareConflicts, hardwareCategories,
-  onUpdateHardware, onAddHardware, onStageHardware, onRemoveHardware, onPatch,
+  draft, variantsByCategory, axisOptionsByCategory, hardwareConflicts, hardwareCategories,
+  onUpdateHardware, onAddHardware, onStageHardware, onAddHardwareAxisOption, onRemoveHardware, onPatch,
 }: StepContentProps) {
   const defaultFinish = draft.hardwareFinishDefault;
   const hand = doorHand(draft);
   const fireLabeled = draft.fireLabelRequired;
   const visibleHardware = draft.hardware.filter((h) => h.required || h.source === 'manual' || !!h.variantId);
-  const allFinishes = [...new Set(
-    Object.values(variantsByCategory).flat().map((v) => v.variant.finish).filter((x): x is string => !!x),
-  )].sort();
-  const [stageDialogOpen, setStageDialogOpen] = useState(false);
-  const [stageSaving, setStageSaving] = useState(false);
-  const [stageError, setStageError] = useState<string | null>(null);
-  const [stageForm, setStageForm] = useState({
-    category: '', description: '', function: '', finish: '', size: '', rating: '',
-    manufacturerName: '', model: '', sku: '',
-  });
-  const submitStagedHardware = async () => {
-    if (!stageForm.category.trim() || !stageForm.description.trim()) {
-      setStageError('Category and description are required.');
+  const allFinishes = [...new Set([
+    ...Object.values(variantsByCategory).flat().map((v) => v.variant.finish).filter((x): x is string => !!x),
+    ...Object.values(axisOptionsByCategory).flat()
+      .filter((option) => option.axis === 'finish')
+      .map((option) => option.value),
+  ])].sort();
+  const [addNewTarget, setAddNewTarget] = useState<AddNewHardwareTarget | null>(null);
+  const [addNewForm, setAddNewForm] = useState<AddNewHardwareForm>(EMPTY_ADD_NEW_HARDWARE_FORM);
+  const [addNewSaving, setAddNewSaving] = useState(false);
+  const [addNewError, setAddNewError] = useState<string | null>(null);
+
+  const stageAxesFor = (item: HardwareSelectionDraft) => resolveHardwareSelectionAxes(
+    item,
+    defaultFinish,
+    hand,
+    (variantsByCategory[item.category] ?? []).map((variant) => variant.variant.hand),
+  );
+
+  const axisSelectionPatch = (axis: HwAxis, value: string | null): Partial<HardwareSelectionDraft> =>
+    axis === 'function' ? { selectedFunction: value }
+    : axis === 'finish' ? { selectedFinish: value }
+    : axis === 'size' ? { selectedSize: value }
+    : axis === 'hand' ? { selectedHand: value }
+    : { selectedRating: value };
+
+  const beginAddNew = (target: AddNewHardwareTarget) => {
+    setAddNewTarget(target);
+    setAddNewForm(EMPTY_ADD_NEW_HARDWARE_FORM);
+    setAddNewError(null);
+  };
+
+  const cancelAddNew = () => {
+    setAddNewTarget(null);
+    setAddNewForm(EMPTY_ADD_NEW_HARDWARE_FORM);
+    setAddNewError(null);
+  };
+
+  const submitAddNew = async () => {
+    if (!addNewTarget) return;
+    const value = addNewForm.value.trim();
+    const selected = 'category' in addNewTarget
+      ? draft.hardware.find((item) => item.category === addNewTarget.category)
+      : null;
+    if (addNewTarget.kind !== 'vendor' && !value) {
+      setAddNewError(`${addNewTarget.kind === 'category' ? 'Category' : 'Option'} is required.`);
       return;
     }
-    setStageSaving(true);
-    setStageError(null);
+    if (addNewTarget.kind === 'defaultFinish' && visibleHardware.length === 0) {
+      setAddNewError('Add at least one hardware category before creating a default finish.');
+      return;
+    }
+    if (!['category', 'defaultFinish'].includes(addNewTarget.kind) && !selected) {
+      setAddNewError('The hardware category is no longer available.');
+      return;
+    }
+    if (addNewTarget.kind === 'vendor' &&
+      !addNewForm.manufacturerName.trim() && !addNewForm.model.trim() && !addNewForm.sku.trim()) {
+      setAddNewError('Enter a manufacturer, model, or SKU.');
+      return;
+    }
+
+    if (addNewTarget.kind === 'defaultFinish') {
+      setAddNewSaving(true);
+      setAddNewError(null);
+      try {
+        // A bulk finish is one finish-axis option beneath each affected
+        // category. It must never select or create a completed specification.
+        for (const item of visibleHardware) {
+          const axes = stageAxesFor(item);
+          await onAddHardwareAxisOption({
+            category: item.category,
+            axis: 'finish',
+            value,
+            context: { ...axes, finish: null },
+          });
+        }
+        onPatch({ hardwareFinishDefault: value });
+        cancelAddNew();
+      } catch (error) {
+        setAddNewError(error instanceof Error ? error.message : 'Failed to add the default finish.');
+      } finally {
+        setAddNewSaving(false);
+      }
+      return;
+    }
+
+    const category = addNewTarget.kind === 'category' ? value : selected!.category;
+    const normalizedCategory = category.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const prettyCategory = category.replace(/_/g, ' ');
+    const nextAxes = selected
+      ? stageAxesFor(selected)
+      : { function: null, finish: null, size: null, hand: null, rating: null };
+    if (addNewTarget.kind === 'axis') nextAxes[addNewTarget.axis] = value;
+
+    const vendorIdentity = [
+      addNewForm.manufacturerName.trim(),
+      addNewForm.model.trim(),
+      addNewForm.sku.trim(),
+    ].filter(Boolean).join(' · ');
+    const description = addNewTarget.kind === 'category'
+      ? `Estimator-added hardware category: ${value}`
+      : addNewTarget.kind === 'axis'
+        ? `Estimator-added ${HW_AXIS_LABEL[addNewTarget.axis].toLowerCase()} option "${value}" for ${prettyCategory}.`
+        : addNewTarget.kind === 'specification'
+          ? value
+          : `${prettyCategory}: ${vendorIdentity}`;
+
+    setAddNewSaving(true);
+    setAddNewError(null);
     try {
-      await onStageHardware({
-        category: stageForm.category.trim(),
-        description: stageForm.description.trim(),
-        function: stageForm.function.trim() || null,
-        finish: stageForm.finish.trim() || null,
-        size: stageForm.size.trim() || null,
-        rating: stageForm.rating.trim() || null,
-        manufacturerName: stageForm.manufacturerName.trim() || null,
-        model: stageForm.model.trim() || null,
-        sku: stageForm.sku.trim() || null,
+      if (addNewTarget.kind === 'axis') {
+        await onAddHardwareAxisOption({
+          category: normalizedCategory,
+          axis: addNewTarget.axis,
+          value,
+          context: { ...nextAxes, [addNewTarget.axis]: null },
+        });
+        onUpdateHardware(normalizedCategory, {
+          ...liveHardwareAxisOptionPatch(addNewTarget.axis, value),
+        });
+        cancelAddNew();
+        return;
+      }
+
+      const result = await onStageHardware({
+        category,
+        description,
+        function: nextAxes.function,
+        finish: nextAxes.finish,
+        size: nextAxes.size,
+        hand: nextAxes.hand,
+        rating: nextAxes.rating,
+        // A final vendor/end-item addition belongs to the vendor-neutral
+        // specification already selected by the estimator. Adding a new
+        // specification itself intentionally creates a fresh spec instead.
+        hardwareSpecId: addNewTarget.kind === 'vendor' ? selected?.hardwareSpecId ?? null : null,
+        manufacturerName: addNewTarget.kind === 'vendor' ? addNewForm.manufacturerName.trim() || null : null,
+        model: addNewTarget.kind === 'vendor' ? addNewForm.model.trim() || null : null,
+        sku: addNewTarget.kind === 'vendor' ? addNewForm.sku.trim() || null : null,
       });
-      setStageDialogOpen(false);
-      setStageForm({
-        category: '', description: '', function: '', finish: '', size: '', rating: '',
-        manufacturerName: '', model: '', sku: '',
-      });
+      if (addNewTarget.kind === 'category') {
+        onAddHardware(normalizedCategory);
+      } else {
+        onUpdateHardware(normalizedCategory, {
+          hardwareSpecId: result.specId,
+          variantId: addNewTarget.kind === 'vendor' ? result.variantId : null,
+          required: true,
+          selectedFunction: nextAxes.function,
+          selectedFinish: nextAxes.finish,
+          selectedSize: nextAxes.size,
+          selectedHand: nextAxes.hand,
+          selectedRating: nextAxes.rating,
+          source: 'manual',
+          stagedDescription: description,
+        });
+      }
+      cancelAddNew();
     } catch (error) {
-      setStageError(error instanceof Error ? error.message : 'Failed to stage hardware.');
+      setAddNewError(error instanceof Error ? error.message : 'Failed to add the hardware option.');
     } finally {
-      setStageSaving(false);
+      setAddNewSaving(false);
     }
   };
 
@@ -2174,19 +2379,36 @@ function HardwareStep({
             Auto-suggested for this opening — add or remove individual items as needed.
           </p>
         </div>
-        {allFinishes.length > 0 && (
+        {(allFinishes.length > 0 || visibleHardware.length > 0) && (
           <div className="flex items-center gap-2">
             <Label className="text-[11px] text-muted-foreground">Default finish (all items)</Label>
-            <Select value={defaultFinish ?? '__none'} onValueChange={(v) => onPatch({ hardwareFinishDefault: v === '__none' ? null : v })}>
+            <Select value={defaultFinish ?? '__none'} onValueChange={(v) => {
+              if (v === ADD_NEW_HARDWARE_OPTION) beginAddNew({ kind: 'defaultFinish' });
+              else onPatch({ hardwareFinishDefault: v === '__none' ? null : v });
+            }}>
               <SelectTrigger className="h-7 text-xs w-40"><SelectValue placeholder="None" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="__none" className="text-xs">None</SelectItem>
                 {allFinishes.map((f) => <SelectItem key={f} value={f} className="text-xs">{f}</SelectItem>)}
+                <SelectItem value={ADD_NEW_HARDWARE_OPTION} className="text-xs font-medium text-primary">
+                  <span className="flex items-center gap-1"><Plus className="h-3 w-3" /> Add New</span>
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>
         )}
       </div>
+      {addNewTarget?.kind === 'defaultFinish' && (
+        <InlineAddHardwareOptionForm
+          target={addNewTarget}
+          form={addNewForm}
+          saving={addNewSaving}
+          error={addNewError}
+          onChange={setAddNewForm}
+          onSubmit={submitAddNew}
+          onCancel={cancelAddNew}
+        />
+      )}
 
       {/* Always allow adding individual hardware, regardless of set templates. */}
       <div className="flex flex-wrap items-center gap-2">
@@ -2194,53 +2416,20 @@ function HardwareStep({
           categories={hardwareCategories}
           existing={new Set(visibleHardware.map((h) => h.category))}
           onAdd={onAddHardware}
+          onAddNew={() => beginAddNew({ kind: 'category' })}
         />
-        <Button type="button" variant="outline" size="sm" onClick={() => setStageDialogOpen(true)}>
-          <Plus className="mr-1.5 h-3.5 w-3.5" /> Stage missing hardware
-        </Button>
       </div>
-
-      <Dialog open={stageDialogOpen} onOpenChange={setStageDialogOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Stage missing hardware</DialogTitle>
-            <DialogDescription>
-              Capture the requirement now. It will stay on this estimate and enter catalog review as “needs review”; it cannot become a priced reusable option until an admin approves it.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <Label>Category *</Label>
-              <Input value={stageForm.category} onChange={(event) => setStageForm((form) => ({ ...form, category: event.target.value }))} placeholder="door_closers" />
-            </div>
-            <div className="space-y-1">
-              <Label>Function</Label>
-              <Input value={stageForm.function} onChange={(event) => setStageForm((form) => ({ ...form, function: event.target.value }))} placeholder="Regular arm" />
-            </div>
-            <div className="col-span-2 space-y-1">
-              <Label>Description *</Label>
-              <Textarea value={stageForm.description} onChange={(event) => setStageForm((form) => ({ ...form, description: event.target.value }))} placeholder="Describe the required device, application, and any special conditions." />
-            </div>
-            {(['finish', 'size', 'rating'] as const).map((field) => (
-              <div key={field} className="space-y-1">
-                <Label className="capitalize">{field}</Label>
-                <Input value={stageForm[field]} onChange={(event) => setStageForm((form) => ({ ...form, [field]: event.target.value }))} />
-              </div>
-            ))}
-            <div className="col-span-2 border-t pt-3 text-xs font-medium text-muted-foreground">Known vendor offer (optional)</div>
-            <div className="space-y-1"><Label>Manufacturer</Label><Input value={stageForm.manufacturerName} onChange={(event) => setStageForm((form) => ({ ...form, manufacturerName: event.target.value }))} /></div>
-            <div className="space-y-1"><Label>Model</Label><Input value={stageForm.model} onChange={(event) => setStageForm((form) => ({ ...form, model: event.target.value }))} /></div>
-            <div className="space-y-1"><Label>SKU</Label><Input value={stageForm.sku} onChange={(event) => setStageForm((form) => ({ ...form, sku: event.target.value }))} /></div>
-          </div>
-          {stageError && <p className="text-sm text-destructive">{stageError}</p>}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setStageDialogOpen(false)} disabled={stageSaving}>Cancel</Button>
-            <Button type="button" onClick={submitStagedHardware} disabled={stageSaving}>
-              {stageSaving && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />} Stage for review
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {addNewTarget?.kind === 'category' && (
+        <InlineAddHardwareOptionForm
+          target={addNewTarget}
+          form={addNewForm}
+          saving={addNewSaving}
+          error={addNewError}
+          onChange={setAddNewForm}
+          onSubmit={submitAddNew}
+          onCancel={cancelAddNew}
+        />
+      )}
 
       {visibleHardware.length === 0 && (
         <p className="text-sm text-muted-foreground italic">
@@ -2250,8 +2439,9 @@ function HardwareStep({
       {visibleHardware.map((h) => {
         const variants = variantsByCategory[h.category] ?? [];
         const handed = isHandedCategory(h.category);
-        const effFinish = h.selectedFinish ?? defaultFinish ?? null;
-        const effHand = h.selectedHand ?? defaultHardwareHand(h.category, variants.map((v) => v.variant.hand), hand);
+        const effectiveAxes = stageAxesFor(h);
+        const effFinish = effectiveAxes.finish;
+        const effHand = effectiveAxes.hand;
         const criteria: HwCriteria = {
           function: h.selectedFunction ?? null, finish: effFinish, size: h.selectedSize ?? null,
           hand: effHand, rating: h.selectedRating ?? null, hardwareSpecId: h.hardwareSpecId ?? null,
@@ -2261,35 +2451,54 @@ function HardwareStep({
         const neutralSpecs = [...new Map(
           beforeSpec.filter((v) => v.spec).map((v) => [v.spec!.id, v] as const),
         ).values()];
+        const hasSelectedSpecOption = !!h.hardwareSpecId && neutralSpecs.some((v) => v.spec!.id === h.hardwareSpecId);
+        const liveSpecLabel = [
+          h.stagedDescription,
+          effectiveAxes.function,
+          effectiveAxes.finish,
+          effectiveAxes.size,
+          effectiveAxes.hand,
+          effectiveAxes.rating,
+        ].filter(Boolean).join(' · ') || 'Estimate-added specification';
 
         // Cascading options: each axis's choices are computed from the set
-        // filtered by every OTHER axis; axes with <=1 option auto-collapse.
+        // filtered by every OTHER axis. All axes stay visible so missing values
+        // can be added contextually even when the catalog has no choices yet.
         const axisOptions = (axis: HwAxis): string[] => {
           const without = { ...criteria, [axis]: null };
           const pool = filterVariants(variants, without, fireLabeled);
-          return [...new Set(pool.map((v) => v.variant[axis]).filter((x): x is string => !!x))].sort();
+          const custom = (axisOptionsByCategory[h.category] ?? [])
+            .filter((option) => option.axis === axis)
+            .filter((option) => HW_AXES.every((otherAxis) => {
+              if (otherAxis === axis) return true;
+              const selectedValue = without[otherAxis];
+              const contextValue = option.context[otherAxis];
+              if (!selectedValue || !contextValue) return true;
+              return otherAxis === 'hand'
+                ? hardwareHandMatches(contextValue, selectedValue)
+                : contextValue === selectedValue;
+            }))
+            .map((option) => option.value);
+          const current = criteria[axis];
+          return [...new Set([
+            ...pool.map((v) => v.variant[axis]).filter((x): x is string => !!x),
+            ...custom,
+            ...(current ? [current] : []),
+          ])].sort();
         };
         const axisValue: Record<HwAxis, string> = {
           function: h.selectedFunction ?? '', finish: effFinish ?? '', size: h.selectedSize ?? '',
           hand: effHand ?? '', rating: h.selectedRating ?? '',
         };
-        const axisLabel: Record<HwAxis, string> = {
-          function: 'Function', finish: 'Finish', size: 'Size', hand: 'Hand', rating: 'Rating',
-        };
         const setAxis = (axis: HwAxis, v: string) => {
           const value = v || null;
-          const patch: Partial<HardwareSelectionDraft> =
-            axis === 'function' ? { selectedFunction: value }
-            : axis === 'finish' ? { selectedFinish: value }
-            : axis === 'size' ? { selectedSize: value }
-            : axis === 'hand' ? { selectedHand: value }
-            : { selectedRating: value };
+          const patch = axisSelectionPatch(axis, value);
           onUpdateHardware(h.category, { ...patch, hardwareSpecId: null, variantId: null });
         };
-        const visibleAxes = HW_AXES.filter((axis) => {
-          if (axis === 'hand' && !handed) return false;
-          return axisOptions(axis).length > 1 || axisValue[axis] !== '';
-        });
+        // Keep each specification level available even when the catalog has
+        // zero or one existing value, because every dropdown can now create a
+        // missing value in place.
+        const visibleAxes = HW_AXES.filter((axis) => axis !== 'hand' || handed);
         const autoSelected = !!h.variantId && h.source === 'set_template';
 
         return (
@@ -2298,7 +2507,6 @@ function HardwareStep({
               <span className="text-sm font-medium capitalize">{h.category.replace(/_/g, ' ')}</span>
               {h.required && <Badge variant="secondary" className="text-[10px]">required</Badge>}
               <Badge variant="outline" className="text-[10px]">{h.source === 'set_template' ? 'auto' : 'manual'}</Badge>
-              {h.reviewState === 'needs_review' && <Badge variant="secondary" className="text-[10px]">needs review</Badge>}
               <div className="flex items-center gap-1 ml-auto">
                 <span className="text-[10px] text-muted-foreground">Qty</span>
                 <Input type="number" min={0} value={h.quantity}
@@ -2311,53 +2519,89 @@ function HardwareStep({
               </div>
             </div>
 
-            {h.reviewState === 'needs_review' && (
-              <div className="rounded-md border border-amber-300/60 bg-amber-50/60 p-2 text-xs text-amber-900 dark:border-amber-800/50 dark:bg-amber-950/20 dark:text-amber-200">
-                <div className="font-medium">Review-staged catalog requirement</div>
-                <div>{h.stagedDescription || 'Catalog and price verification required.'}</div>
-              </div>
-            )}
-
-            {h.reviewState !== 'needs_review' && visibleAxes.length > 0 && (
+            {visibleAxes.length > 0 && (
               <div className="grid grid-cols-4 gap-2">
                 {visibleAxes.map((axis) => (
-                  <FilterSelect key={axis} label={axisLabel[axis]} value={axisValue[axis]}
-                    options={axisOptions(axis)} onChange={(v) => setAxis(axis, v)} />
+                  <FilterSelect key={axis} label={HW_AXIS_LABEL[axis]} value={axisValue[axis]}
+                    options={axisOptions(axis)} onChange={(v) => setAxis(axis, v)}
+                    onAddNew={() => beginAddNew({ kind: 'axis', category: h.category, axis })} />
                 ))}
               </div>
             )}
 
-            {h.reviewState !== 'needs_review' && neutralSpecs.length > 0 && (
-              <div className="space-y-1">
+            {addNewTarget?.kind === 'axis' && addNewTarget.category === h.category && (
+              <InlineAddHardwareOptionForm
+                target={addNewTarget}
+                form={addNewForm}
+                saving={addNewSaving}
+                error={addNewError}
+                onChange={setAddNewForm}
+                onSubmit={submitAddNew}
+                onCancel={cancelAddNew}
+              />
+            )}
+
+            <div className="space-y-1">
                 <Label className="text-xs text-muted-foreground">Specification</Label>
                 <Select
                   value={h.hardwareSpecId ?? ''}
-                  onValueChange={(v) => onUpdateHardware(h.category, {
-                    hardwareSpecId: v,
-                    variantId: null,
-                    source: 'manual',
-                  })}
+                  onValueChange={(v) => {
+                    if (v === ADD_NEW_HARDWARE_OPTION) {
+                      beginAddNew({ kind: 'specification', category: h.category });
+                      return;
+                    }
+                    onUpdateHardware(h.category, {
+                      hardwareSpecId: v,
+                      variantId: null,
+                      source: 'manual',
+                    });
+                  }}
                 >
                   <SelectTrigger className="h-8 text-sm">
                     <SelectValue placeholder="Complete the hardware specification…" />
                   </SelectTrigger>
                   <SelectContent>
+                    {h.hardwareSpecId && !hasSelectedSpecOption && (
+                      <SelectItem value={h.hardwareSpecId} className="text-sm">
+                        {liveSpecLabel}
+                      </SelectItem>
+                    )}
                     {neutralSpecs.map((v) => (
                       <SelectItem key={v.spec!.id} value={v.spec!.id} className="text-sm">
                         {hardwareSpecLabel(v)}
                       </SelectItem>
                     ))}
+                    <SelectItem value={ADD_NEW_HARDWARE_OPTION} className="text-sm font-medium text-primary">
+                      <span className="flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" /> Add New</span>
+                    </SelectItem>
                   </SelectContent>
                 </Select>
-              </div>
+            </div>
+
+            {addNewTarget?.kind === 'specification' && addNewTarget.category === h.category && (
+              <InlineAddHardwareOptionForm
+                target={addNewTarget}
+                form={addNewForm}
+                saving={addNewSaving}
+                error={addNewError}
+                onChange={setAddNewForm}
+                onSubmit={submitAddNew}
+                onCancel={cancelAddNew}
+              />
             )}
 
-            {h.reviewState !== 'needs_review' && <div className="space-y-1">
+            <div className="space-y-1">
               <Label className="text-xs text-muted-foreground flex items-center gap-1">
                 Manufacturer / vendor option
                 {autoSelected && <Badge variant="secondary" className="h-4 px-1 text-[9px] font-normal">auto-selected</Badge>}
               </Label>
-              <Select value={h.variantId ?? ''} onValueChange={(v) => onUpdateHardware(h.category, { variantId: v, source: 'manual' })}>
+              <Select value={h.variantId ?? ''} onValueChange={(v) => {
+                if (v === ADD_NEW_HARDWARE_OPTION) {
+                  beginAddNew({ kind: 'vendor', category: h.category });
+                  return;
+                }
+                onUpdateHardware(h.category, { variantId: v, source: 'manual' });
+              }}>
                 <SelectTrigger className="h-8 text-sm">
                   <SelectValue placeholder={
                     neutralSpecs.length > 0 && !h.hardwareSpecId
@@ -2373,9 +2617,24 @@ function HardwareStep({
                       {vendorOptionLabel(v)}
                     </SelectItem>
                   ))}
+                  <SelectItem value={ADD_NEW_HARDWARE_OPTION} className="text-sm font-medium text-primary">
+                    <span className="flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" /> Add New</span>
+                  </SelectItem>
                 </SelectContent>
               </Select>
-            </div>}
+            </div>
+
+            {addNewTarget?.kind === 'vendor' && addNewTarget.category === h.category && (
+              <InlineAddHardwareOptionForm
+                target={addNewTarget}
+                form={addNewForm}
+                saving={addNewSaving}
+                error={addNewError}
+                onChange={setAddNewForm}
+                onSubmit={submitAddNew}
+                onCancel={cancelAddNew}
+              />
+            )}
           </div>
         );
       })}
@@ -2385,23 +2644,20 @@ function HardwareStep({
 
 /** "Add hardware" picker — lists catalog categories not already on the opening. */
 function AddHardwareControl({
-  categories, existing, onAdd,
+  categories, existing, onAdd, onAddNew,
 }: {
   categories: HardwareCategoryOption[];
   existing: Set<string>;
   onAdd: (category: string) => void;
+  onAddNew: () => void;
 }) {
   const available = categories.filter((c) => !existing.has(c.category));
-  if (categories.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground italic">
-        No hardware catalog loaded — ingest and publish a hardware price book to select items.
-      </p>
-    );
-  }
   return (
     <div className="flex items-center gap-2">
-      <Select value="" onValueChange={(v) => v && onAdd(v)}>
+      <Select value="" onValueChange={(v) => {
+        if (v === ADD_NEW_HARDWARE_OPTION) onAddNew();
+        else if (v) onAdd(v);
+      }}>
         <SelectTrigger className="h-8 text-sm w-72">
           <span className="flex items-center gap-1.5 text-muted-foreground">
             <Plus className="h-3.5 w-3.5" /> Add hardware…
@@ -2409,7 +2665,9 @@ function AddHardwareControl({
         </SelectTrigger>
         <SelectContent>
           {available.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">All categories added</div>
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+              {categories.length === 0 ? 'No catalog categories yet' : 'All catalog categories added'}
+            </div>
           ) : (
             available.map((c) => (
               <SelectItem key={c.category} value={c.category} className="text-sm">
@@ -2417,23 +2675,134 @@ function AddHardwareControl({
               </SelectItem>
             ))
           )}
+          <SelectItem value={ADD_NEW_HARDWARE_OPTION} className="text-sm font-medium text-primary">
+            <span className="flex items-center gap-1.5"><Plus className="h-3.5 w-3.5" /> Add New</span>
+          </SelectItem>
         </SelectContent>
       </Select>
     </div>
   );
 }
 
-function FilterSelect({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (v: string) => void }) {
+function FilterSelect({
+  label, value, options, onChange, onAddNew,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+  onAddNew: () => void;
+}) {
   return (
     <div className="space-y-1">
       <Label className="text-[10px] text-muted-foreground">{label}</Label>
-      <Select value={value || '__any'} onValueChange={(v) => onChange(v === '__any' ? '' : v)}>
+      <Select value={value || '__any'} onValueChange={(v) => {
+        if (v === ADD_NEW_HARDWARE_OPTION) onAddNew();
+        else onChange(v === '__any' ? '' : v);
+      }}>
         <SelectTrigger className="h-7 text-xs"><SelectValue placeholder="Any" /></SelectTrigger>
         <SelectContent>
           <SelectItem value="__any" className="text-xs">Any</SelectItem>
           {options.map((o) => <SelectItem key={o} value={o} className="text-xs">{o}</SelectItem>)}
+          <SelectItem value={ADD_NEW_HARDWARE_OPTION} className="text-xs font-medium text-primary">
+            <span className="flex items-center gap-1"><Plus className="h-3 w-3" /> Add New</span>
+          </SelectItem>
         </SelectContent>
       </Select>
+    </div>
+  );
+}
+
+function InlineAddHardwareOptionForm({
+  target,
+  form,
+  saving,
+  error,
+  onChange,
+  onSubmit,
+  onCancel,
+}: {
+  target: AddNewHardwareTarget;
+  form: AddNewHardwareForm;
+  saving: boolean;
+  error: string | null;
+  onChange: (form: AddNewHardwareForm) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const title = target.kind === 'category'
+    ? 'Add hardware category'
+    : target.kind === 'defaultFinish'
+      ? 'Add default finish'
+      : target.kind === 'axis'
+        ? `Add ${HW_AXIS_LABEL[target.axis].toLowerCase()}`
+        : target.kind === 'specification'
+          ? 'Add specification'
+          : 'Add manufacturer / vendor option';
+  const placeholder = target.kind === 'category'
+    ? 'Category name'
+    : target.kind === 'defaultFinish'
+      ? 'New finish'
+      : target.kind === 'axis'
+        ? `New ${HW_AXIS_LABEL[target.axis].toLowerCase()}`
+        : 'Describe the hardware specification';
+
+  return (
+    <div className="rounded-md border border-primary/30 bg-primary/5 p-3 space-y-2">
+      <div>
+        <p className="text-xs font-semibold">{title}</p>
+        <p className="text-[11px] text-muted-foreground">
+          {target.kind === 'defaultFinish'
+            ? 'This finish will be staged beneath every hardware category on the opening and sent to manual pricing.'
+            : 'This addition will be kept on the estimate, staged in this category for catalog review, and sent to manual pricing.'}
+        </p>
+      </div>
+      {target.kind === 'vendor' ? (
+        <div className="grid grid-cols-3 gap-2">
+          <Input
+            autoFocus
+            className="h-8 text-xs"
+            placeholder="Manufacturer"
+            value={form.manufacturerName}
+            onChange={(event) => onChange({ ...form, manufacturerName: event.target.value })}
+          />
+          <Input
+            className="h-8 text-xs"
+            placeholder="Model"
+            value={form.model}
+            onChange={(event) => onChange({ ...form, model: event.target.value })}
+          />
+          <Input
+            className="h-8 text-xs"
+            placeholder="SKU"
+            value={form.sku}
+            onChange={(event) => onChange({ ...form, sku: event.target.value })}
+          />
+        </div>
+      ) : (
+        <Input
+          autoFocus
+          className="h-8 text-xs"
+          placeholder={placeholder}
+          value={form.value}
+          onChange={(event) => onChange({ ...form, value: event.target.value })}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+        />
+      )}
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" size="sm" className="h-7 text-xs" onClick={onCancel} disabled={saving}>
+          Cancel
+        </Button>
+        <Button type="button" size="sm" className="h-7 text-xs" onClick={onSubmit} disabled={saving}>
+          {saving && <Loader2 className="mr-1 h-3 w-3 animate-spin" />} Add
+        </Button>
+      </div>
     </div>
   );
 }
