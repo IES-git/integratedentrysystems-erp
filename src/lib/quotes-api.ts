@@ -3,6 +3,7 @@
  */
 
 import { supabase } from './supabase';
+import { roundPriceToNearestTen } from './pricing-rounding';
 import type { Quote, QuoteContextSnapshot, QuoteItem, QuoteLineSnapshot, QuoteWithItems, QuoteStatus, QuoteType, HardwareSubcategory } from '@/types';
 import type { EstimateItem, ItemField } from '@/types';
 
@@ -187,8 +188,8 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
       created_by_user_id: input.createdByUserId,
       quote_type: input.quoteType,
       markup_multiplier: input.markupMultiplier,
-      subtotal: input.subtotal,
-      total: input.total,
+      subtotal: roundPriceToNearestTen(input.subtotal),
+      total: roundPriceToNearestTen(input.total),
       currency: input.currency ?? 'USD',
       notes: input.notes ?? null,
       status: 'draft',
@@ -238,8 +239,8 @@ export async function createQuote(input: CreateQuoteInput): Promise<Quote> {
         canonical_code: item.canonicalCode ?? null,
         quantity: item.quantity,
         unit_cost: item.unitCost,
-        unit_price: item.unitPrice,
-        line_total: item.lineTotal,
+        unit_price: roundPriceToNearestTen(item.unitPrice),
+        line_total: roundPriceToNearestTen(item.lineTotal),
         sort_order: item.sortOrder ?? idx,
       }));
 
@@ -523,8 +524,8 @@ export async function updateQuote(
   if (updates.status !== undefined) row.status = updates.status;
   if (updates.notes !== undefined) row.notes = updates.notes;
   if (updates.markupMultiplier !== undefined) row.markup_multiplier = updates.markupMultiplier;
-  if (updates.subtotal !== undefined) row.subtotal = updates.subtotal;
-  if (updates.total !== undefined) row.total = updates.total;
+  if (updates.subtotal !== undefined) row.subtotal = roundPriceToNearestTen(updates.subtotal);
+  if (updates.total !== undefined) row.total = roundPriceToNearestTen(updates.total);
   if (updates.displayConfigJson !== undefined && supportsQuoteDisplayConfig) {
     row.display_config_json = updates.displayConfigJson;
   }
@@ -587,8 +588,8 @@ export async function updateQuoteWithItems(
         canonical_code: item.canonicalCode ?? null,
         quantity: item.quantity,
         unit_cost: item.unitCost,
-        unit_price: item.unitPrice,
-        line_total: item.lineTotal,
+        unit_price: roundPriceToNearestTen(item.unitPrice),
+        line_total: roundPriceToNearestTen(item.lineTotal),
         sort_order: item.sortOrder ?? idx,
       }));
 
@@ -815,8 +816,12 @@ function quoteLineSnapshotInputToRow(
     extended_net_price: snapshot.extendedNetPrice ?? null,
     sell_price: snapshot.sellPrice ?? null,
     manual_sell_price: snapshot.manualSellPrice ?? null,
-    unit_sell_price: snapshot.unitSellPrice ?? null,
-    line_total: snapshot.lineTotal ?? null,
+    unit_sell_price: snapshot.unitSellPrice == null
+      ? null
+      : roundPriceToNearestTen(snapshot.unitSellPrice),
+    line_total: snapshot.lineTotal == null
+      ? null
+      : roundPriceToNearestTen(snapshot.lineTotal),
     price_status: snapshot.priceStatus ?? null,
     review_status: snapshot.reviewStatus ?? null,
     sort_order: snapshot.sortOrder ?? idx,

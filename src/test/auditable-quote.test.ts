@@ -191,7 +191,7 @@ describe('completeness validation', () => {
     ]);
     const report = validateQuoteCompleteness(quote, { skipReconciliation: true });
 
-    expect(quote.sellTotal).toBe(475);
+    expect(quote.sellTotal).toBe(480);
     expect(quote.exceptionCount).toBe(0);
     expect(report.canFinalize).toBe(true);
   });

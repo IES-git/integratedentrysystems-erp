@@ -20,6 +20,7 @@ import type {
   RuleEntityType,
   ServiceScopeType,
 } from '@/types';
+import { roundPriceToNearestTen } from '@/lib/pricing-rounding';
 
 /** The minimal line shape the auditable quote groups + totals. */
 export interface QuoteLine {
@@ -328,13 +329,32 @@ function withManualSellPrice(line: QuoteLine): QuoteLine {
   };
 }
 
+/** Keeps displayed estimate sell prices aligned with the customer pricing rule. */
+function withRoundedSellPrice(line: QuoteLine): QuoteLine {
+  if (line.sellPrice === null) return line;
+
+  const sellPrice = roundPriceToNearestTen(line.sellPrice);
+  const grossMargin = line.extendedNetPrice != null
+    ? sellPrice - line.extendedNetPrice
+    : null;
+
+  return {
+    ...line,
+    sellPrice,
+    grossMargin,
+    grossMarginPct: grossMargin != null && sellPrice > 0
+      ? (grossMargin / sellPrice) * 100
+      : null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Adapters
 // ---------------------------------------------------------------------------
 
 /** Adapts a live `EngineLine` (Phase 3) to the auditable `QuoteLine` shape. */
 export function fromEngineLine(line: EngineLine): QuoteLine {
-  return withManualSellPrice({
+  return withRoundedSellPrice(withManualSellPrice({
     componentId: line.componentId,
     entityType: line.entityType,
     lineType: line.lineType,
@@ -359,12 +379,12 @@ export function fromEngineLine(line: EngineLine): QuoteLine {
     exceptionMessage: line.exceptionMessage,
     manualSellPrice: line.manualSellPrice ?? null,
     isManualOverride: line.isManualOverride ?? null,
-  });
+  }));
 }
 
 /** Adapts a persisted `estimate_line` row to the auditable `QuoteLine` shape. */
 export function fromEstimateLine(line: EstimateLine): QuoteLine {
-  return withManualSellPrice({
+  return withRoundedSellPrice(withManualSellPrice({
     componentId: line.componentId,
     entityType: line.entityType,
     lineType: line.lineType,
@@ -389,7 +409,7 @@ export function fromEstimateLine(line: EstimateLine): QuoteLine {
     exceptionMessage: line.exceptionMessage,
     manualSellPrice: line.manualSellPrice ?? null,
     isManualOverride: line.isManualOverride ?? null,
-  });
+  }));
 }
 
 export function buildAuditableQuoteFromEngine(lines: EngineLine[]): AuditableQuote {

@@ -7,6 +7,7 @@
  */
 
 import { supabase } from '@/lib/supabase';
+import { roundOptionalPriceToNearestTen } from '@/lib/pricing-rounding';
 import type { EstimateLine, EstimateLineType, EstimateLinePriceStatus, RuleEntityType } from '@/types';
 
 function num(v: unknown): number | null {
@@ -79,11 +80,12 @@ export async function updateEstimateLineOverride(
   lineId: string,
   manualSellPrice: number | null,
 ): Promise<void> {
+  const roundedManualSellPrice = roundOptionalPriceToNearestTen(manualSellPrice);
   const { error } = await supabase
     .from('estimate_line')
     .update({
-      manual_sell_price: manualSellPrice,
-      is_manual_override: manualSellPrice !== null,
+      manual_sell_price: roundedManualSellPrice,
+      is_manual_override: roundedManualSellPrice !== null,
     })
     .eq('id', lineId);
   if (error) throw new Error(`Failed to update line override: ${error.message}`);

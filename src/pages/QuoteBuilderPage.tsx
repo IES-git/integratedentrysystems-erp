@@ -58,6 +58,7 @@ import {
   operationalSnapshotKey,
 } from '@/lib/operational-outputs';
 import { getMarkupOverrideMatch } from '@/lib/customer-markups';
+import { roundPriceToNearestTen } from '@/lib/pricing-rounding';
 import {
   createDefaultQuoteDisplayConfig,
   applyCompanyQuoteDefaults,
@@ -903,8 +904,13 @@ function EngineOpeningsPanel({
         const isOpen = expanded[opening.id] !== false;
         const openingLines = linesByOpening.get(opening.id) ?? [];
         const openingItems = lineItems.filter((li) => li.estimateItem.openingId === opening.id);
-        const openingUnitSubtotal = openingItems.reduce((s, li) => s + li.unitPrice * li.estimateItem.quantity, 0);
-        const openingTotal = openingUnitSubtotal * opening.quantity;
+        const openingUnitSubtotal = roundPriceToNearestTen(
+          openingItems.reduce(
+            (sum, item) => sum + roundPriceToNearestTen(item.unitPrice * item.estimateItem.quantity),
+            0,
+          ),
+        );
+        const openingTotal = roundPriceToNearestTen(openingUnitSubtotal * opening.quantity);
         const multiplier = itemMultipliers[opening.id] ?? companyDefaultMultiplier;
         const isOverridden = multiplier !== companyDefaultMultiplier;
         const specSummary = buildOpeningSpecSummary(openingLines);
@@ -1558,13 +1564,13 @@ export default function QuoteBuilderPage() {
         };
         const override = getMarkupOverrideMatch(bulkOverrides, syntheticItem);
         const multiplier = itemMultipliers[lineMultiplierKey] ?? override?.value ?? openingMultiplier;
-        const unitPrice = parseFloat((unitNetCost * multiplier).toFixed(2));
+        const unitPrice = roundPriceToNearestTen(unitNetCost * multiplier);
         result.push({
           estimateItem: syntheticItem,
           unitCost: unitNetCost,
           multiplier,
           unitPrice,
-          lineTotal: parseFloat((unitPrice * lineQty * opening.quantity).toFixed(2)),
+          lineTotal: roundPriceToNearestTen(unitPrice * lineQty * opening.quantity),
         });
       }
     }
@@ -1574,13 +1580,13 @@ export default function QuoteBuilderPage() {
       if (ei.openingId && engineOpeningIds.has(ei.openingId)) continue;
       const unitCost = ei.unitPrice ?? 0;
       const multiplier = itemMultipliers[ei.id] ?? companyDefaultMultiplier;
-      const unitPrice = parseFloat((unitCost * multiplier).toFixed(2));
+      const unitPrice = roundPriceToNearestTen(unitCost * multiplier);
       result.push({
         estimateItem: ei,
         unitCost,
         multiplier,
         unitPrice,
-        lineTotal: parseFloat((ei.quantity * unitPrice).toFixed(2)),
+        lineTotal: roundPriceToNearestTen(ei.quantity * unitPrice),
       });
     }
 
@@ -1684,7 +1690,7 @@ export default function QuoteBuilderPage() {
   }, [estimateId, quotableOpenings, openings, toast]);
 
   const subtotal = useMemo(
-    () => lineItems.reduce((sum, li) => sum + li.lineTotal, 0),
+    () => roundPriceToNearestTen(lineItems.reduce((sum, li) => sum + li.lineTotal, 0)),
     [lineItems]
   );
 
@@ -1710,7 +1716,7 @@ export default function QuoteBuilderPage() {
         const isEngLine = li.estimateItem.isEngineLineDetail === true;
         const openingQty = li.estimateItem.openingQuantity ?? 1;
         const saveQty = isEngLine ? li.estimateItem.quantity * openingQty : li.estimateItem.quantity;
-        const saveLineTotal = parseFloat((li.unitPrice * saveQty).toFixed(2));
+        const saveLineTotal = roundPriceToNearestTen(li.unitPrice * saveQty);
         return {
           estimateItemId: isEngLine ? null : li.estimateItem.id,
           displayKey: getLineItemDisplayKey(li.estimateItem),
@@ -1806,7 +1812,7 @@ export default function QuoteBuilderPage() {
         const isEngLine = item.isEngineLineDetail === true;
         const openingQty = item.openingQuantity ?? 1;
         const quoteQuantity = isEngLine ? item.quantity * openingQty : item.quantity;
-        const lineTotal = parseFloat((li.unitPrice * quoteQuantity).toFixed(2));
+        const lineTotal = roundPriceToNearestTen(li.unitPrice * quoteQuantity);
         const displayKey = getLineItemDisplayKey(item);
         const opening = openings.find((candidate) => candidate.id === (item.engineLine?.openingId ?? item.openingId));
         const openingOrderData = getOpeningOrderData(opening);
@@ -2112,7 +2118,7 @@ export default function QuoteBuilderPage() {
         quantity: saveQty,
         unitCost: li.unitCost,
         unitPrice: li.unitPrice,
-        lineTotal: parseFloat((li.unitPrice * saveQty).toFixed(2)),
+        lineTotal: roundPriceToNearestTen(li.unitPrice * saveQty),
         sortOrder: idx,
         createdAt: now,
       };
@@ -2184,7 +2190,7 @@ export default function QuoteBuilderPage() {
         quantity: saveQty,
         unitCost: li.unitCost,
         unitPrice: li.unitPrice,
-        lineTotal: parseFloat((li.unitPrice * saveQty).toFixed(2)),
+        lineTotal: roundPriceToNearestTen(li.unitPrice * saveQty),
         sortOrder: idx,
         createdAt: now,
       };
@@ -2259,7 +2265,7 @@ export default function QuoteBuilderPage() {
           label: li.estimateItem.itemLabel,
           quantity,
           unitPrice: li.unitPrice,
-          lineTotal: parseFloat((li.unitPrice * quantity).toFixed(2)),
+          lineTotal: roundPriceToNearestTen(li.unitPrice * quantity),
           canonicalCode: li.estimateItem.canonicalCode ?? null,
           category: rawCategory ? LAYER_LABELS[rawCategory] ?? rawCategory : null,
         };
@@ -2833,7 +2839,7 @@ export default function QuoteBuilderPage() {
                           Markup
                           <MultiplierBadge multiplier={parseFloat(effectiveMarkupMultiplier.toFixed(2))} />
                         </span>
-                        <span>+{fmt(subtotal - costSubtotal)}</span>
+                        <span>+{fmt(roundPriceToNearestTen(subtotal - costSubtotal))}</span>
                       </div>
                     )}
                   </>

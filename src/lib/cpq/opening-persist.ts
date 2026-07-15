@@ -16,7 +16,10 @@ import {
   addEstimateItem,
   addItemField,
   deleteEstimateItem,
+  getEstimateOpenings,
 } from '@/lib/estimates-api';
+import { loadEstimateLinesByOpening } from '@/lib/cpq/estimate-lines-api';
+import { estimateGrandTotal } from '@/lib/cpq/opening-totals';
 import { priceOpening, type EngineOptions } from '@/lib/pricing';
 import {
   buildNormalizedSpec,
@@ -576,14 +579,21 @@ async function loadEstimatePricingPin(estimateId: string): Promise<{ priceBookId
 
 async function syncEstimateTotal(estimateId: string): Promise<void> {
   try {
-    const { data } = await supabase
-      .from('estimate_line')
-      .select('sell_price')
-      .eq('estimate_id', estimateId)
-      .is('included_or_suppressed_by', null)
-      .neq('line_type', 'INCLUDED');
+    const [openings, linesByOpening, { data: estimate }] = await Promise.all([
+      getEstimateOpenings(estimateId),
+      loadEstimateLinesByOpening(estimateId),
+      supabase
+      .from('estimates')
+      .select('sell_adjustment_pct')
+      .eq('id', estimateId)
+      .maybeSingle(),
+    ]);
 
-    const total = (data ?? []).reduce((s, r) => s + ((r.sell_price as number | null) ?? 0), 0);
+    const total = estimateGrandTotal(
+      openings,
+      linesByOpening,
+      (estimate?.sell_adjustment_pct as number | null | undefined) ?? null,
+    );
     await supabase.from('estimates').update({ total_price: total }).eq('id', estimateId);
   } catch {
     // Non-fatal — estimates list will show '--' until the next save.

@@ -29,6 +29,7 @@ import type {
   EstimateOpeningWithItems,
   VendorOverride,
 } from '@/types';
+import { roundOptionalPriceToNearestTen, roundPriceToNearestTen } from '@/lib/pricing-rounding';
 
 export interface CpqPricedOpening {
   opening: EstimateOpeningWithItems;
@@ -63,9 +64,15 @@ export interface PriceEstimateOptions {
 }
 
 function openingSubtotal(opening: EstimateOpeningWithItems): number {
-  const itemsTotal = opening.items.reduce((s, i: EstimateItem) => s + (i.unitPrice ?? 0) * i.quantity, 0);
-  const hardwareTotal = (opening.hardware ?? []).reduce((s, h: EstimateItem) => s + (h.unitPrice ?? 0) * h.quantity, 0);
-  return itemsTotal + hardwareTotal;
+  const extendedPrice = (item: EstimateItem) => roundPriceToNearestTen(
+    (roundOptionalPriceToNearestTen(item.unitPrice) ?? 0) * item.quantity,
+  );
+  const itemsTotal = opening.items.reduce((sum, item) => sum + extendedPrice(item), 0);
+  const hardwareTotal = (opening.hardware ?? []).reduce(
+    (sum, item) => sum + extendedPrice(item),
+    0,
+  );
+  return roundPriceToNearestTen(itemsTotal + hardwareTotal);
 }
 
 function unpriced(opening: EstimateOpeningWithItems): number {
@@ -142,7 +149,7 @@ export async function priceEstimate(
     return {
       opening,
       subtotal,
-      total: subtotal * opening.quantity,
+      total: roundPriceToNearestTen(subtotal * opening.quantity),
       unpricedCount: unpriced(opening),
       violations,
     };
@@ -154,7 +161,7 @@ export async function priceEstimate(
 
   return {
     openings: pricedOpenings,
-    grandTotal: pricedOpenings.reduce((s, o) => s + o.total, 0),
+    grandTotal: roundPriceToNearestTen(pricedOpenings.reduce((s, o) => s + o.total, 0)),
     violations,
     errorCount,
     warningCount,
@@ -233,13 +240,16 @@ export async function compareOpeningVendors(
       for (const [itemId, result] of priceMap.entries()) {
         const qty = qtyById.get(itemId) ?? 1;
         const matched = result.status === 'matched' && result.totalUnitPrice !== null;
-        if (matched) subtotal += (result.totalUnitPrice ?? 0) * qty;
+        const roundedUnitPrice = roundOptionalPriceToNearestTen(result.totalUnitPrice);
+        if (matched) {
+          subtotal += roundPriceToNearestTen((roundedUnitPrice ?? 0) * qty);
+        }
         else unpricedCount++;
         itemResults.push({
           itemId,
           itemLabel: labelById.get(itemId) ?? itemId,
           categoryKey: catById.get(itemId) ?? 'unknown',
-          unitPrice: result.totalUnitPrice,
+          unitPrice: roundedUnitPrice,
           matched,
         });
       }
@@ -247,7 +257,7 @@ export async function compareOpeningVendors(
       return {
         scenarioId: scenario.id,
         label: scenario.label,
-        total: subtotal * opening.quantity,
+        total: roundPriceToNearestTen(subtotal * opening.quantity),
         unpricedCount,
         items: itemResults,
       };

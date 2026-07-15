@@ -10,6 +10,7 @@
  */
 
 import type { EstimateOpeningWithItems, EstimateLine, EstimateLinePriceStatus } from '@/types';
+import { roundPriceToNearestTen } from '@/lib/pricing-rounding';
 
 const EXCEPTION_STATUSES = new Set<EstimateLinePriceStatus>([
   'INVALID',
@@ -23,7 +24,9 @@ const EXCEPTION_STATUSES = new Set<EstimateLinePriceStatus>([
 
 /** Returns the best sell price for a single engine line (manual override first). */
 export function lineSellPrice(line: EstimateLine): number {
-  return (line as EstimateLineWithOverride).manualSellPrice ?? line.sellPrice ?? 0;
+  return roundPriceToNearestTen(
+    (line as EstimateLineWithOverride).manualSellPrice ?? line.sellPrice ?? 0,
+  );
 }
 
 // Augmented type for the manual override columns added in Phase 4.
@@ -62,8 +65,13 @@ export function engineSellSubtotal(lines: EstimateLine[]): number | null {
 // ---------------------------------------------------------------------------
 
 function legacyItemsTotal(opening: EstimateOpeningWithItems): number {
-  const itemsTotal = opening.items.reduce((s, i) => s + (i.unitPrice ?? 0) * i.quantity, 0);
-  const hardwareTotal = (opening.hardware ?? []).reduce((s, h) => s + (h.unitPrice ?? 0) * h.quantity, 0);
+  const extendedPrice = (unitPrice: number | null, quantity: number) =>
+    roundPriceToNearestTen(roundPriceToNearestTen(unitPrice ?? 0) * quantity);
+  const itemsTotal = opening.items.reduce((s, i) => s + extendedPrice(i.unitPrice, i.quantity), 0);
+  const hardwareTotal = (opening.hardware ?? []).reduce(
+    (s, h) => s + extendedPrice(h.unitPrice, h.quantity),
+    0,
+  );
   return itemsTotal + hardwareTotal;
 }
 
@@ -80,7 +88,9 @@ export function openingTotalWithLines(
   opening: EstimateOpeningWithItems,
   engineLines: EstimateLine[],
 ): number {
-  return openingUnitSubtotal(opening, engineLines) * opening.quantity;
+  return roundPriceToNearestTen(
+    openingUnitSubtotal(opening, engineLines) * opening.quantity,
+  );
 }
 
 /** True when there is at least one positive price value for this opening. */
@@ -116,9 +126,9 @@ export function estimateGrandTotal(
     return sum + openingTotalWithLines(o, lines);
   }, 0);
   if (adjustmentPct != null && adjustmentPct !== 0) {
-    return base * (1 + adjustmentPct / 100);
+    return roundPriceToNearestTen(base * (1 + adjustmentPct / 100));
   }
-  return base;
+  return roundPriceToNearestTen(base);
 }
 
 /** True when at least one opening in the estimate has a price. */

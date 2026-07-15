@@ -52,6 +52,7 @@ import { getCompany, listContacts } from '@/lib/companies-api';
 import { getEstimateWithItems, getEstimateFileUrl } from '@/lib/estimates-api';
 import { generateQuoteSummary } from '@/lib/gemini-api';
 import { groupHardwareBySubcategory } from '@/lib/hardware-utils';
+import { roundPriceToNearestTen } from '@/lib/pricing-rounding';
 import {
   buildOperationalOutputRows,
   groupOperationalRowsByManufacturer,
@@ -1024,7 +1025,7 @@ export default function QuoteDetailPage() {
                   <span className="text-muted-foreground">
                     Markup ({quote.markupMultiplier}×)
                   </span>
-                  <span>{fmt(subtotal * (quote.markupMultiplier - 1), quote.currency)}</span>
+                  <span>{fmt(roundPriceToNearestTen(subtotal * (quote.markupMultiplier - 1)), quote.currency)}</span>
                 </div>
                 <Separator className="my-2" />
                 <div className="flex justify-between text-base font-semibold">

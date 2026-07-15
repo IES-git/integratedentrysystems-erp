@@ -5,6 +5,7 @@
  */
 
 import { supabase } from './supabase';
+import { roundOptionalPriceToNearestTen } from './pricing-rounding';
 import type {
   Estimate,
   EstimateItem,
@@ -377,7 +378,7 @@ export async function updateEstimate(
   if (updates.extractedCustomerPhone !== undefined)
     row.extracted_customer_phone = updates.extractedCustomerPhone;
   if (updates.totalPrice !== undefined)
-    row.total_price = updates.totalPrice;
+    row.total_price = roundOptionalPriceToNearestTen(updates.totalPrice);
   if (updates.jobName !== undefined) row.job_name = updates.jobName;
   if (updates.jobLocation !== undefined) row.job_location = updates.jobLocation;
   if (updates.jobNumber !== undefined) row.job_number = updates.jobNumber;
@@ -421,7 +422,9 @@ export async function updateEstimateItem(
   if (updates.canonicalCode !== undefined)
     row.canonical_code = updates.canonicalCode;
   if (updates.quantity !== undefined) row.quantity = updates.quantity;
-  if (updates.unitPrice !== undefined) row.unit_price = updates.unitPrice;
+  if (updates.unitPrice !== undefined) {
+    row.unit_price = roundOptionalPriceToNearestTen(updates.unitPrice);
+  }
   if (updates.sortOrder !== undefined) row.sort_order = updates.sortOrder;
   if (updates.openingId !== undefined) row.opening_id = updates.openingId;
   if (updates.manufacturerId !== undefined) row.manufacturer_id = updates.manufacturerId;
@@ -520,7 +523,7 @@ export async function addEstimateItem(
       subcategory: item.subcategory ?? null,
       item_type: item.itemType ?? null,
       manufacturer_id: item.manufacturerId ?? null,
-      unit_price: item.unitPrice ?? null,
+      unit_price: roundOptionalPriceToNearestTen(item.unitPrice),
       price_source: item.priceSource ?? null,
       price_lookup_metadata: item.priceLookupMetadata ?? null,
     })
@@ -599,7 +602,7 @@ export async function duplicateEstimate(
       extracted_customer_email: estimate.extractedCustomerEmail,
       extracted_customer_phone: estimate.extractedCustomerPhone,
       customer_confidence: estimate.customerConfidence,
-      total_price: estimate.totalPrice,
+      total_price: roundOptionalPriceToNearestTen(estimate.totalPrice),
       job_name: estimate.jobName,
       job_location: estimate.jobLocation,
       job_number: estimate.jobNumber,
@@ -636,7 +639,7 @@ export async function duplicateEstimate(
           item_label: item.itemLabel,
           canonical_code: item.canonicalCode,
           quantity: item.quantity,
-          unit_price: item.unitPrice,
+          unit_price: roundOptionalPriceToNearestTen(item.unitPrice),
           sort_order: item.sortOrder,
         })
         .select('id')
@@ -917,7 +920,7 @@ export async function copyOpeningToEstimate(
         item_label: item.item_label,
         canonical_code: item.canonical_code,
         quantity: item.quantity,
-        unit_price: item.unit_price,
+        unit_price: roundOptionalPriceToNearestTen(item.unit_price as number | null),
         sort_order: item.sort_order,
         manufacturer_id: item.manufacturer_id,
         subcategory: item.subcategory ?? null,
@@ -959,7 +962,7 @@ export async function copyOpeningToEstimate(
         item_label: item.item_label,
         canonical_code: item.canonical_code,
         quantity: item.quantity,
-        unit_price: item.unit_price,
+        unit_price: roundOptionalPriceToNearestTen(item.unit_price as number | null),
         sort_order: item.sort_order,
         manufacturer_id: item.manufacturer_id,
         subcategory: item.subcategory ?? null,
@@ -2352,7 +2355,7 @@ function mapEstimateRow(row: any): Estimate {
     extractedCustomerEmail: row.extracted_customer_email,
     extractedCustomerPhone: row.extracted_customer_phone,
     customerConfidence: row.customer_confidence,
-    totalPrice: row.total_price,
+    totalPrice: roundOptionalPriceToNearestTen(row.total_price as number | null),
     jobName: row.job_name ?? null,
     jobLocation: row.job_location ?? null,
     jobNumber: row.job_number ?? null,
@@ -2387,7 +2390,7 @@ function mapEstimateItemRow(row: any): EstimateItem {
     itemLabel: row.item_label,
     canonicalCode: row.canonical_code,
     quantity: row.quantity,
-    unitPrice: row.unit_price,
+    unitPrice: roundOptionalPriceToNearestTen(row.unit_price as number | null),
     sortOrder: row.sort_order,
     manufacturerId: row.manufacturer_id ?? null,
     openingId: row.opening_id ?? null,

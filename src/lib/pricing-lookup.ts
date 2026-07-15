@@ -27,6 +27,7 @@
  */
 
 import { supabase } from './supabase';
+import { roundOptionalPriceToNearestTen } from './pricing-rounding';
 import { enqueueException, clearPendingException } from './pricing-exceptions-api';
 import { normalizeGauge, extractGaugeTokens, normalizeDepth, extractDepthTokens, normalizeSpecValue } from './pricing-normalize';
 import { dimensionMatches, parseDoorDimension } from '@/components/pricing/dimension-utils';
@@ -1071,7 +1072,7 @@ export async function refreshEstimatePricing(estimateId: string): Promise<{
       const { error: updateErr } = await supabase
         .from('estimate_items')
         .update({
-          unit_price: result.totalUnitPrice,
+          unit_price: roundOptionalPriceToNearestTen(result.totalUnitPrice),
           price_source: result.status === 'matched' ? 'lookup' : null,
           price_lookup_metadata: result.metadata,
           manufacturer_id: result.vendorId ?? rawItem.manufacturer_id,
@@ -1151,7 +1152,7 @@ export async function resolveAndPersistItemPrice(
     await supabase
       .from('estimate_items')
       .update({
-        unit_price: result.totalUnitPrice,
+        unit_price: roundOptionalPriceToNearestTen(result.totalUnitPrice),
         price_source: result.status === 'matched' ? 'lookup' : null,
         price_lookup_metadata: result.metadata,
       })

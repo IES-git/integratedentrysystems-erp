@@ -32,6 +32,7 @@ import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { roundOptionalPriceToNearestTen, roundPriceToNearestTen } from '@/lib/pricing-rounding';
 import { supabase } from '@/lib/supabase';
 import {
   getEstimateOpenings,
@@ -134,7 +135,7 @@ function ItemPricingRow({ item, manufacturerName, onPriceChange }: ItemPricingRo
   const handleCommit = async () => {
     const parsed = parseFloat(inputValue);
     if (isNaN(parsed) && inputValue.trim() !== '') return;
-    const newPrice = inputValue.trim() === '' ? null : parsed;
+    const newPrice = inputValue.trim() === '' ? null : roundPriceToNearestTen(parsed);
     setSaving(true);
     try {
       await onPriceChange(item.id, newPrice, newPrice !== null);
@@ -256,9 +257,10 @@ function EngineLineOverrideRow({ line, onOverrideChange }: EngineLineOverrideRow
     const trimmed = inputValue.trim();
     const parsed = trimmed === '' ? null : parseFloat(trimmed);
     if (parsed !== null && isNaN(parsed)) { setEditing(false); return; }
+    const roundedPrice = roundOptionalPriceToNearestTen(parsed);
     setSaving(true);
     try {
-      await onOverrideChange(line.id, parsed);
+      await onOverrideChange(line.id, roundedPrice);
     } finally {
       setSaving(false);
       setEditing(false);
@@ -434,7 +436,9 @@ function EngineOpeningCard({
   const quote = buildAuditableQuoteFromEstimateLines(engineLines);
   const completeness = validateQuoteCompleteness(quote);
   const openingTotal = openingTotalWithLines(opening, engineLines);
-  const adjustedTotal = sellAdjustmentPct ? openingTotal * (1 + sellAdjustmentPct / 100) : openingTotal;
+  const adjustedTotal = sellAdjustmentPct
+    ? roundPriceToNearestTen(openingTotal * (1 + sellAdjustmentPct / 100))
+    : openingTotal;
 
   const handleQtyStep = async (e: React.MouseEvent, delta: number) => {
     e.stopPropagation();
@@ -688,14 +692,15 @@ export function ReviewStep({
   };
 
   const handlePriceChange = async (itemId: string, price: number | null, isManual: boolean) => {
+    const roundedPrice = roundOptionalPriceToNearestTen(price);
     await updateEstimateItem(itemId, {
-      unitPrice: price,
+      unitPrice: roundedPrice,
       priceSource: isManual ? 'manual' : null,
       isManualPriceOverride: isManual,
     });
     const applyUpdate = (i: EstimateItem) =>
       i.id === itemId
-        ? { ...i, unitPrice: price, priceSource: isManual ? ('manual' as const) : null, isManualPriceOverride: isManual }
+        ? { ...i, unitPrice: roundedPrice, priceSource: isManual ? ('manual' as const) : null, isManualPriceOverride: isManual }
         : i;
     setOpenings((prev) =>
       prev.map((o) => ({
@@ -707,13 +712,14 @@ export function ReviewStep({
   };
 
   const handleLineOverride = async (lineId: string, price: number | null) => {
-    await updateEstimateLineOverride(lineId, price);
+    const roundedPrice = roundOptionalPriceToNearestTen(price);
+    await updateEstimateLineOverride(lineId, roundedPrice);
     setLinesByOpening((prev) => {
       const next = new Map(prev);
       for (const [key, lines] of next.entries()) {
         const updated = lines.map((l) =>
           l.id === lineId
-            ? { ...l, manualSellPrice: price, isManualOverride: price !== null }
+            ? { ...l, manualSellPrice: roundedPrice, isManualOverride: roundedPrice !== null }
             : l,
         );
         next.set(key, updated);

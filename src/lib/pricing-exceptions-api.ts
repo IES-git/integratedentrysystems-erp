@@ -8,6 +8,7 @@
  */
 
 import { supabase } from './supabase';
+import { roundPriceToNearestTen } from './pricing-rounding';
 import type {
   PriceLookupStatus,
   PricingException,
@@ -137,7 +138,11 @@ export async function approveExceptionWithPrice(
   const { data: userData } = await supabase.auth.getUser();
   const { error: itemErr } = await supabase
     .from('estimate_items')
-    .update({ unit_price: price, price_source: 'manual', is_manual_price_override: true })
+    .update({
+      unit_price: roundPriceToNearestTen(price),
+      price_source: 'manual',
+      is_manual_price_override: true,
+    })
     .eq('id', estimateItemId);
   if (itemErr) throw new Error(itemErr.message);
 
